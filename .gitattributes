@@ -1,0 +1,6 @@
+# 所有文本文件统一以 LF 存储
+* text=auto eol=lf
+
+# Windows 特定文件保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf

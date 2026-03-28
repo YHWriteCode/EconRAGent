@@ -17,6 +17,7 @@ from lightrag_fork.kg.lock_backend import (
     LockBackend,
     LockLease,
     LockLostError,
+    LocalLockBackend,
 )
 
 DEBUG_LOCKS = False
@@ -1105,9 +1106,9 @@ def configure_lock_backend(backend: str, **kwargs):
     """Configure lock backend used by get_storage_keyed_lock."""
     global _lock_backend_name, _lock_backend_kwargs, _lock_backend
     configured_backend = (backend or "redis").strip().lower()
-    if configured_backend != "redis":
+    if configured_backend not in {"redis", "local"}:
         raise RuntimeError(
-            f"Only Redis lock backend is supported, got: {configured_backend}"
+            f"Unsupported lock backend: {configured_backend}. Expected 'redis' or 'local'"
         )
     _lock_backend_name = configured_backend
     _lock_backend_kwargs = dict(kwargs)
@@ -1137,6 +1138,12 @@ def _read_optional_int_env(var_name: str, default: int | None) -> int | None:
     return parsed
 
 
+def _build_local_lock_backend() -> LocalLockBackend:
+    if _storage_keyed_lock is None:
+        raise RuntimeError("Shared-Data is not initialized")
+    return LocalLockBackend(local_context_factory=_storage_keyed_lock)
+
+
 def get_lock_backend() -> LockBackend:
     """Return current lock backend instance."""
     global _lock_backend
@@ -1147,9 +1154,13 @@ def get_lock_backend() -> LockBackend:
         _lock_backend_name or os.getenv("LIGHTRAG_LOCK_BACKEND", "redis")
     ).strip().lower()
 
+    if backend_name == "local":
+        _lock_backend = _build_local_lock_backend()
+        logger.info("Using local lock backend")
+        return _lock_backend
     if backend_name != "redis":
         raise RuntimeError(
-            f"Only Redis lock backend is supported, got LIGHTRAG_LOCK_BACKEND={backend_name}"
+            f"Unsupported LIGHTRAG_LOCK_BACKEND={backend_name}, expected 'redis' or 'local'"
         )
 
     from lightrag_fork.kg.redis_lock_backend import RedisLockBackend
@@ -1164,9 +1175,9 @@ def get_lock_backend() -> LockBackend:
         _lock_backend_kwargs.get("fail_mode")
         or os.getenv("LIGHTRAG_LOCK_FAIL_MODE", "strict")
     ).strip().lower()
-    if fail_mode != "strict":
+    if fail_mode not in {"strict", "fallback_local"}:
         raise RuntimeError(
-            f"Only strict fail mode is supported for Redis lock backend, got: {fail_mode}"
+            f"Unsupported Redis lock fail mode: {fail_mode}. Expected 'strict' or 'fallback_local'"
         )
 
     key_prefix = _lock_backend_kwargs.get("key_prefix") or os.getenv(
@@ -1184,12 +1195,18 @@ def get_lock_backend() -> LockBackend:
     _lock_backend = RedisLockBackend(
         redis_url=redis_url,
         key_prefix=key_prefix,
-        fail_mode="strict",
-        fallback_backend=None,
+        fail_mode=fail_mode,
+        fallback_backend=(
+            _build_local_lock_backend() if fail_mode == "fallback_local" else None
+        ),
         renew_interval_s=renew_interval_s,
         max_retries=max_retries,
     )
-    logger.info("Using Redis lock backend (fail_mode=strict, key_prefix=%s)", key_prefix)
+    logger.info(
+        "Using Redis lock backend (fail_mode=%s, key_prefix=%s)",
+        fail_mode,
+        key_prefix,
+    )
     return _lock_backend
 
 
@@ -1530,9 +1547,9 @@ def initialize_share_data(workers: int = 1):
     _lock_backend = None
     if _lock_backend_name is None:
         _lock_backend_name = os.getenv("LIGHTRAG_LOCK_BACKEND", "redis").strip().lower()
-    if _lock_backend_name != "redis":
+    if _lock_backend_name not in {"redis", "local"}:
         raise RuntimeError(
-            f"Only Redis lock backend is supported, got LIGHTRAG_LOCK_BACKEND={_lock_backend_name}"
+            f"Unsupported LIGHTRAG_LOCK_BACKEND={_lock_backend_name}, expected 'redis' or 'local'"
         )
     if _lock_backend_kwargs is None:
         _lock_backend_kwargs = {}

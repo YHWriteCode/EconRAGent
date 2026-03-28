@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import socket
 import sys
@@ -16,10 +17,20 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-REPO_PARENT = REPO_ROOT.parent
-if str(REPO_PARENT) not in sys.path:
-    sys.path.insert(0, str(REPO_PARENT))
+def _find_project_root() -> Path:
+    current = Path(__file__).resolve()
+    for candidate in (current.parent, *current.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    return current.parents[3]
+
+
+REPO_ROOT = _find_project_root()
+E2E_DIR = Path(__file__).resolve().parent
+RAG_STORAGE_DIR = E2E_DIR / "rag_storage"
+LLM_LOG_PATH = E2E_DIR / "LLM_log.md"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 TEST_TEXT_ECON = (
@@ -45,6 +56,32 @@ TEST_TEXT_C = (
 TEST_TEXT_DEL = (
     "D公司属于可选消费板块，短期受促销季与库存去化影响。"
     "管理层预计下一季度毛利率边际修复。"
+)
+
+
+TEST_TEXT_ECON = (
+    "2025年下半年，国内宏观政策继续强调稳增长与高质量发展并重。"
+    "某新能源设备企业在制造业升级周期中扩大投资，受益于税收优惠、绿色信贷和地方产业扶持政策，"
+    "订单同比明显增长。与此同时，消费电子行业在出口回暖与汇率波动影响下出现分化，"
+    "头部公司通过供应链数字化降低成本。地方政府还鼓励算力基础设施建设，推动银行向中小企业提供更长期限融资，"
+    "以稳定就业和企业现金流。"
+)
+
+TEST_TEXT_A = (
+    "A公司在新能源汽车零部件领域扩产，受益于产业政策支持与融资成本下降。"
+    "行业景气度改善后，公司利润率出现修复。"
+)
+TEST_TEXT_B = (
+    "B公司聚焦半导体设备国产替代，订单增长主要来自下游资本开支回升。"
+    "公司通过持续研发投入强化技术壁垒。"
+)
+TEST_TEXT_C = (
+    "C公司上调云计算与数据中心业务收入指引，受益于AI算力需求扩张。"
+    "同时，公司严格控制费用以提升自由现金流。"
+)
+TEST_TEXT_DEL = (
+    "D公司属于可选消费板块，短期受促销季和库存去化节奏影响。"
+    "管理层预计下一季度毛利率将边际修复。"
 )
 
 
@@ -82,7 +119,7 @@ class StageSummary:
 
 def load_env_files() -> None:
     load_dotenv(REPO_ROOT / ".env", override=False)
-    load_dotenv(Path(__file__).with_name(".env"), override=False)
+    load_dotenv(E2E_DIR / ".env", override=False)
 
 
 def sanitize_endpoint(value: str | None) -> str:
@@ -148,6 +185,8 @@ def print_runtime_config() -> None:
 def prepare_env_aliases() -> None:
     if not os.getenv("MONGO_URI") and os.getenv("MONGODB_URI"):
         os.environ["MONGO_URI"] = os.environ["MONGODB_URI"]
+    if not os.getenv("MONGODB_URI") and os.getenv("MONGO_URI"):
+        os.environ["MONGODB_URI"] = os.environ["MONGO_URI"]
     if not os.getenv("QDRANT_URL"):
         qdrant_host = os.getenv("QDRANT_HOST")
         qdrant_port = os.getenv("QDRANT_PORT", "6333")
@@ -157,6 +196,179 @@ def prepare_env_aliases() -> None:
         os.environ["OPENAI_API_BASE"] = os.environ["LLM_BINDING_HOST"]
     if not os.getenv("OPENAI_API_KEY") and os.getenv("LLM_BINDING_API_KEY"):
         os.environ["OPENAI_API_KEY"] = os.environ["LLM_BINDING_API_KEY"]
+    if not os.getenv("LLM_MODEL_NAME") and os.getenv("LLM_MODEL"):
+        os.environ["LLM_MODEL_NAME"] = os.environ["LLM_MODEL"]
+
+
+def _read_int_env(name: str, default: int | None = None) -> int | None:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+def _truncate_log_value(value: str, limit: int = 20000) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}\n\n...<truncated, total_chars={len(value)}>..."
+
+
+def _safe_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        return repr(value)
+
+
+def reset_llm_log() -> None:
+    LLM_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    header = [
+        "# LLM Log",
+        "",
+        f"- generated_at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- repo_root: {REPO_ROOT}",
+        "",
+    ]
+    LLM_LOG_PATH.write_text("\n".join(header), encoding="utf-8")
+
+
+def append_llm_log(
+    *,
+    model: str,
+    prompt: Any,
+    system_prompt: Any,
+    history_messages: list[dict[str, Any]] | None,
+    keyword_extraction: bool,
+    kwargs: dict[str, Any],
+    response: Any = None,
+    error: Exception | None = None,
+) -> None:
+    prompt_text = prompt if isinstance(prompt, str) else _safe_json(prompt)
+    system_text = system_prompt if isinstance(system_prompt, str) else _safe_json(system_prompt)
+    response_text = response if isinstance(response, str) else _safe_json(response)
+    history_text = _safe_json(history_messages or [])
+    kwargs_text = _safe_json(kwargs)
+
+    blocks = [
+        "",
+        "## Call",
+        f"- ts: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- model: {model}",
+        f"- keyword_extraction: {keyword_extraction}",
+        "",
+        "### System Prompt",
+        "```text",
+        _truncate_log_value(system_text or ""),
+        "```",
+        "",
+        "### User Prompt",
+        "```text",
+        _truncate_log_value(prompt_text or ""),
+        "```",
+        "",
+        "### History Messages",
+        "```json",
+        _truncate_log_value(history_text),
+        "```",
+        "",
+        "### Extra Kwargs",
+        "```json",
+        _truncate_log_value(kwargs_text),
+        "```",
+        "",
+    ]
+
+    if error is not None:
+        blocks.extend(
+            [
+                "### Error",
+                "```text",
+                _truncate_log_value(f"{type(error).__name__}: {error}"),
+                "```",
+            ]
+        )
+    else:
+        blocks.extend(
+            [
+                "### Response",
+                "```text",
+                _truncate_log_value(response_text or ""),
+                "```",
+            ]
+        )
+
+    with LLM_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write("\n".join(blocks))
+        f.write("\n")
+
+
+def _build_openai_compatible_llm_func(
+    llm_base_url: str | None,
+    llm_api_key: str | None,
+    llm_model_name: str,
+    llm_timeout: int | None = None,
+):
+    from lightrag_fork.llm.openai import openai_complete_if_cache
+    from lightrag_fork.types import GPTKeywordExtractionFormat
+
+    async def wrapped_llm(
+        prompt,
+        system_prompt=None,
+        history_messages=None,
+        keyword_extraction=False,
+        **kwargs,
+    ) -> str:
+        if history_messages is None:
+            history_messages = []
+
+        keyword_extraction = kwargs.pop("keyword_extraction", keyword_extraction)
+        resolved_model_name = kwargs.pop("model", llm_model_name)
+        resolved_base_url = kwargs.pop("base_url", llm_base_url)
+        resolved_api_key = kwargs.pop("api_key", llm_api_key)
+        resolved_timeout = kwargs.pop("timeout", llm_timeout)
+        if keyword_extraction:
+            kwargs["response_format"] = GPTKeywordExtractionFormat
+
+        log_kwargs = {
+            "base_url": resolved_base_url,
+            "timeout": resolved_timeout,
+            "kwargs": kwargs,
+        }
+        try:
+            response = await openai_complete_if_cache(
+                resolved_model_name,
+                prompt,
+                system_prompt=system_prompt,
+                history_messages=history_messages,
+                base_url=resolved_base_url,
+                api_key=resolved_api_key,
+                timeout=resolved_timeout,
+                keyword_extraction=keyword_extraction,
+                **kwargs,
+            )
+            append_llm_log(
+                model=resolved_model_name,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                history_messages=history_messages,
+                keyword_extraction=keyword_extraction,
+                kwargs=log_kwargs,
+                response=response,
+            )
+            return response
+        except Exception as e:
+            append_llm_log(
+                model=resolved_model_name,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                history_messages=history_messages,
+                keyword_extraction=keyword_extraction,
+                kwargs=log_kwargs,
+                error=e,
+            )
+            raise
+
+    return wrapped_llm
 
 
 def tcp_check(host: str, port: int, timeout_s: float = 2.0) -> tuple[bool, str]:
@@ -444,21 +656,39 @@ def _require_env(summary: StageSummary, keys: list[str]) -> bool:
     return True
 
 
-def _build_embedding_func(llm_base_url: str | None, llm_api_key: str | None, embedding_model: str | None):
+def _build_embedding_func(
+    embedding_base_url: str | None,
+    embedding_api_key: str | None,
+    embedding_model: str | None,
+    embedding_dim: int | None,
+):
     from dataclasses import replace
+
     from lightrag_fork.llm.openai import openai_embed
 
     kwargs: dict[str, Any] = {}
-    if llm_base_url:
-        kwargs["base_url"] = llm_base_url
-    if llm_api_key:
-        kwargs["api_key"] = llm_api_key
+    if embedding_base_url:
+        kwargs["base_url"] = embedding_base_url
+    if embedding_api_key:
+        kwargs["api_key"] = embedding_api_key
     if embedding_model:
         kwargs["model"] = embedding_model
 
+    actual_dim = embedding_dim or openai_embed.embedding_dim
+    actual_model_name = embedding_model or openai_embed.model_name
+
     if kwargs:
-        return replace(openai_embed, func=partial(openai_embed.func, **kwargs))
-    return openai_embed
+        return replace(
+            openai_embed,
+            func=partial(openai_embed.func, **kwargs),
+            embedding_dim=actual_dim,
+            model_name=actual_model_name,
+        )
+    return replace(
+        openai_embed,
+        embedding_dim=actual_dim,
+        model_name=actual_model_name,
+    )
 
 
 async def _cleanup_workspace_data(rag) -> None:
@@ -515,7 +745,6 @@ async def stage_graph_vector() -> StageSummary:
 
     try:
         from lightrag_fork import LightRAG, QueryParam
-        from lightrag_fork.llm.openai import openai_complete_if_cache
     except Exception as e:
         summary.fail("导入 LightRAG/LLM 组件", str(e))
         summary.print_stage_footer()
@@ -525,23 +754,38 @@ async def stage_graph_vector() -> StageSummary:
     llm_base_url = os.getenv("OPENAI_API_BASE")
     llm_api_key = os.getenv("OPENAI_API_KEY")
     llm_model_name = os.getenv("LLM_MODEL_NAME", "gpt-4o-mini")
+    llm_timeout = _read_int_env("LLM_TIMEOUT")
+    embedding_base_url = os.getenv("EMBEDDING_BINDING_HOST") or llm_base_url
+    embedding_api_key = os.getenv("EMBEDDING_BINDING_API_KEY") or llm_api_key
     embedding_model = os.getenv("EMBEDDING_MODEL")
+    embedding_dim = _read_int_env("EMBEDDING_DIM")
+    llm_model_func = _build_openai_compatible_llm_func(
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        llm_model_name=llm_model_name,
+        llm_timeout=llm_timeout,
+    )
 
     rag = None
     doc_id = f"doc-e2e-{int(time.time())}"
 
     try:
         rag = LightRAG(
-            working_dir=str(REPO_ROOT / "tests" / "e2e" / "rag_storage"),
+            working_dir=str(RAG_STORAGE_DIR),
             workspace=workspace,
             kv_storage="RedisKVStorage",
             vector_storage="QdrantVectorDBStorage",
             graph_storage="Neo4JStorage",
             doc_status_storage="MongoDocStatusStorage",
-            llm_model_func=openai_complete_if_cache,
+            llm_model_func=llm_model_func,
             llm_model_name=llm_model_name,
             llm_model_kwargs={"base_url": llm_base_url, "api_key": llm_api_key},
-            embedding_func=_build_embedding_func(llm_base_url, llm_api_key, embedding_model),
+            embedding_func=_build_embedding_func(
+                embedding_base_url,
+                embedding_api_key,
+                embedding_model,
+                embedding_dim,
+            ),
         )
         await rag.initialize_storages()
         summary.pass_("LightRAG 初始化（initialize_storages）")
@@ -633,7 +877,6 @@ async def stage_concurrent() -> StageSummary:
         from lightrag_fork import LightRAG
         from lightrag_fork.base import DocStatus
         from lightrag_fork.kg.shared_storage import get_namespace_data, get_pipeline_runtime_lock
-        from lightrag_fork.llm.openai import openai_complete_if_cache
     except Exception as e:
         summary.fail("导入并发测试组件", str(e))
         summary.print_stage_footer()
@@ -643,7 +886,17 @@ async def stage_concurrent() -> StageSummary:
     llm_base_url = os.getenv("OPENAI_API_BASE")
     llm_api_key = os.getenv("OPENAI_API_KEY")
     llm_model_name = os.getenv("LLM_MODEL_NAME", "gpt-4o-mini")
+    llm_timeout = _read_int_env("LLM_TIMEOUT")
+    embedding_base_url = os.getenv("EMBEDDING_BINDING_HOST") or llm_base_url
+    embedding_api_key = os.getenv("EMBEDDING_BINDING_API_KEY") or llm_api_key
     embedding_model = os.getenv("EMBEDDING_MODEL")
+    embedding_dim = _read_int_env("EMBEDDING_DIM")
+    llm_model_func = _build_openai_compatible_llm_func(
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        llm_model_name=llm_model_name,
+        llm_timeout=llm_timeout,
+    )
     doc_id_a = f"doc-a-{workspace}"
     doc_id_b = f"doc-b-{workspace}"
     doc_id_c = f"doc-c-{workspace}"
@@ -654,28 +907,38 @@ async def stage_concurrent() -> StageSummary:
 
     try:
         rag1 = LightRAG(
-            working_dir=str(REPO_ROOT / "tests" / "e2e" / "rag_storage"),
+            working_dir=str(RAG_STORAGE_DIR),
             workspace=workspace,
             kv_storage="RedisKVStorage",
             vector_storage="QdrantVectorDBStorage",
             graph_storage="Neo4JStorage",
             doc_status_storage="MongoDocStatusStorage",
-            llm_model_func=openai_complete_if_cache,
+            llm_model_func=llm_model_func,
             llm_model_name=llm_model_name,
             llm_model_kwargs={"base_url": llm_base_url, "api_key": llm_api_key},
-            embedding_func=_build_embedding_func(llm_base_url, llm_api_key, embedding_model),
+            embedding_func=_build_embedding_func(
+                embedding_base_url,
+                embedding_api_key,
+                embedding_model,
+                embedding_dim,
+            ),
         )
         rag2 = LightRAG(
-            working_dir=str(REPO_ROOT / "tests" / "e2e" / "rag_storage"),
+            working_dir=str(RAG_STORAGE_DIR),
             workspace=workspace,
             kv_storage="RedisKVStorage",
             vector_storage="QdrantVectorDBStorage",
             graph_storage="Neo4JStorage",
             doc_status_storage="MongoDocStatusStorage",
-            llm_model_func=openai_complete_if_cache,
+            llm_model_func=llm_model_func,
             llm_model_name=llm_model_name,
             llm_model_kwargs={"base_url": llm_base_url, "api_key": llm_api_key},
-            embedding_func=_build_embedding_func(llm_base_url, llm_api_key, embedding_model),
+            embedding_func=_build_embedding_func(
+                embedding_base_url,
+                embedding_api_key,
+                embedding_model,
+                embedding_dim,
+            ),
         )
         await rag1.initialize_storages()
         await rag2.initialize_storages()
@@ -770,7 +1033,7 @@ async def stage_concurrent() -> StageSummary:
                 t.cancel()
                 try:
                     await t
-                except Exception:
+                except BaseException:
                     pass
 
         for rag in (rag1, rag2):
@@ -804,6 +1067,7 @@ def resolve_stages(stage_args: list[str]) -> list[str]:
 async def run(selected_stages: list[str]) -> int:
     load_env_files()
     prepare_env_aliases()
+    reset_llm_log()
     print_runtime_config()
 
     stage_handlers = {

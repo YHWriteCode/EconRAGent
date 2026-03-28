@@ -1,6 +1,8 @@
 from ..utils import verbose_debug, VERBOSE_DEBUG
+import json
 import os
 import logging
+import re
 
 from collections.abc import AsyncIterator
 
@@ -13,6 +15,7 @@ if not pm.is_installed("openai"):
 
 from openai import (
     APIConnectionError,
+    BadRequestError,
     RateLimitError,
     APITimeoutError,
 )
@@ -73,6 +76,93 @@ class InvalidResponseError(Exception):
     """Custom exception class for triggering retry mechanism"""
 
     pass
+
+
+KEYWORD_EXTRACTION_FALLBACK_PROMPT = """You are a helpful assistant that extracts keywords from text.
+Please analyze the content and extract two types of keywords:
+1. High-level keywords: important concepts and main themes
+2. Low-level keywords: specific details and supporting elements
+
+Return your response in this exact JSON format:
+{
+  "high_level_keywords": ["keyword1", "keyword2"],
+  "low_level_keywords": ["keyword1", "keyword2", "keyword3"]
+}
+
+Only return JSON. Do not include markdown fences or explanatory text."""
+
+
+def _should_fallback_keyword_extraction(exc: Exception) -> bool:
+    if isinstance(exc, BadRequestError):
+        return True
+
+    message = str(exc).lower()
+    return any(
+        token in message
+        for token in (
+            "response_format",
+            "chat.completions.parse",
+            "invalid schema",
+            "structured output",
+        )
+    )
+
+
+def _build_keyword_extraction_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    fallback_messages = [dict(message) for message in messages]
+    system_index = next(
+        (idx for idx, message in enumerate(fallback_messages) if message.get("role") == "system"),
+        None,
+    )
+    if system_index is None:
+        fallback_messages.insert(
+            0,
+            {"role": "system", "content": KEYWORD_EXTRACTION_FALLBACK_PROMPT},
+        )
+        return fallback_messages
+
+    system_message = dict(fallback_messages[system_index])
+    system_content = system_message.get("content") or ""
+    system_message["content"] = (
+        f"{system_content}\n\n{KEYWORD_EXTRACTION_FALLBACK_PROMPT}"
+        if system_content
+        else KEYWORD_EXTRACTION_FALLBACK_PROMPT
+    )
+    fallback_messages[system_index] = system_message
+    return fallback_messages
+
+
+def _normalize_keyword_extraction_content(content: str) -> str:
+    text = (content or "").strip()
+    if not text:
+        return json.dumps(
+            {"high_level_keywords": [], "low_level_keywords": []},
+            ensure_ascii=False,
+        )
+
+    match = re.search(r"\{[\s\S]*\}", text)
+    candidate = match.group(0) if match else text
+
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        logger.warning(
+            "Failed to parse keyword extraction response as JSON, returning empty keyword set"
+        )
+        return json.dumps(
+            {"high_level_keywords": [], "low_level_keywords": []},
+            ensure_ascii=False,
+        )
+
+    return json.dumps(
+        {
+            "high_level_keywords": data.get("high_level_keywords", []),
+            "low_level_keywords": data.get("low_level_keywords", []),
+        },
+        ensure_ascii=False,
+    )
 
 
 # Module-level cache for tiktoken encodings
@@ -347,11 +437,36 @@ async def openai_complete_if_cache(
         await openai_async_client.close()  # Ensure client is closed
         raise
     except Exception as e:
-        logger.error(
-            f"OpenAI API Call Failed,\nModel: {model},\nParams: {kwargs}, Got: {e}"
-        )
-        await openai_async_client.close()  # Ensure client is closed
-        raise
+        if (
+            keyword_extraction
+            and "response_format" in kwargs
+            and _should_fallback_keyword_extraction(e)
+        ):
+            logger.warning(
+                "Structured keyword extraction is not supported by the current OpenAI-compatible endpoint. "
+                "Falling back to prompt-based JSON extraction."
+            )
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs.pop("response_format", None)
+            try:
+                response = await openai_async_client.chat.completions.create(
+                    model=api_model,
+                    messages=_build_keyword_extraction_messages(messages),
+                    **fallback_kwargs,
+                )
+            except Exception as fallback_error:
+                logger.error(
+                    "OpenAI-compatible keyword extraction fallback failed, "
+                    f"Model: {model}, Params: {fallback_kwargs}, Got: {fallback_error}"
+                )
+                await openai_async_client.close()
+                raise
+        else:
+            logger.error(
+                f"OpenAI API Call Failed,\nModel: {model},\nParams: {kwargs}, Got: {e}"
+            )
+            await openai_async_client.close()  # Ensure client is closed
+            raise
 
     if hasattr(response, "__aiter__"):
 
@@ -593,6 +708,9 @@ async def openai_complete_if_cache(
                     logger.error("Received empty content from OpenAI API")
                     await openai_async_client.close()  # Ensure client is closed
                     raise InvalidResponseError("Received empty content from OpenAI API")
+
+            if keyword_extraction:
+                final_content = _normalize_keyword_extraction_content(final_content)
 
             # Apply Unicode decoding to final content if needed
             if r"\u" in final_content:

@@ -54,8 +54,12 @@ from lightrag_fork.constants import (
     DEFAULT_SOURCE_IDS_LIMIT_METHOD,
     DEFAULT_MAX_FILE_PATHS,
     DEFAULT_FILE_PATH_MORE_PLACEHOLDER,
+    DEFAULT_DOMAIN_SCHEMA_ENABLED,
+    DEFAULT_DOMAIN_SCHEMA_MODE,
+    DEFAULT_DOMAIN_SCHEMA_PROFILE,
 )
 from lightrag_fork.utils import get_env_value
+from lightrag_fork.schema import normalize_addon_schema_config
 
 from lightrag_fork.kg import (
     STORAGES,
@@ -455,6 +459,17 @@ class LightRAG:
                 "SUMMARY_LANGUAGE", DEFAULT_SUMMARY_LANGUAGE, str
             ),
             "entity_types": get_env_value("ENTITY_TYPES", DEFAULT_ENTITY_TYPES, list),
+            "domain_schema": {
+                "enabled": get_env_value(
+                    "DOMAIN_SCHEMA_ENABLED", DEFAULT_DOMAIN_SCHEMA_ENABLED, bool
+                ),
+                "mode": get_env_value(
+                    "DOMAIN_SCHEMA_MODE", DEFAULT_DOMAIN_SCHEMA_MODE, str
+                ),
+                "profile_name": get_env_value(
+                    "DOMAIN_SCHEMA_PROFILE", DEFAULT_DOMAIN_SCHEMA_PROFILE, str
+                ),
+            },
         }
     )
 
@@ -536,6 +551,11 @@ class LightRAG:
         # Initialize ollama_server_infos if not provided
         if self.ollama_server_infos is None:
             self.ollama_server_infos = OllamaServerInfos()
+
+        # Normalize optional domain schema configuration under addon_params.
+        # This keeps backward compatibility for existing language/entity_types
+        # while preparing a stable runtime schema structure for future prompt injection.
+        self.addon_params = normalize_addon_schema_config(self.addon_params)
 
         # Validate config
         if self.force_llm_summary_on_merge < 3:

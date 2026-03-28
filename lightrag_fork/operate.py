@@ -75,6 +75,58 @@ from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
 
 
+def _build_domain_schema_prompt_appendix(domain_schema: dict[str, Any] | None) -> str:
+    """Build an optional schema guidance block for extraction prompts.
+
+    The block is appended only when a domain schema is explicitly enabled.
+    It is guidance-only and must not be treated as a strict filtering whitelist.
+    """
+    if not isinstance(domain_schema, dict):
+        return ""
+
+    if not domain_schema.get("enabled"):
+        return ""
+
+    entity_types = domain_schema.get("entity_type_names") or []
+    relation_types = domain_schema.get("relation_type_names") or []
+    extraction_rules = domain_schema.get("extraction_rules") or []
+
+    lines: list[str] = []
+    if entity_types:
+        lines.append(
+            f"本次抽取优先关注以下实体类型：{', '.join(str(item) for item in entity_types)}"
+        )
+    if relation_types:
+        lines.append(
+            f"本次抽取优先关注以下关系类型：{', '.join(str(item) for item in relation_types)}"
+        )
+    if extraction_rules:
+        lines.append(
+            f"抽取约束：{'；'.join(str(item) for item in extraction_rules)}"
+        )
+
+    if not lines:
+        return ""
+
+    return (
+        "\n\n---\n"
+        "[领域约束]\n"
+        + "\n".join(lines)
+        + "\n注意：以上为优先引导，不要遗漏文本中显著的通用实体。\n"
+        "---"
+    )
+
+
+def _append_domain_schema_prompt_block(
+    base_prompt: str, domain_schema: dict[str, Any] | None
+) -> str:
+    """Append optional schema guidance to a formatted prompt."""
+    appendix = _build_domain_schema_prompt_appendix(domain_schema)
+    if not appendix:
+        return base_prompt
+    return f"{base_prompt}{appendix}"
+
+
 def _truncate_entity_identifier(
     identifier: str, limit: int, chunk_key: str, identifier_role: str
 ) -> str:
@@ -2835,6 +2887,7 @@ async def extract_entities(
     entity_types = global_config["addon_params"].get(
         "entity_types", DEFAULT_ENTITY_TYPES
     )
+    domain_schema = global_config["addon_params"].get("domain_schema")
 
     examples = "\n".join(PROMPTS["entity_extraction_examples"])
 
@@ -2881,13 +2934,22 @@ async def extract_entities(
         entity_extraction_system_prompt = PROMPTS[
             "entity_extraction_system_prompt"
         ].format(**context_base)
+        entity_extraction_system_prompt = _append_domain_schema_prompt_block(
+            entity_extraction_system_prompt, domain_schema
+        )
         # Format user prompts with input_text for each chunk
         entity_extraction_user_prompt = PROMPTS["entity_extraction_user_prompt"].format(
             **{**context_base, "input_text": content}
         )
+        entity_extraction_user_prompt = _append_domain_schema_prompt_block(
+            entity_extraction_user_prompt, domain_schema
+        )
         entity_continue_extraction_user_prompt = PROMPTS[
             "entity_continue_extraction_user_prompt"
         ].format(**{**context_base, "input_text": content})
+        entity_continue_extraction_user_prompt = _append_domain_schema_prompt_block(
+            entity_continue_extraction_user_prompt, domain_schema
+        )
 
         final_result, timestamp = await use_llm_func_with_cache(
             entity_extraction_user_prompt,

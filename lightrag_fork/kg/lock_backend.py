@@ -87,9 +87,19 @@ class LocalLockBackend(LockBackend):
         try:
             if wait_timeout_s is None:
                 await ctx.__aenter__()
+            elif wait_timeout_s <= 0:
+                enter_task = asyncio.create_task(ctx.__aenter__())
+                await asyncio.sleep(0)
+                if not enter_task.done():
+                    enter_task.cancel()
+                    try:
+                        await enter_task
+                    except BaseException:
+                        pass
+                    return None
+                await enter_task
             else:
-                timeout = 0 if wait_timeout_s <= 0 else wait_timeout_s
-                await asyncio.wait_for(ctx.__aenter__(), timeout=timeout)
+                await asyncio.wait_for(ctx.__aenter__(), timeout=wait_timeout_s)
         except asyncio.TimeoutError:
             return None
 

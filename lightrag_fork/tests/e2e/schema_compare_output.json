@@ -1,0 +1,231 @@
+{
+  "general": {
+    "case_name": "general",
+    "workspace": "schema_general_1774684531",
+    "entities": {
+      "Bank Net Interest Margin": "concept",
+      "Banking Industry": "organization",
+      "Brent Crude": "naturalobject",
+      "BYD Co.": "organization",
+      "China": "location",
+      "Credit Demand": "concept",
+      "Electric Vehicle Industry": "organization",
+      "Exxon Mobil": "organization",
+      "Federal Reserve": "organization",
+      "Global Energy Industry": "organization",
+      "Green Manufacturing Subsidy And Tax Rebate Policy": "concept",
+      "Gross Margin": "concept",
+      "Inflation Indicators": "concept",
+      "JPMorgan Chase": "organization",
+      "Lithium Carbonate": "naturalobject",
+      "Oil Demand": "concept",
+      "Revenue Growth": "concept",
+      "Saudi Arabia": "location",
+      "U.S. Treasury Yield": "data",
+      "United States": "location"
+    },
+    "type_counter": {
+      "concept": 7,
+      "data": 1,
+      "location": 3,
+      "naturalobject": 2,
+      "organization": 7
+    }
+  },
+  "economy": {
+    "case_name": "economy",
+    "workspace": "schema_economy_1774684674",
+    "entities": {
+      "Bank Net Interest Margin": "metric",
+      "Banking Industry": "industry",
+      "Battery Production": "asset",
+      "Brent Crude": "asset",
+      "Byd Co.": "company",
+      "Capital Expenditure Guidance": "metric",
+      "Cash Flow": "metric",
+      "China": "country",
+      "Credit Demand": "metric",
+      "Electric Vehicle Industry": "industry",
+      "Export Policy": "policy",
+      "Exxon Mobil": "company",
+      "Federal Reserve": "institution",
+      "Federal Reserve Policy Outlook": "policy",
+      "Global Energy Industry": "industry",
+      "Green Manufacturing Subsidy And Tax Rebate Policy": "policy",
+      "Gross Margin": "metric",
+      "Inflation Indicators": "metric",
+      "JPMorgan Chase": "company",
+      "Lithium Carbonate": "asset",
+      "Oil Demand": "metric",
+      "Revenue Growth": "metric",
+      "Saudi Arabia": "country",
+      "U.S. Treasury Yield": "metric",
+      "United States": "country"
+    },
+    "type_counter": {
+      "asset": 3,
+      "company": 3,
+      "country": 3,
+      "industry": 3,
+      "institution": 1,
+      "metric": 9,
+      "policy": 3
+    }
+  },
+  "comparison": {
+    "changed_types": [
+      {
+        "entity_name": "Bank Net Interest Margin",
+        "general_type": "concept",
+        "economy_type": "metric"
+      },
+      {
+        "entity_name": "Banking Industry",
+        "general_type": "organization",
+        "economy_type": "industry"
+      },
+      {
+        "entity_name": "Brent Crude",
+        "general_type": "naturalobject",
+        "economy_type": "asset"
+      },
+      {
+        "entity_name": "China",
+        "general_type": "location",
+        "economy_type": "country"
+      },
+      {
+        "entity_name": "Credit Demand",
+        "general_type": "concept",
+        "economy_type": "metric"
+      },
+      {
+        "entity_name": "Electric Vehicle Industry",
+        "general_type": "organization",
+        "economy_type": "industry"
+      },
+      {
+        "entity_name": "Exxon Mobil",
+        "general_type": "organization",
+        "economy_type": "company"
+      },
+      {
+        "entity_name": "Federal Reserve",
+        "general_type": "organization",
+        "economy_type": "institution"
+      },
+      {
+        "entity_name": "Global Energy Industry",
+        "general_type": "organization",
+        "economy_type": "industry"
+      },
+      {
+        "entity_name": "Green Manufacturing Subsidy And Tax Rebate Policy",
+        "general_type": "concept",
+        "economy_type": "policy"
+      },
+      {
+        "entity_name": "Gross Margin",
+        "general_type": "concept",
+        "economy_type": "metric"
+      },
+      {
+        "entity_name": "Inflation Indicators",
+        "general_type": "concept",
+        "economy_type": "metric"
+      },
+      {
+        "entity_name": "JPMorgan Chase",
+        "general_type": "organization",
+        "economy_type": "company"
+      },
+      {
+        "entity_name": "Lithium Carbonate",
+        "general_type": "naturalobject",
+        "economy_type": "asset"
+      },
+      {
+        "entity_name": "Oil Demand",
+        "general_type": "concept",
+        "economy_type": "metric"
+      },
+      {
+        "entity_name": "Revenue Growth",
+        "general_type": "concept",
+        "economy_type": "metric"
+      },
+      {
+        "entity_name": "Saudi Arabia",
+        "general_type": "location",
+        "economy_type": "country"
+      },
+      {
+        "entity_name": "U.S. Treasury Yield",
+        "general_type": "data",
+        "economy_type": "metric"
+      },
+      {
+        "entity_name": "United States",
+        "general_type": "location",
+        "economy_type": "country"
+      }
+    ],
+    "economy_domain_hits": {
+      "Bank Net Interest Margin": "metric",
+      "Banking Industry": "industry",
+      "Battery Production": "asset",
+      "Brent Crude": "asset",
+      "Byd Co.": "company",
+      "Capital Expenditure Guidance": "metric",
+      "Cash Flow": "metric",
+      "China": "country",
+      "Credit Demand": "metric",
+      "Electric Vehicle Industry": "industry",
+      "Export Policy": "policy",
+      "Exxon Mobil": "company",
+      "Federal Reserve": "institution",
+      "Federal Reserve Policy Outlook": "policy",
+      "Global Energy Industry": "industry",
+      "Green Manufacturing Subsidy And Tax Rebate Policy": "policy",
+      "Gross Margin": "metric",
+      "Inflation Indicators": "metric",
+      "JPMorgan Chase": "company",
+      "Lithium Carbonate": "asset",
+      "Oil Demand": "metric",
+      "Revenue Growth": "metric",
+      "Saudi Arabia": "country",
+      "U.S. Treasury Yield": "metric",
+      "United States": "country"
+    },
+    "general_type_counter": {
+      "concept": 7,
+      "data": 1,
+      "location": 3,
+      "naturalobject": 2,
+      "organization": 7
+    },
+    "economy_type_counter": {
+      "asset": 3,
+      "company": 3,
+      "country": 3,
+      "industry": 3,
+      "institution": 1,
+      "metric": 9,
+      "policy": 3
+    }
+  },
+  "sample_docs": [
+    {
+      "file_name": "schema_doc_01.txt",
+      "content": "BYD Co. expanded battery production in China after a green manufacturing subsidy and tax rebate policy reduced financing costs. The electric vehicle industry expected higher gross margin and revenue growth, while lithium carbonate prices moved lower."
+    },
+    {
+      "file_name": "schema_doc_02.txt",
+      "content": "JPMorgan Chase said the Federal Reserve policy outlook and U.S. Treasury yield movements affected bank net interest margin. The banking industry remained cautious even as credit demand improved in the United States."
+    },
+    {
+      "file_name": "schema_doc_03.txt",
+      "content": "Saudi Arabia's export policy supported Brent crude prices, helping Exxon Mobil improve cash flow and capital expenditure guidance. The global energy industry tracked oil demand and inflation indicators across the United States and China."
+    }
+  ]
+}
