@@ -165,7 +165,7 @@ Repository = "https://github.com/HKUDS/LightRAG"
 "Bug Tracker" = "https://github.com/HKUDS/LightRAG/issues"
 
 [tool.setuptools.packages.find]
-include = ["lightrag_fork*"]
+include = ["lightrag_fork*", "kg_agent*"]
 exclude = ["data*", "tests*", "scripts*", "examples*", "dickens*", "reproduce*", "output_complete*", "rag_storage*", "inputs*"]
 
 [tool.setuptools]
