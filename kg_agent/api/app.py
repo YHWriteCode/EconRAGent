@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
-from functools import partial
 from typing import Any
 
 from dotenv import load_dotenv
@@ -28,9 +28,61 @@ from kg_agent.config import KGAgentConfig
 load_dotenv(dotenv_path=".env", override=False)
 
 
+class EnvLightRAGProvider:
+    def __init__(self, *, config: KGAgentConfig | None = None):
+        self.config = config or KGAgentConfig.from_env()
+        self._instances: dict[str, LightRAG] = {}
+        self._lock = asyncio.Lock()
+
+    @property
+    def default_workspace(self) -> str:
+        return self.config.runtime.default_workspace or ""
+
+    def _resolve_workspace(self, workspace: str | None) -> str:
+        normalized = (workspace or "").strip()
+        return normalized or self.default_workspace
+
+    async def get(self, workspace: str | None = None) -> LightRAG:
+        resolved_workspace = self._resolve_workspace(workspace)
+        cached = self._instances.get(resolved_workspace)
+        if cached is not None:
+            return cached
+
+        async with self._lock:
+            cached = self._instances.get(resolved_workspace)
+            if cached is not None:
+                return cached
+
+            rag = build_rag_from_env(workspace=resolved_workspace)
+            await rag.initialize_storages()
+            await rag.check_and_migrate_data()
+            self._instances[resolved_workspace] = rag
+            return rag
+
+    def list_active_workspaces(self) -> list[str]:
+        return sorted(self._instances)
+
+    async def finalize_all(self) -> None:
+        instances = list(self._instances.values())
+        self._instances.clear()
+        for rag in instances:
+            await rag.finalize_storages()
+        finalize_share_data()
+
+
+def _normalize_ollama_host(base_url: str) -> str:
+    normalized = (base_url or "").strip().rstrip("/")
+    if normalized.endswith("/v1"):
+        return normalized[: -len("/v1")]
+    return normalized
+
+
 def _build_llm_model_func_from_env(
     binding: str, model_name: str, base_url: str, api_key: str | None, timeout: int
 ):
+    if binding == "ollama":
+        base_url = _normalize_ollama_host(base_url)
+
     if binding == "azure_openai":
         from lightrag_fork.llm.openai import azure_openai_complete_if_cache
 
@@ -147,6 +199,9 @@ def _build_embedding_func_from_env(
     embedding_dim: int | None,
     send_dimensions: bool,
 ) -> EmbeddingFunc:
+    if binding == "ollama":
+        base_url = _normalize_ollama_host(base_url)
+
     provider = _resolve_embedding_provider(binding)
     actual_func = provider.func if isinstance(provider, EmbeddingFunc) else provider
     resolved_model_name = model_name or getattr(provider, "model_name", None)
@@ -305,8 +360,14 @@ def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
     return rag
 
 
-def build_agent_core_from_env(*, rag: LightRAG | None = None) -> AgentCore:
+def build_agent_core_from_env(
+    *,
+    rag: LightRAG | None = None,
+    rag_provider=None,
+) -> AgentCore:
     config = KGAgentConfig.from_env()
+    if rag_provider is not None:
+        return AgentCore(rag_provider=rag_provider, config=config)
     return AgentCore(rag=rag or build_rag_from_env(), config=config)
 
 
@@ -318,24 +379,28 @@ def create_app(
 ) -> FastAPI:
     manage_rag_lifecycle = False
     rag_instance = rag
+    rag_provider = None
+    config_obj = config or KGAgentConfig.from_env()
 
     if agent_core is None:
         if rag_instance is None:
-            rag_instance = build_rag_from_env()
+            rag_provider = EnvLightRAGProvider(config=config_obj)
             manage_rag_lifecycle = True
-        agent_core = AgentCore(rag=rag_instance, config=config or KGAgentConfig.from_env())
+            agent_core = AgentCore(rag_provider=rag_provider.get, config=config_obj)
+        else:
+            agent_core = AgentCore(rag=rag_instance, config=config_obj)
     elif rag_instance is None:
         rag_instance = getattr(agent_core, "_rag", None)
+        rag_provider = getattr(agent_core, "_rag_provider", None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if manage_rag_lifecycle and rag_instance is not None:
-            await rag_instance.initialize_storages()
-            await rag_instance.check_and_migrate_data()
         try:
             yield
         finally:
-            if manage_rag_lifecycle and rag_instance is not None:
+            if manage_rag_lifecycle and rag_provider is not None:
+                await rag_provider.finalize_all()
+            elif manage_rag_lifecycle and rag_instance is not None:
                 await rag_instance.finalize_storages()
                 finalize_share_data()
 
@@ -346,16 +411,24 @@ def create_app(
         lifespan=lifespan if manage_rag_lifecycle else None,
     )
     app.state.rag = rag_instance
+    app.state.rag_provider = rag_provider
     app.state.agent_core = agent_core
     app.include_router(create_agent_routes(agent_core))
 
     @app.get("/health")
     async def health():
+        health_workspace = getattr(rag_instance, "workspace", None)
+        if health_workspace is None and rag_provider is not None:
+            health_workspace = rag_provider.default_workspace
         return {
             "status": "ok",
             "service": "kg_agent",
-            "workspace": getattr(rag_instance, "workspace", None),
-            "rag_bootstrapped": bool(rag_instance is not None),
+            "workspace": health_workspace,
+            "rag_bootstrapped": bool(rag_instance is not None or rag_provider is not None),
+            "dynamic_workspace_enabled": bool(rag_provider is not None),
+            "active_workspaces": (
+                rag_provider.list_active_workspaces() if rag_provider is not None else []
+            ),
         }
 
     return app

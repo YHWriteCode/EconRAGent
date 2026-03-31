@@ -3,12 +3,12 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lightrag-hku"
+name = "econragent"
 dynamic = ["version"]
 authors = [
-    {name = "Zirui Guo"}
+    {name = "1hang"}
 ]
-description = "LightRAG: Simple and Fast Retrieval-Augmented Generation"
+description = "基于lightrag再开发-动态图谱增强RAG智能体系统"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -130,11 +130,11 @@ offline-llm = [
 
 offline = [
     # Complete offline package (includes api for document processing, plus storage and LLM)
-    "lightrag-hku[api,offline-storage,offline-llm]",
+    "econragent[api,offline-storage,offline-llm]",
 ]
 
 test = [
-    "lightrag-hku[api]",
+    "econragent[api]",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pre-commit",
@@ -142,7 +142,7 @@ test = [
 ]
 
 evaluation = [
-    "lightrag-hku[api]",
+    "econragent[api]",
     "ragas>=0.3.7",
     "datasets>=4.3.0",
 ]
@@ -157,12 +157,13 @@ lightrag-server = "lightrag_fork.api.lightrag_server:main"
 lightrag-gunicorn = "lightrag_fork.api.run_with_gunicorn:main"
 lightrag-download-cache = "lightrag_fork.tools.download_cache:main"
 lightrag-clean-llmqc = "lightrag_fork.tools.clean_llm_query_cache:main"
+kg-agent-server = "kg_agent.api.app:main"
 
 [project.urls]
-Homepage = "https://github.com/HKUDS/LightRAG"
-Documentation = "https://github.com/HKUDS/LightRAG"
-Repository = "https://github.com/HKUDS/LightRAG"
-"Bug Tracker" = "https://github.com/HKUDS/LightRAG/issues"
+Homepage = "https://github.com/YHWriteCode/EconRAGent"
+Documentation = "https://github.com/YHWriteCode/EconRAGent"
+Repository = "https://github.com/YHWriteCode/EconRAGent"
+"Bug Tracker" = "https://github.com/YHWriteCode/EconRAGent/issues"
 
 [tool.setuptools.packages.find]
 include = ["lightrag_fork*", "kg_agent*"]

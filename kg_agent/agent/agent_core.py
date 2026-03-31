@@ -150,17 +150,16 @@ class AgentCore:
         )
 
         for index, tool_plan in enumerate(route.tool_sequence[:execution_limit]):
+            tool_kwargs = self._build_tool_execution_kwargs(
+                context=context,
+                rag=rag,
+                session_history=session_history,
+                user_profile=user_profile,
+                tool_args=tool_plan.args,
+            )
             result = await self.tool_registry.execute(
                 tool_plan.tool,
-                query=context.query,
-                rag=rag,
-                session_id=context.session_id,
-                user_id=context.user_id,
-                session_context={"history": session_history},
-                user_profile=user_profile,
-                domain_schema=context.domain_schema,
-                memory_store=self.conversation_memory,
-                **tool_plan.args,
+                **tool_kwargs,
             )
             tool_calls.append(
                 {
@@ -290,6 +289,36 @@ class AgentCore:
             except Exception:
                 pass
         return self._fallback_answer(query, route, tool_calls, path_explanation)
+
+    def _build_tool_execution_kwargs(
+        self,
+        *,
+        context: AgentRunContext,
+        rag: LightRAG,
+        session_history: list[dict[str, str]],
+        user_profile: dict[str, Any] | None,
+        tool_args: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        base_kwargs = {
+            "query": context.query,
+            "rag": rag,
+            "session_id": context.session_id,
+            "user_id": context.user_id,
+            "session_context": {"history": session_history},
+            "user_profile": user_profile,
+            "domain_schema": context.domain_schema,
+            "memory_store": self.conversation_memory,
+        }
+        if not tool_args:
+            return base_kwargs
+
+        # Keep framework-managed context stable even if an LLM-generated route
+        # payload repeats these keys inside tool args.
+        reserved_keys = set(base_kwargs)
+        sanitized_tool_args = {
+            key: value for key, value in tool_args.items() if key not in reserved_keys
+        }
+        return {**base_kwargs, **sanitized_tool_args}
 
     @staticmethod
     def _fallback_answer(
