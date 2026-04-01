@@ -50,3 +50,21 @@ async def test_route_judge_quant_request_uses_quant_tool():
 
     assert route.strategy == "quant_request"
     assert route.tool_sequence[0].tool == "quant_backtest"
+
+
+@pytest.mark.asyncio
+async def test_route_judge_direct_url_prefers_web_crawl():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query="请帮我分析这个网页 https://example.com/news/byd-policy 的内容",
+        session_context={"history": []},
+        user_profile={},
+        available_tools=["web_search", "kg_hybrid_search"],
+    )
+
+    assert route.strategy == "direct_url_crawl"
+    assert route.tool_sequence[0].tool == "web_search"
+    assert route.tool_sequence[0].args["urls"] == [
+        "https://example.com/news/byd-policy"
+    ]

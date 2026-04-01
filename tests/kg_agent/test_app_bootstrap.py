@@ -1,4 +1,5 @@
 import pytest
+from fastapi.testclient import TestClient
 
 from kg_agent.api.app import (
     EnvLightRAGProvider,
@@ -53,6 +54,38 @@ def test_create_app_bootstraps_rag_from_env(tmp_path, monkeypatch):
     assert app.state.rag_provider is not None
     assert app.state.agent_core is not None
     assert any(route.path == "/agent/chat" for route in app.router.routes)
+
+
+def test_health_reports_default_workspace_and_active_workspace_count(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("WORKING_DIR", str(tmp_path / "rag_storage"))
+    monkeypatch.setenv("LIGHTRAG_KV_STORAGE", "JsonKVStorage")
+    monkeypatch.setenv("LIGHTRAG_GRAPH_STORAGE", "NetworkXStorage")
+    monkeypatch.setenv("LIGHTRAG_VECTOR_STORAGE", "NanoVectorDBStorage")
+    monkeypatch.setenv("LIGHTRAG_DOC_STATUS_STORAGE", "JsonDocStatusStorage")
+    monkeypatch.setenv("LLM_BINDING", "openai")
+    monkeypatch.setenv("EMBEDDING_BINDING", "openai")
+    monkeypatch.setenv("LLM_BINDING_HOST", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("EMBEDDING_BINDING_HOST", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("LLM_BINDING_API_KEY", "test-key")
+    monkeypatch.setenv("EMBEDDING_BINDING_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_MODEL", "dummy-chat-model")
+    monkeypatch.setenv("EMBEDDING_MODEL", "dummy-embed-model")
+    monkeypatch.setenv("EMBEDDING_DIM", "1536")
+    monkeypatch.setenv("KG_AGENT_DEFAULT_WORKSPACE", "ops-default")
+
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["default_workspace"] == "ops-default"
+    assert payload["active_workspace_count"] == 0
+    assert payload["active_workspaces"] == []
+    assert payload["dynamic_workspace_enabled"] is True
 
 
 def test_normalize_ollama_host_strips_openai_style_suffix():

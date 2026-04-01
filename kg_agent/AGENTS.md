@@ -55,7 +55,8 @@ kg_agent/
 │   ├── base.py                    # ToolDefinition + ToolResult data structures
 │   ├── retrieval_tools.py         # kg_hybrid_search, kg_naive_search
 │   ├── graph_tools.py             # graph_entity_lookup, graph_relation_trace
-│   ├── web_search.py              # web_search (placeholder, pending crawler/search API integration)
+│   ├── kg_ingest.py               # kg_ingest: insert any text/markdown into KG via rag.ainsert()
+│   ├── web_search.py              # web_search: URL crawling + search-engine URL discovery via Crawl4AI
 │   └── quant_tools.py             # quant_backtest (placeholder, quant as tool rather than standalone module)
 │
 ├── memory/                        # Memory system
@@ -64,9 +65,15 @@ kg_agent/
 │   ├── cross_session_store.py     # CrossSessionStore: cross-session retrieval (placeholder)
 │   └── user_profile.py            # UserProfileStore: user profile storage
 │
+├── crawler/                       # Web crawling layer
+│   ├── __init__.py                # Exports Crawl4AIAdapter, CrawledPage, DiscoveredUrl
+│   ├── crawler_adapter.py         # Crawl4AIAdapter: start/close/crawl_url/crawl_urls/discover_urls; CrawledPage, DiscoveredUrl dataclasses
+│   ├── content_extractor.py       # Search-result extraction, URL scoring/ranking, Markdown normalization, DuckDuckGo redirect decoding
+│   └── scheduler.py               # Future recurring crawl scheduler placeholder
+│
 └── api/                           # External API
     ├── __init__.py
-    ├── app.py                     # FastAPI app factory: create_app(), EnvLightRAGProvider, LightRAG lifecycle management
+    ├── app.py                     # FastAPI app factory: create_app(), build_rag_from_env(), EnvLightRAGProvider, LightRAG lifecycle management
     └── agent_routes.py            # API route definitions
 ```
 
@@ -112,6 +119,16 @@ kg_agent/
 
 These fields are injected uniformly by the framework; a tool handler's `args` can only provide non-reserved parameters.
 
+### 3.7 Web Crawling Goes Through the Crawler Adapter
+
+- Crawl4AI integration belongs to `kg_agent/crawler/`, not `lightrag_fork/`
+- Do not call Crawl4AI directly from `agent_core.py`; pass crawling through `crawler_adapter`
+- `web_search` supports two modes:
+  1. **Direct URL crawling:** when the query or `urls` arg contains explicit URLs, crawls them directly
+  2. **Search-engine URL discovery:** when no explicit URLs are provided, uses `crawler_adapter.discover_urls()` to crawl DuckDuckGo search results, extract and rank candidate URLs, then crawls the top results
+- URL discovery pipeline: DuckDuckGo HTML search → crawl search page → `content_extractor.extract_search_results_from_markdown()` → score/rank/filter → crawl top-k result pages
+- If the crawler adapter is not configured (`crawler_adapter=None`), `web_search` returns `status="not_configured"`
+
 ---
 
 ## 4. Dynamic Workspace and RAG Provider
@@ -140,6 +157,7 @@ class EnvLightRAGProvider:
 
 **Behavior:**
 
+- `build_rag_from_env()` reads the project root `.env` and bootstraps a `LightRAG` instance for the requested workspace
 - On first request for a workspace, calls `build_rag_from_env()` to create a LightRAG instance and `initialize_storages()`
 - Subsequent requests for the same workspace reuse the cached instance (`dict[str, LightRAG]`)
 - If no workspace is provided in the request, uses `config.runtime.default_workspace`
@@ -175,7 +193,7 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
 
 2. Invoke Route Judge
    └─ RouteJudge.plan(query, session_context, user_profile, available_tools)
-       ├─ Rule engine priority (regex matching for 6 scenario types)
+       ├─ Rule engine priority (regex matching for 7 scenario types)
        └─ Optional LLM refinement (when llm_client is available, LLM can adjust rule results)
        → Returns RouteDecision (structured routing plan)
 
@@ -229,11 +247,12 @@ class RouteJudge:
 
 ### 6.3 Routing Logic (LLM + Rule Fallback)
 
-The rule engine covers 6 scenario types:
+The rule engine covers 7 explicit patterns + 1 default fallback:
 
 | Scenario | Detection | Strategy | Tool Sequence |
 |---|---|---|---|
 | Simple greeting | `SIMPLE_PATTERN` | `simple_answer_no_tool` | Empty |
+| KG ingestion | `INGEST_PATTERN` | `kg_ingest_request` | [web_search →] kg_ingest |
 | Entity query | `ENTITY_PATTERN` | `graph_entity_lookup_first` | graph_entity_lookup → kg_hybrid_search |
 | Relation/causal | `RELATION_PATTERN` | `kg_hybrid_first_then_graph_trace` | kg_hybrid_search → graph_relation_trace |
 | Context follow-up | `FOLLOWUP_PATTERN` | `memory_first_then_*` | memory_search → subsequent tools |
@@ -333,13 +352,76 @@ Runtime → ToolRegistry.execute(name, **kwargs)
 | `graph_entity_lookup` | `tools/graph_tools.py` | graph | Implemented | **Yes** |
 | `graph_relation_trace` | `tools/graph_tools.py` | graph, explanation | Implemented | **Yes** |
 | `memory_search` | `agent/builtin_tools.py` | memory | Implemented | **Yes** (controlled by `KG_AGENT_ENABLE_MEMORY`) |
-| `web_search` | `tools/web_search.py` | web | Placeholder | **No** (`KG_AGENT_ENABLE_WEB_SEARCH` defaults to false) |
+| `web_search` | `tools/web_search.py` | web | Implemented: direct URL crawling + DuckDuckGo search-engine URL discovery via Crawl4AI | **No** (`KG_AGENT_ENABLE_WEB_SEARCH` defaults to false) |
+| `kg_ingest` | `tools/kg_ingest.py` | knowledge-graph, ingestion | Implemented: accepts text/markdown from any source and calls `rag.ainsert()` | **Yes** (controlled by `KG_AGENT_ENABLE_KG_INGEST`) |
 | `quant_backtest` | `tools/quant_tools.py` | quant | Placeholder | **Yes** (controlled by `KG_AGENT_ENABLE_QUANT`) |
 
 > **Note:** "Tool registered" does not mean "enabled by default". `GET /agent/tools` only returns tools with `enabled=True`.
-> At default startup, 6 tools are available (`web_search` is disabled by default).
+> At default startup, 7 tools are available (`web_search` is disabled by default).
 
-### 8.4 Standard Steps for Adding a New Tool
+### 8.5 Crawler Layer Architecture
+
+The crawler layer (`kg_agent/crawler/`) provides the infrastructure behind `web_search`:
+
+```
+web_search(query, urls, top_k)
+  ├─ _collect_urls()                       # Extract URLs from query text + urls arg
+  ├─ [no URLs] → crawler_adapter.discover_urls(query, top_k)
+  │    ├─ build_search_url(engine, query)  # DuckDuckGo HTML URL
+  │    ├─ crawl_url(search_url)            # Crawl search results page
+  │    └─ extract_search_results_from_markdown(markdown, query, top_k)
+  │         ├─ _decode_search_redirect()   # DuckDuckGo /l/?uddg= redirect decoding
+  │         ├─ _normalize_result_url()     # Strip tracking params, normalize path
+  │         ├─ _score_discovered_result()  # Token overlap + URL structure + domain signals
+  │         ├─ _is_blocked_result_domain() # Filter social media, etc.
+  │         ├─ _is_generic_listing_result()# Filter tag/category/archive pages
+  │         └─ Per-domain dedup + limit    # Max 2 results per domain
+  └─ crawler_adapter.crawl_urls(target_urls, max_pages)
+       └─ Crawl4AI AsyncWebCrawler
+            ├─ Browser auto-detection (Playwright → system Edge/Chrome fallback)
+            └─ _normalize_result() → CrawledPage
+```
+
+**Key content_extractor constants:**
+
+| Constant | Purpose |
+|---|---|
+| `BLOCKED_RESULT_DOMAINS` | Domains always excluded from discovery (social media, etc.) |
+| `LOW_QUALITY_RESULT_DOMAINS` | Domains deprioritized in ranking |
+| `GENERIC_PATH_SEGMENTS` | URL path segments indicating listing pages (tag, category, archive, etc.) |
+| `TRACKING_QUERY_KEYS` | URL query parameters stripped during normalization (utm_*, ref, src, etc.) |
+
+### 8.4 Web Search Semantics
+
+`web_search` supports two execution paths depending on input:
+
+**Path A — Direct URL crawling:**
+When the query text contains URLs or `urls=[...]` is provided in tool args, crawls those URLs directly.
+
+**Path B — Search-engine URL discovery:**
+When no explicit URLs are available, invokes `crawler_adapter.discover_urls(query, top_k)` which:
+1. Builds a DuckDuckGo HTML search URL via `content_extractor.build_search_url()`
+2. Crawls the search results page
+3. Extracts candidate links via `extract_search_results_from_markdown()` — decodes DuckDuckGo redirects, strips tracking params, scores results by query-token overlap / URL structure / domain quality
+4. Filters out blocked domains (social media, etc.) and generic listing pages
+5. Applies per-domain limits and returns top-k ranked `DiscoveredUrl` items
+6. Crawls the discovered URLs and returns page data
+
+**Return data per page:**
+
+- `title`, `final_url`, `excerpt`, `markdown`, `links`, `metadata`
+
+**Error cases:**
+
+| Condition | `status` | `success` |
+|---|---|---|
+| Crawler adapter not configured | `not_configured` | `false` |
+| Discovery returned no URLs | `discovery_failed` | `false` |
+| All crawled pages failed | `failed` | `false` |
+| Some pages failed | `partial_success` | `true` |
+| All pages succeeded | `success` | `true` |
+
+### 8.6 Standard Steps for Adding a New Tool
 
 1. Create a new file under `tools/`, implementing `async def my_tool(*, rag, query, ..., **_) -> ToolResult`
 2. Add parameter JSON Schema in `tool_schemas.py`
@@ -396,6 +478,7 @@ All configuration is read from environment variables with sensible defaults.
 | `KG_AGENT_ENABLE_WEB_SEARCH` | `false` | Enable web search |
 | `KG_AGENT_ENABLE_MEMORY` | `true` | Enable conversation memory |
 | `KG_AGENT_ENABLE_QUANT` | `true` | Enable quantitative tools |
+| `KG_AGENT_ENABLE_KG_INGEST` | `true` | Enable KG ingestion tool |
 
 ### 10.3 Runtime Configuration (AgentRuntimeConfig)
 
@@ -407,6 +490,21 @@ All configuration is read from environment variables with sensible defaults.
 | `KG_AGENT_MEMORY_WINDOW_TURNS` | `6` | Conversation memory window size |
 | `KG_AGENT_DEBUG` | `false` | Debug mode |
 
+### 10.4 Crawler Configuration (CrawlerConfig)
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `KG_AGENT_WEB_CRAWLER_PROVIDER` | `crawl4ai` | Current crawler backend |
+| `KG_AGENT_WEB_CRAWLER_BROWSER_TYPE` | `chromium` | Browser family for Crawl4AI |
+| `KG_AGENT_WEB_CRAWLER_BROWSER_CHANNEL` | empty | Preferred system browser channel (`chrome` / `msedge`) |
+| `KG_AGENT_WEB_CRAWLER_HEADLESS` | `true` | Run browser headlessly |
+| `KG_AGENT_WEB_CRAWLER_VERBOSE` | `false` recommended | Browser/crawler verbosity |
+| `KG_AGENT_WEB_CRAWLER_CACHE_MODE` | `BYPASS` | Crawl4AI cache mode |
+| `KG_AGENT_WEB_CRAWLER_MAX_PAGES` | `3` | Maximum pages per crawl request |
+| `KG_AGENT_WEB_CRAWLER_MAX_CONTENT_CHARS` | `4000` | Maximum extracted content length per page |
+| `KG_AGENT_WEB_CRAWLER_WORD_COUNT_THRESHOLD` | `20` | Minimum content threshold |
+| `KG_AGENT_WEB_CRAWLER_PAGE_TIMEOUT_MS` | `30000` | Per-page timeout |
+
 ---
 
 ## 11. API Endpoints
@@ -416,6 +514,7 @@ All configuration is read from environment variables with sensible defaults.
 | Method | Path | Defined In | Description |
 |---|---|---|---|
 | POST | `/agent/chat` | `agent_routes.py` | Main conversation entry point |
+| POST | `/agent/ingest` | `agent_routes.py` | Insert content into KG (web page, PDF, manual text, etc.) |
 | GET | `/agent/tools` | `agent_routes.py` | View currently enabled tools |
 | POST | `/agent/route_preview` | `agent_routes.py` | Return routing plan only (for debugging) |
 | GET | `/health` | `app.py` | Health check + workspace status |
@@ -446,7 +545,27 @@ All configuration is read from environment variables with sensible defaults.
 | `path_explanation` | `dict \| null` | Path explanation result |
 | `metadata` | `dict` | Metadata |
 
-### 11.2 GET /health
+### 11.2 POST /agent/ingest
+
+**Request Body (IngestRequest):**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `content` | `str \| list[str]` | Yes | Text or markdown content to ingest |
+| `source` | `str` | No | Provenance label (URL, file path, or descriptive tag) |
+| `workspace` | `str` | No | Target workspace (uses default if omitted) |
+
+**Response Body (IngestResponse):**
+
+| Field | Type | Description |
+|---|---|---|
+| `status` | `str` | `"accepted"` on success |
+| `track_id` | `str \| null` | LightRAG pipeline tracking ID |
+| `document_count` | `int` | Number of documents accepted |
+| `source` | `str \| null` | Echoed provenance label |
+| `message` | `str` | Human-readable status message |
+
+### 11.3 GET /health
 
 **Response Body:**
 
@@ -455,9 +574,11 @@ All configuration is read from environment variables with sensible defaults.
 | `status` | `str` | Fixed `"ok"` |
 | `service` | `str` | Fixed `"kg_agent"` |
 | `workspace` | `str` | Current default workspace |
-| `rag_bootstrapped` | `bool` | Whether rag or rag_provider is ready |
+| `default_workspace` | `str` | Default workspace resolved from config/environment |
+| `rag_bootstrapped` | `bool` | Whether the app has a usable fixed rag instance or a ready rag_provider bootstrap path |
 | `dynamic_workspace_enabled` | `bool` | Whether dynamic workspace (provider mode) is in use |
 | `active_workspaces` | `list[str]` | List of currently loaded workspaces |
+| `active_workspace_count` | `int` | Number of currently loaded workspaces |
 
 ---
 
@@ -488,6 +609,21 @@ python -m kg_agent.api.app
 - Storage config (required by LightRAG backend): `NEO4J_URI`, `QDRANT_URL`, `MONGO_URI`, etc.
 - Optional Agent-specific config: `KG_AGENT_MODEL_NAME`, `KG_AGENT_ENABLE_*`
 
+**Crawl4AI requirements (when enabling `web_search`):**
+
+1. Install API dependencies so `crawl4ai` is present in `.venv`
+2. Enable the tool:
+   - `KG_AGENT_ENABLE_WEB_SEARCH=true`
+3. Recommended on Windows:
+   - set `KG_AGENT_WEB_CRAWLER_BROWSER_CHANNEL=chrome` or `msedge`
+   - this lets Crawl4AI reuse an already installed system browser and avoids slow Playwright browser downloads
+4. If you intentionally use Playwright-managed browsers instead of system Chrome/Edge, `crawl4ai-setup` may download/update browser runtimes under:
+   - `%LOCALAPPDATA%\\ms-playwright\\`
+   - this is separate from your normal Chrome/Edge installation
+
+**Important Windows note:**  
+The adapter suppresses Crawl4AI run-time console logging because Rich console output can hit `UnicodeEncodeError` under legacy GBK terminals.
+
 ---
 
 ## 13. Guidelines for Modifying This Directory
@@ -509,7 +645,7 @@ python -m kg_agent.api.app
 | Add a new tool | Create file in `tools/` → add schema in `tool_schemas.py` → register in `builtin_tools.py` |
 | Modify routing strategy | Add regex pattern in `route_judge.py` or adjust LLM prompt |
 | Improve path explanation | Adjust scoring/evidence selection logic in `path_explainer.py` |
-| Integrate external search | Replace placeholder implementation in `tools/web_search.py` |
+| Extend search-engine discovery | Add engine support in `content_extractor.build_search_url()` and adapter |
 | Integrate quant service | Replace placeholder implementation in `tools/quant_tools.py` |
 | Persist conversation memory | Rewrite `memory/conversation_memory.py` to integrate Redis/MongoDB |
 | Cross-session memory | Implement `search()` in `memory/cross_session_store.py` |
@@ -541,6 +677,7 @@ python -m kg_agent.api.app
 | `ToolRegistry` | `agent/tool_registry.py` | Tool registration and execution |
 | `ToolDefinition` | `tools/base.py` | Tool definition data structure |
 | `ToolResult` | `tools/base.py` | Tool execution result |
+| `kg_ingest()` | `tools/kg_ingest.py` | Generic KG ingestion tool |
 | `build_default_tool_registry()` | `agent/builtin_tools.py` | Build default tool set |
 | `KGAgentConfig` | `config.py` | Unified configuration entry point |
 | `AgentLLMClient` | `config.py` | OpenAI-compatible LLM client |
@@ -558,10 +695,11 @@ python -m kg_agent.api.app
 
 - **ConversationMemoryStore** and **UserProfileStore** are currently in-memory implementations; data is lost on restart; persistent storage integration is needed
 - **CrossSessionStore** is an empty placeholder; cross-session vector retrieval needs to be designed
-- **web_search** placeholder not implemented; needs integration with AI crawler or search API
 - **quant_backtest** placeholder not implemented; needs integration with quantitative engine
+- **Scheduler** (`crawler/scheduler.py`) is an empty placeholder; recurring crawl + auto-ingest not yet implemented
+- **Crawl → Ingest pipeline** works manually (RouteJudge routes ingestion intent to `web_search` → `kg_ingest`), but no automated recurring ingest is implemented yet
+- **Playwright browser detection** uses Playwright sync API to verify the exact chromium executable exists; on version mismatch the adapter falls back to system Edge/Chrome via `browser_channel`
 - **Streaming (stream)** API parameter is reserved but streaming output is not yet implemented
 - Path explanation scoring algorithm is based on simple token overlap; semantic similarity can be integrated later
 - Route Judge LLM refinement lacks multi-version prompt management
-- Crawler module (`crawler/` directory) and crawler routes are not yet implemented
 - Smart truncation for dynamic attention window is not yet implemented (currently uses fixed turns truncation)

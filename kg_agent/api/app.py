@@ -24,6 +24,7 @@ from lightrag_fork.utils import EmbeddingFunc, get_env_value
 from kg_agent.agent.agent_core import AgentCore
 from kg_agent.api.agent_routes import create_agent_routes
 from kg_agent.config import KGAgentConfig
+from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
 
 load_dotenv(dotenv_path=".env", override=False)
 
@@ -364,11 +365,29 @@ def build_agent_core_from_env(
     *,
     rag: LightRAG | None = None,
     rag_provider=None,
+    crawler_adapter: Crawl4AIAdapter | None = None,
 ) -> AgentCore:
     config = KGAgentConfig.from_env()
     if rag_provider is not None:
-        return AgentCore(rag_provider=rag_provider, config=config)
-    return AgentCore(rag=rag or build_rag_from_env(), config=config)
+        return AgentCore(
+            rag_provider=rag_provider,
+            config=config,
+            crawler_adapter=crawler_adapter,
+        )
+    return AgentCore(
+        rag=rag or build_rag_from_env(),
+        config=config,
+        crawler_adapter=crawler_adapter,
+    )
+
+
+def build_crawler_adapter_from_env(
+    *, config: KGAgentConfig | None = None
+) -> Crawl4AIAdapter | None:
+    config_obj = config or KGAgentConfig.from_env()
+    if not config_obj.tool_config.enable_web_search:
+        return None
+    return Crawl4AIAdapter(config=config_obj.crawler)
 
 
 def create_app(
@@ -381,23 +400,38 @@ def create_app(
     rag_instance = rag
     rag_provider = None
     config_obj = config or KGAgentConfig.from_env()
+    crawler_adapter = None
 
     if agent_core is None:
+        crawler_adapter = build_crawler_adapter_from_env(config=config_obj)
         if rag_instance is None:
             rag_provider = EnvLightRAGProvider(config=config_obj)
             manage_rag_lifecycle = True
-            agent_core = AgentCore(rag_provider=rag_provider.get, config=config_obj)
+            agent_core = AgentCore(
+                rag_provider=rag_provider.get,
+                config=config_obj,
+                crawler_adapter=crawler_adapter,
+            )
         else:
-            agent_core = AgentCore(rag=rag_instance, config=config_obj)
+            agent_core = AgentCore(
+                rag=rag_instance,
+                config=config_obj,
+                crawler_adapter=crawler_adapter,
+            )
     elif rag_instance is None:
         rag_instance = getattr(agent_core, "_rag", None)
         rag_provider = getattr(agent_core, "_rag_provider", None)
+        crawler_adapter = getattr(agent_core, "crawler_adapter", None)
+    else:
+        crawler_adapter = getattr(agent_core, "crawler_adapter", None)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         try:
             yield
         finally:
+            if crawler_adapter is not None:
+                await crawler_adapter.close()
             if manage_rag_lifecycle and rag_provider is not None:
                 await rag_provider.finalize_all()
             elif manage_rag_lifecycle and rag_instance is not None:
@@ -412,23 +446,29 @@ def create_app(
     )
     app.state.rag = rag_instance
     app.state.rag_provider = rag_provider
+    app.state.crawler_adapter = crawler_adapter
     app.state.agent_core = agent_core
     app.include_router(create_agent_routes(agent_core))
 
     @app.get("/health")
     async def health():
         health_workspace = getattr(rag_instance, "workspace", None)
+        default_workspace = config_obj.runtime.default_workspace or ""
+        active_workspaces = []
         if health_workspace is None and rag_provider is not None:
             health_workspace = rag_provider.default_workspace
+            active_workspaces = rag_provider.list_active_workspaces()
+        elif rag_provider is not None:
+            active_workspaces = rag_provider.list_active_workspaces()
         return {
             "status": "ok",
             "service": "kg_agent",
             "workspace": health_workspace,
+            "default_workspace": default_workspace,
             "rag_bootstrapped": bool(rag_instance is not None or rag_provider is not None),
             "dynamic_workspace_enabled": bool(rag_provider is not None),
-            "active_workspaces": (
-                rag_provider.list_active_workspaces() if rag_provider is not None else []
-            ),
+            "active_workspaces": active_workspaces,
+            "active_workspace_count": len(active_workspaces),
         }
 
     return app

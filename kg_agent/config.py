@@ -73,6 +73,7 @@ class ToolConfig:
     enable_web_search: bool = False
     enable_memory: bool = True
     enable_quant: bool = True
+    enable_kg_ingest: bool = True
 
     @classmethod
     def from_env(cls) -> "ToolConfig":
@@ -80,6 +81,42 @@ class ToolConfig:
             enable_web_search=_env_bool("KG_AGENT_ENABLE_WEB_SEARCH", False),
             enable_memory=_env_bool("KG_AGENT_ENABLE_MEMORY", True),
             enable_quant=_env_bool("KG_AGENT_ENABLE_QUANT", True),
+            enable_kg_ingest=_env_bool("KG_AGENT_ENABLE_KG_INGEST", True),
+        )
+
+
+@dataclass
+class CrawlerConfig:
+    provider: str = "crawl4ai"
+    browser_type: str = "chromium"
+    browser_channel: str = ""
+    search_engine: str = "duckduckgo"
+    headless: bool = True
+    verbose: bool = False
+    cache_mode: str = "BYPASS"
+    max_pages: int = 3
+    max_content_chars: int = 4000
+    word_count_threshold: int = 20
+    page_timeout_ms: int = 30000
+
+    @classmethod
+    def from_env(cls) -> "CrawlerConfig":
+        return cls(
+            provider=os.getenv("KG_AGENT_WEB_CRAWLER_PROVIDER", "crawl4ai"),
+            browser_type=os.getenv("KG_AGENT_WEB_CRAWLER_BROWSER_TYPE", "chromium"),
+            browser_channel=os.getenv("KG_AGENT_WEB_CRAWLER_BROWSER_CHANNEL", "").strip(),
+            search_engine=os.getenv("KG_AGENT_WEB_SEARCH_ENGINE", "duckduckgo"),
+            headless=_env_bool("KG_AGENT_WEB_CRAWLER_HEADLESS", True),
+            verbose=_env_bool("KG_AGENT_WEB_CRAWLER_VERBOSE", False),
+            cache_mode=os.getenv("KG_AGENT_WEB_CRAWLER_CACHE_MODE", "BYPASS"),
+            max_pages=_env_int("KG_AGENT_WEB_CRAWLER_MAX_PAGES", 3),
+            max_content_chars=_env_int("KG_AGENT_WEB_CRAWLER_MAX_CONTENT_CHARS", 4000),
+            word_count_threshold=_env_int(
+                "KG_AGENT_WEB_CRAWLER_WORD_COUNT_THRESHOLD", 20
+            ),
+            page_timeout_ms=_env_int(
+                "KG_AGENT_WEB_CRAWLER_PAGE_TIMEOUT_MS", 30000
+            ),
         )
 
 
@@ -110,6 +147,7 @@ class AgentRuntimeConfig:
 class KGAgentConfig:
     agent_model: AgentModelConfig = field(default_factory=AgentModelConfig)
     tool_config: ToolConfig = field(default_factory=ToolConfig)
+    crawler: CrawlerConfig = field(default_factory=CrawlerConfig)
     runtime: AgentRuntimeConfig = field(default_factory=AgentRuntimeConfig)
     judge_model: AgentModelConfig | None = None
     answer_model: AgentModelConfig | None = None
@@ -120,6 +158,7 @@ class KGAgentConfig:
         return cls(
             agent_model=AgentModelConfig.from_env(),
             tool_config=ToolConfig.from_env(),
+            crawler=CrawlerConfig.from_env(),
             runtime=AgentRuntimeConfig.from_env(),
         )
 

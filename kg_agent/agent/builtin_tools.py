@@ -7,6 +7,7 @@ from kg_agent.agent.tool_schemas import (
     GRAPH_ENTITY_LOOKUP_SCHEMA,
     GRAPH_RELATION_TRACE_SCHEMA,
     KG_HYBRID_SEARCH_SCHEMA,
+    KG_INGEST_SCHEMA,
     KG_NAIVE_SEARCH_SCHEMA,
     MEMORY_SEARCH_SCHEMA,
     QUANT_BACKTEST_SCHEMA,
@@ -16,6 +17,7 @@ from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.tools.base import ToolDefinition, ToolResult
 from kg_agent.tools.graph_tools import graph_entity_lookup, graph_relation_trace
 from kg_agent.tools.quant_tools import quant_backtest
+from kg_agent.tools.kg_ingest import kg_ingest
 from kg_agent.tools.retrieval_tools import kg_hybrid_search, kg_naive_search
 from kg_agent.tools.web_search import web_search
 
@@ -100,7 +102,7 @@ def build_default_tool_registry(config, memory_store: ConversationMemoryStore) -
     registry.register(
         ToolDefinition(
             name="web_search",
-            description="Search external web results for time-sensitive questions.",
+            description="Crawl provided URLs and extract readable page content for time-sensitive questions.",
             input_schema=WEB_SEARCH_SCHEMA,
             handler=web_search,
             enabled=config.tool_config.enable_web_search,
@@ -115,6 +117,16 @@ def build_default_tool_registry(config, memory_store: ConversationMemoryStore) -
             handler=quant_backtest,
             enabled=config.tool_config.enable_quant,
             tags=["quant"],
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="kg_ingest",
+            description="Insert text or markdown content into the knowledge graph. Accepts content from any source (web page, PDF, manual input, etc.).",
+            input_schema=KG_INGEST_SCHEMA,
+            handler=kg_ingest,
+            enabled=config.tool_config.enable_kg_ingest,
+            tags=["knowledge-graph", "ingestion"],
         )
     )
     return registry

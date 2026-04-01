@@ -31,6 +31,11 @@ SIMPLE_PATTERN = re.compile(
     r"^\s*(hi|hello|你好|嗨|谢谢|thanks|thank you)\s*[!?。？！]*\s*$",
     re.IGNORECASE,
 )
+INGEST_PATTERN = re.compile(
+    r"(收录|入库|写入|导入|添加到知识|存入|录入|ingest|import.*(into|to).*(kg|graph|knowledge)|add.*(to|into).*(kg|graph|knowledge)|store.*(into|to))",
+    re.IGNORECASE,
+)
+URL_PATTERN = re.compile(r"https?://[^\s)>\"']+", re.IGNORECASE)
 
 
 @dataclass
@@ -94,6 +99,8 @@ class RouteJudge:
         is_quant = bool(QUANT_PATTERN.search(normalized_query))
         is_relation = bool(RELATION_PATTERN.search(normalized_query))
         is_entity = bool(ENTITY_PATTERN.search(normalized_query))
+        is_ingest = bool(INGEST_PATTERN.search(normalized_query))
+        direct_urls = URL_PATTERN.findall(normalized_query)
 
         sequence: list[ToolCallPlan] = []
         need_memory = False
@@ -102,7 +109,7 @@ class RouteJudge:
         strategy = "simple_answer_no_tool"
         reason = "The query can be handled without external tools."
 
-        if is_simple and not any([is_quant, needs_realtime, is_relation, is_entity]):
+        if is_simple and not any([is_quant, needs_realtime, is_relation, is_entity, is_ingest]):
             return RouteDecision(
                 need_tools=False,
                 need_memory=False,
@@ -118,7 +125,22 @@ class RouteJudge:
             sequence.append(ToolCallPlan(tool="memory_search", args={"limit": 4}))
             need_memory = True
 
-        if is_quant and "quant_backtest" in available_tools:
+        if is_ingest and "kg_ingest" in available_tools:
+            strategy = "kg_ingest_request"
+            if direct_urls and "web_search" in available_tools:
+                sequence.append(
+                    ToolCallPlan(tool="web_search", args={"urls": direct_urls[:3]})
+                )
+                need_web_search = True
+            sequence.append(ToolCallPlan(tool="kg_ingest"))
+            reason = "The user wants to ingest content into the knowledge graph."
+        elif direct_urls and "web_search" in available_tools:
+            strategy = "direct_url_crawl"
+            sequence.append(
+                ToolCallPlan(tool="web_search", args={"urls": direct_urls[:3]})
+            )
+            reason = "The query includes direct URLs, so the crawler should fetch those pages first."
+        elif is_quant and "quant_backtest" in available_tools:
             strategy = "quant_request"
             sequence.append(ToolCallPlan(tool="quant_backtest"))
             reason = "The query mentions trading or backtest metrics, so the quant tool should be used."

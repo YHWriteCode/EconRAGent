@@ -55,6 +55,40 @@ class RoutePreviewResponse(BaseModel):
     route: dict[str, Any]
 
 
+class IngestRequest(BaseModel):
+    content: str | list[str] = Field(
+        ..., description="Text or markdown content to ingest into the knowledge graph"
+    )
+    source: str | None = Field(
+        default=None,
+        description="Provenance label (URL, file path, or descriptive tag)",
+    )
+    workspace: str | None = Field(
+        default=None,
+        description="Target workspace (uses default if omitted)",
+    )
+
+    @field_validator("content", mode="after")
+    @classmethod
+    def validate_content(cls, value: str | list[str]) -> str | list[str]:
+        if isinstance(value, str):
+            if not value.strip():
+                raise ValueError("content must be non-empty")
+            return value
+        filtered = [v for v in value if isinstance(v, str) and v.strip()]
+        if not filtered:
+            raise ValueError("content list must contain at least one non-empty string")
+        return filtered
+
+
+class IngestResponse(BaseModel):
+    status: str
+    track_id: str | None = None
+    document_count: int = 0
+    source: str | None = None
+    message: str = ""
+
+
 def create_agent_routes(agent_core):
     router = APIRouter(tags=["agent"])
 
@@ -73,6 +107,29 @@ def create_agent_routes(agent_core):
                 stream=request.stream,
             )
             return response.to_dict()
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @router.post("/agent/ingest", response_model=IngestResponse)
+    async def agent_ingest(request: IngestRequest):
+        try:
+            rag = await agent_core._resolve_rag(request.workspace)
+            docs = (
+                [request.content]
+                if isinstance(request.content, str)
+                else request.content
+            )
+            track_id = await rag.ainsert(
+                input=docs if len(docs) > 1 else docs[0],
+                file_paths=request.source,
+            )
+            return IngestResponse(
+                status="accepted",
+                track_id=track_id,
+                document_count=len(docs),
+                source=request.source,
+                message=f"Accepted {len(docs)} document(s) for ingestion",
+            )
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
