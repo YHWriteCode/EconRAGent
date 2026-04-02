@@ -1,4 +1,4 @@
-"""KG ingestion tool — insert text / markdown content into the knowledge graph.
+"""KG ingestion tool: insert text or markdown content into the knowledge graph.
 
 Accepts content from any source (web crawl, PDF extraction, manual input, etc.)
 and delegates to ``LightRAG.ainsert()`` for chunking, entity extraction, and
@@ -20,7 +20,7 @@ async def kg_ingest(
     rag,
     query: str,
     content: str | list[str] | None = None,
-    source: str | None = None,
+    source: str | list[str] | None = None,
     **_: Any,
 ) -> ToolResult:
     """Insert text content into the knowledge graph via ``rag.ainsert()``.

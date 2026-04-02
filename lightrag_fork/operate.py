@@ -1559,6 +1559,8 @@ async def _rebuild_single_relationship(
                 "entity_type": "UNKNOWN",
                 "file_path": node_file_path,
                 "created_at": node_created_at,
+                "last_confirmed_at": node_created_at,
+                "confirmation_count": 1,
                 "truncate": "",
             }
             await knowledge_graph_inst.upsert_node(node_id, node_data=node_data)
@@ -1678,10 +1680,14 @@ async def _merge_nodes_then_upsert(
     already_source_ids = []
     already_description = []
     already_file_paths = []
+    existing_created_at = None
+    existing_confirmation_count = None
 
     # 1. Get existing node data from knowledge graph
     already_node = await knowledge_graph_inst.get_node(entity_name)
     if already_node:
+        existing_created_at = already_node.get("created_at")
+        existing_confirmation_count = already_node.get("confirmation_count")
         existing_entity_type = already_node.get("entity_type")
         # Coerce to str before any string operations: non-string values from
         # API/custom graph paths would otherwise raise TypeError on the comma check.
@@ -1931,13 +1937,23 @@ async def _merge_nodes_then_upsert(
         logger.debug(status_message)
 
     # 11. Update both graph and vector db
+    current_time = int(time.time())
     node_data = dict(
         entity_id=entity_name,
         entity_type=entity_type,
         description=description,
         source_id=source_id,
         file_path=file_path,
-        created_at=int(time.time()),
+        created_at=existing_created_at
+        if isinstance(existing_created_at, (int, float))
+        else current_time,
+        last_confirmed_at=current_time,
+        confirmation_count=(
+            int(existing_confirmation_count)
+            if isinstance(existing_confirmation_count, (int, float))
+            else 1
+        )
+        + (1 if already_node else 0),
         truncate=truncation_info,
     )
     await knowledge_graph_inst.upsert_node(
@@ -1991,12 +2007,16 @@ async def _merge_edges_then_upsert(
     already_description = []
     already_keywords = []
     already_file_paths = []
+    existing_edge_created_at = None
+    existing_edge_confirmation_count = None
 
     # 1. Get existing edge data from graph storage
     if await knowledge_graph_inst.has_edge(src_id, tgt_id):
         already_edge = await knowledge_graph_inst.get_edge(src_id, tgt_id)
         # Handle the case where get_edge returns None or missing fields
         if already_edge:
+            existing_edge_created_at = already_edge.get("created_at")
+            existing_edge_confirmation_count = already_edge.get("confirmation_count")
             # Get weight with default 1.0 if missing
             already_weights.append(already_edge.get("weight", 1.0))
 
@@ -2276,6 +2296,8 @@ async def _merge_edges_then_upsert(
                 "entity_type": "UNKNOWN",
                 "file_path": file_path,
                 "created_at": node_created_at,
+                "last_confirmed_at": node_created_at,
+                "confirmation_count": 1,
                 "truncate": "",
             }
             await knowledge_graph_inst.upsert_node(need_insert_id, node_data=node_data)
@@ -2322,6 +2344,8 @@ async def _merge_edges_then_upsert(
                     "source_id": source_id,
                     "file_path": file_path,
                     "created_at": node_created_at,
+                    "last_confirmed_at": node_created_at,
+                    "confirmation_count": 1,
                 }
                 added_entities.append(entity_data)
         else:
@@ -2438,7 +2462,16 @@ async def _merge_edges_then_upsert(
             keywords=keywords,
             source_id=source_id,
             file_path=file_path,
-            created_at=edge_created_at,
+            created_at=existing_edge_created_at
+            if isinstance(existing_edge_created_at, (int, float))
+            else edge_created_at,
+            last_confirmed_at=edge_created_at,
+            confirmation_count=(
+                int(existing_edge_confirmation_count)
+                if isinstance(existing_edge_confirmation_count, (int, float))
+                else 1
+            )
+            + (1 if already_edge else 0),
             truncate=truncation_info,
         ),
     )
@@ -2450,7 +2483,16 @@ async def _merge_edges_then_upsert(
         keywords=keywords,
         source_id=source_id,
         file_path=file_path,
-        created_at=edge_created_at,
+        created_at=existing_edge_created_at
+        if isinstance(existing_edge_created_at, (int, float))
+        else edge_created_at,
+        last_confirmed_at=edge_created_at,
+        confirmation_count=(
+            int(existing_edge_confirmation_count)
+            if isinstance(existing_edge_confirmation_count, (int, float))
+            else 1
+        )
+        + (1 if already_edge else 0),
         truncate=truncation_info,
         weight=weight,
     )
@@ -3818,6 +3860,8 @@ async def _apply_token_truncation(
                 "type": entity.get("entity_type", "UNKNOWN"),
                 "description": entity.get("description", "UNKNOWN"),
                 "created_at": created_at,
+                "last_confirmed_at": entity.get("last_confirmed_at"),
+                "confirmation_count": entity.get("confirmation_count"),
                 "file_path": entity.get("file_path", "unknown_source"),
             }
         )
@@ -3845,6 +3889,8 @@ async def _apply_token_truncation(
                 "entity2": entity2,
                 "description": relation.get("description", "UNKNOWN"),
                 "created_at": created_at,
+                "last_confirmed_at": relation.get("last_confirmed_at"),
+                "confirmation_count": relation.get("confirmation_count"),
                 "file_path": relation.get("file_path", "unknown_source"),
             }
         )
@@ -4377,7 +4423,9 @@ async def _get_node_data(
             **n,
             "entity_name": k["entity_name"],
             "rank": d,
-            "created_at": k.get("created_at"),
+            "created_at": n.get("created_at", k.get("created_at")),
+            "last_confirmed_at": n.get("last_confirmed_at"),
+            "confirmation_count": n.get("confirmation_count"),
         }
         for k, n, d in zip(results, node_datas, node_degrees)
         if n is not None

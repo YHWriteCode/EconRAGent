@@ -66,10 +66,12 @@ kg_agent/
 │   └── user_profile.py            # UserProfileStore: user profile storage
 │
 ├── crawler/                       # Web crawling layer
-│   ├── __init__.py                # Exports Crawl4AIAdapter, CrawledPage, DiscoveredUrl
+│   ├── __init__.py                # Exports Crawl4AIAdapter, CrawledPage, DiscoveredUrl, IngestScheduler, source/state types
 │   ├── crawler_adapter.py         # Crawl4AIAdapter: start/close/crawl_url/crawl_urls/discover_urls; CrawledPage, DiscoveredUrl dataclasses
 │   ├── content_extractor.py       # Search-result extraction, URL scoring/ranking, Markdown normalization, DuckDuckGo redirect decoding
-│   └── scheduler.py               # Future recurring crawl scheduler placeholder
+│   ├── source_registry.py         # MonitoredSource, SourceRegistry, JsonSourceRegistry
+│   ├── crawl_state_store.py       # CrawlStateRecord, CrawlStateStore, JsonCrawlStateStore
+│   └── scheduler.py               # IngestScheduler: recurring crawl + content-hash dedup + JSON-backed state
 │
 └── api/                           # External API
     ├── __init__.py
@@ -128,6 +130,14 @@ These fields are injected uniformly by the framework; a tool handler's `args` ca
   2. **Search-engine URL discovery:** when no explicit URLs are provided, uses `crawler_adapter.discover_urls()` to crawl DuckDuckGo search results, extract and rank candidate URLs, then crawls the top results
 - URL discovery pipeline: DuckDuckGo HTML search → crawl search page → `content_extractor.extract_search_results_from_markdown()` → score/rank/filter → crawl top-k result pages
 - If the crawler adapter is not configured (`crawler_adapter=None`), `web_search` returns `status="not_configured"`
+
+### 3.8 Dynamic-Graph v1 Constraints
+
+- `web_search -> kg_ingest` is currently implemented as an explicit `AgentCore` bridge, not as generic tool output piping
+- `recent_tool_calls` should only inject compact tool history from the most recent assistant turn unless a later design explicitly changes that rule
+- `compact_tool_calls` must remain lightweight: store `tool`, `success`, `summary`, `strategy`, `timestamp`; do not persist full tool data or crawled page markdown in conversation memory
+- Scheduler v1 assumes single process / single worker deployment; do not add leader election or distributed coordination in `kg_agent/` without a dedicated design pass
+- `sources_file=""` means in-memory source registry only; non-empty file paths must persist source CRUD changes to JSON
 
 ---
 
@@ -203,7 +213,16 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
        ├─ Accumulate graph_paths and evidence_chunks (for path explanation)
        └─ Support early termination (optional tools skipped when preceding tools succeed)
 
-4. Path explanation (optional)
+4. Dynamic-graph bridge (conditional)
+   └─ For selected strategies only:
+       ├─ `freshness_aware_search`
+       │    ├─ inspect KG result freshness / gap
+       │    └─ optional `web_search.pages -> kg_ingest(content/source)` auto-ingest bridge
+       └─ `correction_and_refresh`
+            ├─ derive correction search query from recent context
+            └─ `web_search.pages -> kg_ingest(content/source)` refresh bridge
+
+5. Path explanation (optional)
    └─ When route.need_path_explanation=True
        PathExplainer.explain(query, graph_paths, evidence_chunks)
        ├─ Candidate path scoring (token overlap + evidence coverage)
@@ -211,12 +230,13 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
        ├─ LLM generates explanation (optional, with fallback)
        └─ On no results, returns enabled=False with empty structure
 
-5. Final answer generation
+6. Final answer generation
    └─ LLM summary: query + route + tool_results + path_explanation + history
        └─ Fallback: structured text concatenation
 
-6. Persistence
+7. Persistence
    └─ Write current user/assistant messages to ConversationMemoryStore
+      └─ assistant metadata includes `compact_tool_calls` and compact response metadata
 ```
 
 ---
@@ -247,7 +267,7 @@ class RouteJudge:
 
 ### 6.3 Routing Logic (LLM + Rule Fallback)
 
-The rule engine covers 7 explicit patterns + 1 default fallback:
+The rule engine covers explicit patterns plus the default factual fallback:
 
 | Scenario | Detection | Strategy | Tool Sequence |
 |---|---|---|---|
@@ -256,11 +276,19 @@ The rule engine covers 7 explicit patterns + 1 default fallback:
 | Entity query | `ENTITY_PATTERN` | `graph_entity_lookup_first` | graph_entity_lookup → kg_hybrid_search |
 | Relation/causal | `RELATION_PATTERN` | `kg_hybrid_first_then_graph_trace` | kg_hybrid_search → graph_relation_trace |
 | Context follow-up | `FOLLOWUP_PATTERN` | `memory_first_then_*` | memory_search → subsequent tools |
-| Real-time info | `REALTIME_PATTERN` | `web_search_first` | web_search |
+| Real-time info | `REALTIME_PATTERN` | `freshness_aware_search` | web_search → kg_hybrid_search |
+| User correction | `CORRECTION_PATTERN` + recent KG tools | `correction_and_refresh` | web_search |
+| Direct URL query | `URL_PATTERN` | `direct_url_crawl` | web_search |
 | Quant analysis | `QUANT_PATTERN` | `quant_request` | quant_backtest |
 | Default factual QA | Fallback | `factual_qa` | kg_hybrid_search |
 
 LLM refinement: When `llm_client` is available and the scenario is not simple/quant, the rule result is passed to the LLM for secondary adjustment (still constrained by `available_tools`; it will not invent nonexistent tools).
+
+**Important dynamic-graph rules:**
+
+- `correction_and_refresh` only fires when the current query matches correction intent and `session_context["recent_tool_calls"]` proves the previous assistant turn used KG retrieval tools
+- `kg_ingest` is intentionally not inserted into realtime/correction `tool_sequence`; the bridge happens in `AgentCore`
+- realtime freshness decisions currently rely on rule-based freshness checks, not on an LLM-only freshness classifier
 
 ---
 
@@ -352,8 +380,8 @@ Runtime → ToolRegistry.execute(name, **kwargs)
 | `graph_entity_lookup` | `tools/graph_tools.py` | graph | Implemented | **Yes** |
 | `graph_relation_trace` | `tools/graph_tools.py` | graph, explanation | Implemented | **Yes** |
 | `memory_search` | `agent/builtin_tools.py` | memory | Implemented | **Yes** (controlled by `KG_AGENT_ENABLE_MEMORY`) |
-| `web_search` | `tools/web_search.py` | web | Implemented: direct URL crawling + DuckDuckGo search-engine URL discovery via Crawl4AI | **No** (`KG_AGENT_ENABLE_WEB_SEARCH` defaults to false) |
-| `kg_ingest` | `tools/kg_ingest.py` | knowledge-graph, ingestion | Implemented: accepts text/markdown from any source and calls `rag.ainsert()` | **Yes** (controlled by `KG_AGENT_ENABLE_KG_INGEST`) |
+| `web_search` | `tools/web_search.py` | web | Implemented: direct URL crawling + DuckDuckGo search-engine URL discovery via Crawl4AI; supports `search_query` override | **No** (`KG_AGENT_ENABLE_WEB_SEARCH` defaults to false) |
+| `kg_ingest` | `tools/kg_ingest.py` | knowledge-graph, ingestion | Implemented: accepts text/markdown from any source and calls `rag.ainsert()`; `source` accepts `str \| list[str] \| None` | **Yes** (controlled by `KG_AGENT_ENABLE_KG_INGEST`) |
 | `quant_backtest` | `tools/quant_tools.py` | quant | Placeholder | **Yes** (controlled by `KG_AGENT_ENABLE_QUANT`) |
 
 > **Note:** "Tool registered" does not mean "enabled by default". `GET /agent/tools` only returns tools with `enabled=True`.
@@ -429,6 +457,12 @@ When no explicit URLs are available, invokes `crawler_adapter.discover_urls(quer
 4. If toggle control is needed, add a corresponding field in `ToolConfig` in `config.py`
 5. If routing support is needed, add a corresponding rule pattern in `route_judge.py`
 
+### 8.7 Retrieval Freshness Decay
+
+- `kg_hybrid_search` and `kg_naive_search` both accept internal `search_query`
+- When `KG_AGENT_ENABLE_FRESHNESS_DECAY=true`, `retrieval_tools.py` reorders returned `entities` and `relationships` using existing `rank` plus `last_confirmed_at`
+- This is a v1 post-retrieval adjustment only; do not describe it as a deep `operate.py` ranking change
+
 ---
 
 ## 9. Memory System
@@ -438,8 +472,15 @@ When no explicit URLs are available, invokes `crawler_adapter.discover_urls(quer
 - In-memory implementation (`dict[session_id, list[MemoryMessage]]`)
 - `append_message(session_id, role, content)` — append message
 - `get_recent_history(session_id, turns)` — get last N conversation turns
+- `get_recent_tool_calls(session_id, assistant_turns)` — returns flattened compact tool history from recent assistant turns
 - `search(session_id, query, limit)` — token-overlap search for relevant messages
 - `clear_session(session_id)` — clear session
+
+`AgentCore` currently stores the following assistant metadata into memory:
+
+- `route_strategy`
+- `compact_tool_calls`
+- compact `response_metadata` subset, including `freshness_action` / `freshness_reason` when present
 
 ### 9.2 CrossSessionStore (Cross-Session)
 
@@ -505,6 +546,24 @@ All configuration is read from environment variables with sensible defaults.
 | `KG_AGENT_WEB_CRAWLER_WORD_COUNT_THRESHOLD` | `20` | Minimum content threshold |
 | `KG_AGENT_WEB_CRAWLER_PAGE_TIMEOUT_MS` | `30000` | Per-page timeout |
 
+### 10.5 Scheduler Configuration (SchedulerConfig)
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `KG_AGENT_ENABLE_SCHEDULER` | `false` | Enable recurring crawl scheduler |
+| `KG_AGENT_SCHEDULER_CHECK_INTERVAL` | `60` | Scheduler loop interval in seconds |
+| `KG_AGENT_SCHEDULER_SOURCES_FILE` | empty | Optional JSON file for source persistence |
+| `KG_AGENT_SCHEDULER_STATE_FILE` | `scheduler_state.json` | JSON file for crawl state persistence |
+
+### 10.6 Freshness Configuration (FreshnessConfig)
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `KG_AGENT_FRESHNESS_THRESHOLD_SECONDS` | `604800` | Freshness threshold for graph age checks |
+| `KG_AGENT_ENABLE_AUTO_INGEST` | `false` | Allow realtime auto-ingest bridge during chat |
+| `KG_AGENT_STALENESS_DECAY_DAYS` | `7.0` | Half-life parameter for retrieval freshness decay |
+| `KG_AGENT_ENABLE_FRESHNESS_DECAY` | `false` | Enable retrieval-layer freshness decay |
+
 ---
 
 ## 11. API Endpoints
@@ -517,6 +576,11 @@ All configuration is read from environment variables with sensible defaults.
 | POST | `/agent/ingest` | `agent_routes.py` | Insert content into KG (web page, PDF, manual text, etc.) |
 | GET | `/agent/tools` | `agent_routes.py` | View currently enabled tools |
 | POST | `/agent/route_preview` | `agent_routes.py` | Return routing plan only (for debugging) |
+| GET | `/agent/scheduler/status` | `agent_routes.py` | View scheduler runtime/source status |
+| GET | `/agent/sources` | `agent_routes.py` | List monitored crawl sources |
+| POST | `/agent/sources` | `agent_routes.py` | Add or update a monitored source |
+| DELETE | `/agent/sources/{source_id}` | `agent_routes.py` | Remove a monitored source |
+| POST | `/agent/sources/{source_id}/trigger` | `agent_routes.py` | Trigger immediate crawl/ingest for one source |
 | GET | `/health` | `app.py` | Health check + workspace status |
 
 ### 11.1 POST /agent/chat
@@ -543,7 +607,7 @@ All configuration is read from environment variables with sensible defaults.
 | `route` | `dict` | Routing decision details |
 | `tool_calls` | `list[dict]` | Tool invocation records |
 | `path_explanation` | `dict \| null` | Path explanation result |
-| `metadata` | `dict` | Metadata |
+| `metadata` | `dict` | Metadata, including dynamic-graph markers such as `freshness_action` / `freshness_reason` when applicable |
 
 ### 11.2 POST /agent/ingest
 
@@ -552,7 +616,7 @@ All configuration is read from environment variables with sensible defaults.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `content` | `str \| list[str]` | Yes | Text or markdown content to ingest |
-| `source` | `str` | No | Provenance label (URL, file path, or descriptive tag) |
+| `source` | `str \| list[str]` | No | Provenance label (URL, file path, or descriptive tag) |
 | `workspace` | `str` | No | Target workspace (uses default if omitted) |
 
 **Response Body (IngestResponse):**
@@ -565,7 +629,20 @@ All configuration is read from environment variables with sensible defaults.
 | `source` | `str \| null` | Echoed provenance label |
 | `message` | `str` | Human-readable status message |
 
-### 11.3 GET /health
+### 11.3 Scheduler and Source APIs
+
+- `GET /agent/scheduler/status`
+  - Returns scheduler configured/enabled/running flags, persistence file paths, loop counters, and per-source status
+- `GET /agent/sources`
+  - Returns all monitored sources
+- `POST /agent/sources`
+  - Upserts a `MonitoredSource`
+- `DELETE /agent/sources/{source_id}`
+  - Removes a source and its state record
+- `POST /agent/sources/{source_id}/trigger`
+  - Immediately polls a source and returns crawl/ingest counts
+
+### 11.4 GET /health
 
 **Response Body:**
 
@@ -579,6 +656,9 @@ All configuration is read from environment variables with sensible defaults.
 | `dynamic_workspace_enabled` | `bool` | Whether dynamic workspace (provider mode) is in use |
 | `active_workspaces` | `list[str]` | List of currently loaded workspaces |
 | `active_workspace_count` | `int` | Number of currently loaded workspaces |
+| `scheduler_configured` | `bool` | Whether scheduler was attached to the app |
+| `scheduler_enabled` | `bool` | Whether scheduler is enabled by config |
+| `scheduler_running` | `bool` | Whether scheduler background task is currently running |
 
 ---
 
@@ -696,8 +776,12 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 - **ConversationMemoryStore** and **UserProfileStore** are currently in-memory implementations; data is lost on restart; persistent storage integration is needed
 - **CrossSessionStore** is an empty placeholder; cross-session vector retrieval needs to be designed
 - **quant_backtest** placeholder not implemented; needs integration with quantitative engine
-- **Scheduler** (`crawler/scheduler.py`) is an empty placeholder; recurring crawl + auto-ingest not yet implemented
-- **Crawl → Ingest pipeline** works manually (RouteJudge routes ingestion intent to `web_search` → `kg_ingest`), but no automated recurring ingest is implemented yet
+- **ConversationMemoryStore** still uses in-memory storage; `compact_tool_calls` and recent tool history are lost on restart
+- **Scheduler** is implemented for single-process deployments only; no multi-worker coordination or leader election exists yet
+- **Source persistence** is JSON/local-file based; there is no database-backed registry or state store yet
+- **Generic tool chaining** is still not implemented; `web_search -> kg_ingest` works only through explicit `AgentCore` bridge logic
+- **RSS / Feed source support** is not implemented
+- **Freshness decay** is implemented only at retrieval-tool post-processing level; it has not been pushed into deeper `lightrag_fork/operate.py` ranking logic
 - **Playwright browser detection** uses Playwright sync API to verify the exact chromium executable exists; on version mismatch the adapter falls back to system Edge/Chrome via `browser_channel`
 - **Streaming (stream)** API parameter is reserved but streaming output is not yet implemented
 - Path explanation scoring algorithm is based on simple token overlap; semantic similarity can be integrated later

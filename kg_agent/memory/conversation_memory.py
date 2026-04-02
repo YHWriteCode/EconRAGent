@@ -45,7 +45,9 @@ class ConversationMemoryStore:
             self._messages[session_id].append(message)
 
     async def get_recent_history(
-        self, session_id: str, turns: int = 6
+        self,
+        session_id: str,
+        turns: int = 6,
     ) -> list[dict[str, str]]:
         async with self._lock:
             messages = list(self._messages.get(session_id, []))
@@ -57,8 +59,46 @@ class ConversationMemoryStore:
             for message in messages[-slice_size:]
         ]
 
+    async def get_recent_tool_calls(
+        self,
+        session_id: str,
+        assistant_turns: int = 2,
+    ) -> list[dict[str, Any]]:
+        async with self._lock:
+            messages = list(self._messages.get(session_id, []))
+        if assistant_turns <= 0:
+            return []
+
+        collected: list[list[dict[str, Any]]] = []
+        seen_assistant_messages = 0
+        for message in reversed(messages):
+            if message.role != "assistant":
+                continue
+            compact_tool_calls = message.metadata.get("compact_tool_calls")
+            if not isinstance(compact_tool_calls, list):
+                continue
+            normalized = [
+                dict(item)
+                for item in compact_tool_calls
+                if isinstance(item, dict)
+            ]
+            if not normalized:
+                continue
+            collected.append(normalized)
+            seen_assistant_messages += 1
+            if seen_assistant_messages >= assistant_turns:
+                break
+
+        flattened: list[dict[str, Any]] = []
+        for group in reversed(collected):
+            flattened.extend(group)
+        return flattened
+
     async def search(
-        self, session_id: str, query: str, limit: int = 4
+        self,
+        session_id: str,
+        query: str,
+        limit: int = 4,
     ) -> list[dict[str, Any]]:
         async with self._lock:
             messages = list(self._messages.get(session_id, []))

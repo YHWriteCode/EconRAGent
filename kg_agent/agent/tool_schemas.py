@@ -86,7 +86,10 @@ KG_INGEST_SCHEMA = {
             "description": "Text or markdown content to ingest into the knowledge graph.",
         },
         "source": {
-            "type": "string",
+            "oneOf": [
+                {"type": "string"},
+                {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            ],
             "description": "Provenance label (URL, file path, or descriptive tag).",
         },
     },

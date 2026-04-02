@@ -121,6 +121,51 @@ class CrawlerConfig:
 
 
 @dataclass
+class SchedulerConfig:
+    enable_scheduler: bool = False
+    check_interval_seconds: int = 60
+    sources_file: str = ""
+    state_file: str = "scheduler_state.json"
+
+    @classmethod
+    def from_env(cls) -> "SchedulerConfig":
+        return cls(
+            enable_scheduler=_env_bool("KG_AGENT_ENABLE_SCHEDULER", False),
+            check_interval_seconds=_env_int(
+                "KG_AGENT_SCHEDULER_CHECK_INTERVAL", 60
+            ),
+            sources_file=os.getenv("KG_AGENT_SCHEDULER_SOURCES_FILE", "").strip(),
+            state_file=os.getenv(
+                "KG_AGENT_SCHEDULER_STATE_FILE", "scheduler_state.json"
+            ).strip()
+            or "scheduler_state.json",
+        )
+
+
+@dataclass
+class FreshnessConfig:
+    threshold_seconds: int = 604800
+    enable_auto_ingest: bool = False
+    staleness_decay_days: float = 7.0
+    enable_freshness_decay: bool = False
+
+    @classmethod
+    def from_env(cls) -> "FreshnessConfig":
+        return cls(
+            threshold_seconds=_env_int(
+                "KG_AGENT_FRESHNESS_THRESHOLD_SECONDS", 604800
+            ),
+            enable_auto_ingest=_env_bool("KG_AGENT_ENABLE_AUTO_INGEST", False),
+            staleness_decay_days=_env_float(
+                "KG_AGENT_STALENESS_DECAY_DAYS", 7.0
+            ),
+            enable_freshness_decay=_env_bool(
+                "KG_AGENT_ENABLE_FRESHNESS_DECAY", False
+            ),
+        )
+
+
+@dataclass
 class AgentRuntimeConfig:
     default_workspace: str = ""
     default_domain_schema: str = "general"
@@ -148,6 +193,8 @@ class KGAgentConfig:
     agent_model: AgentModelConfig = field(default_factory=AgentModelConfig)
     tool_config: ToolConfig = field(default_factory=ToolConfig)
     crawler: CrawlerConfig = field(default_factory=CrawlerConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    freshness: FreshnessConfig = field(default_factory=FreshnessConfig)
     runtime: AgentRuntimeConfig = field(default_factory=AgentRuntimeConfig)
     judge_model: AgentModelConfig | None = None
     answer_model: AgentModelConfig | None = None
@@ -159,6 +206,8 @@ class KGAgentConfig:
             agent_model=AgentModelConfig.from_env(),
             tool_config=ToolConfig.from_env(),
             crawler=CrawlerConfig.from_env(),
+            scheduler=SchedulerConfig.from_env(),
+            freshness=FreshnessConfig.from_env(),
             runtime=AgentRuntimeConfig.from_env(),
         )
 

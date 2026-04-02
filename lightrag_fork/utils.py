@@ -3191,6 +3191,11 @@ def convert_to_user_format(
                     "source_id": original_entity.get("source_id", ""),
                     "file_path": original_entity.get("file_path", "unknown_source"),
                     "created_at": original_entity.get("created_at", ""),
+                    "last_confirmed_at": original_entity.get("last_confirmed_at"),
+                    "confirmation_count": original_entity.get(
+                        "confirmation_count"
+                    ),
+                    "rank": original_entity.get("rank"),
                 }
             )
         else:
@@ -3203,6 +3208,9 @@ def convert_to_user_format(
                     "source_id": entity.get("source_id", ""),
                     "file_path": entity.get("file_path", "unknown_source"),
                     "created_at": entity.get("created_at", ""),
+                    "last_confirmed_at": entity.get("last_confirmed_at"),
+                    "confirmation_count": entity.get("confirmation_count"),
+                    "rank": entity.get("rank"),
                 }
             )
 
@@ -3230,6 +3238,11 @@ def convert_to_user_format(
                     "source_id": original_relation.get("source_id", ""),
                     "file_path": original_relation.get("file_path", "unknown_source"),
                     "created_at": original_relation.get("created_at", ""),
+                    "last_confirmed_at": original_relation.get("last_confirmed_at"),
+                    "confirmation_count": original_relation.get(
+                        "confirmation_count"
+                    ),
+                    "rank": original_relation.get("rank"),
                 }
             )
         else:
@@ -3244,6 +3257,9 @@ def convert_to_user_format(
                     "source_id": relation.get("source_id", ""),
                     "file_path": relation.get("file_path", "unknown_source"),
                     "created_at": relation.get("created_at", ""),
+                    "last_confirmed_at": relation.get("last_confirmed_at"),
+                    "confirmation_count": relation.get("confirmation_count"),
+                    "rank": relation.get("rank"),
                 }
             )
 

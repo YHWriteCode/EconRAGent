@@ -41,18 +41,20 @@ def _page_to_public_dict(page: CrawledPage) -> dict[str, Any]:
 async def web_search(
     *,
     query: str,
+    search_query: str | None = None,
     urls: list[str] | None = None,
     top_k: int = 5,
     crawler_adapter=None,
     **_: Any,
 ) -> ToolResult:
+    effective_query = (search_query or query or "").strip()
     if crawler_adapter is None:
         return ToolResult(
             tool_name="web_search",
             success=False,
             data={
                 "status": "not_configured",
-                "query": query,
+                "query": effective_query,
                 "top_k": top_k,
                 "summary": "Web crawler adapter is not configured yet",
             },
@@ -60,9 +62,9 @@ async def web_search(
             metadata={"implemented": False, "provider": None},
         )
 
-    target_urls = _collect_urls(query, urls)
+    target_urls = _collect_urls(effective_query, urls)
     if not target_urls:
-        discovered = await crawler_adapter.discover_urls(query, top_k=top_k)
+        discovered = await crawler_adapter.discover_urls(effective_query, top_k=top_k)
         target_urls = [item.url for item in discovered]
         if not target_urls:
             return ToolResult(
@@ -70,7 +72,7 @@ async def web_search(
                 success=False,
                 data={
                     "status": "discovery_failed",
-                    "query": query,
+                    "query": effective_query,
                     "top_k": top_k,
                     "discovered_results": [],
                     "summary": "Search-result discovery did not return any crawlable URLs",
@@ -97,7 +99,7 @@ async def web_search(
             success=success_count > 0,
             data={
                 "status": status,
-                "query": query,
+                "query": effective_query,
                 "urls": target_urls,
                 "discovered_results": [item.to_dict() for item in discovered],
                 "pages": [_page_to_public_dict(page) for page in pages],
@@ -133,7 +135,7 @@ async def web_search(
         success=success_count > 0,
         data={
             "status": status,
-            "query": query,
+            "query": effective_query,
             "urls": target_urls,
             "discovered_results": [],
             "pages": [_page_to_public_dict(page) for page in pages],

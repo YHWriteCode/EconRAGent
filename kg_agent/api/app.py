@@ -25,6 +25,9 @@ from kg_agent.agent.agent_core import AgentCore
 from kg_agent.api.agent_routes import create_agent_routes
 from kg_agent.config import KGAgentConfig
 from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
+from kg_agent.crawler.crawl_state_store import JsonCrawlStateStore
+from kg_agent.crawler.scheduler import IngestScheduler
+from kg_agent.crawler.source_registry import JsonSourceRegistry
 
 load_dotenv(dotenv_path=".env", override=False)
 
@@ -401,6 +404,7 @@ def create_app(
     rag_provider = None
     config_obj = config or KGAgentConfig.from_env()
     crawler_adapter = None
+    scheduler = None
 
     if agent_core is None:
         crawler_adapter = build_crawler_adapter_from_env(config=config_obj)
@@ -425,11 +429,25 @@ def create_app(
     else:
         crawler_adapter = getattr(agent_core, "crawler_adapter", None)
 
+    if crawler_adapter is not None and agent_core is not None:
+        scheduler = IngestScheduler(
+            rag_provider=agent_core._resolve_rag,
+            crawler_adapter=crawler_adapter,
+            source_registry=JsonSourceRegistry(config_obj.scheduler.sources_file),
+            state_store=JsonCrawlStateStore(config_obj.scheduler.state_file),
+            enabled=config_obj.scheduler.enable_scheduler,
+            check_interval_seconds=config_obj.scheduler.check_interval_seconds,
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         try:
+            if scheduler is not None:
+                await scheduler.start()
             yield
         finally:
+            if scheduler is not None:
+                await scheduler.stop()
             if crawler_adapter is not None:
                 await crawler_adapter.close()
             if manage_rag_lifecycle and rag_provider is not None:
@@ -442,13 +460,14 @@ def create_app(
         title="KG Agent API",
         description="Business-layer agent API on top of LightRAG backend",
         version="0.1.0",
-        lifespan=lifespan if manage_rag_lifecycle else None,
+        lifespan=lifespan,
     )
     app.state.rag = rag_instance
     app.state.rag_provider = rag_provider
     app.state.crawler_adapter = crawler_adapter
     app.state.agent_core = agent_core
-    app.include_router(create_agent_routes(agent_core))
+    app.state.scheduler = scheduler
+    app.include_router(create_agent_routes(agent_core, scheduler=scheduler))
 
     @app.get("/health")
     async def health():
@@ -469,6 +488,13 @@ def create_app(
             "dynamic_workspace_enabled": bool(rag_provider is not None),
             "active_workspaces": active_workspaces,
             "active_workspace_count": len(active_workspaces),
+            "scheduler_configured": bool(scheduler is not None),
+            "scheduler_enabled": bool(scheduler and scheduler.enabled),
+            "scheduler_running": bool(
+                scheduler is not None
+                and scheduler._task is not None
+                and not scheduler._task.done()
+            ),
         }
 
     return app

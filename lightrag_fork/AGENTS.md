@@ -16,6 +16,7 @@
 - Hybrid retrieval (naive / local / global / hybrid / mix)
 - Concurrency control (local locks / Redis distributed locks)
 - Optional domain schema prompt injection
+- Temporal metadata maintenance for graph nodes/edges (`created_at`, `last_confirmed_at`, `confirmation_count`) and retrieval result passthrough
 
 **Not Responsible For:**
 
@@ -211,6 +212,30 @@ LightRAG(addon_params=...)
 | `general` | `schemas/general.py` | `enabled=False` | Person, Organization, Location... (original defaults) |
 | `economy` | `schemas/economy.py` | `enabled=True, mode=domain` | Company, Industry, Metric, Policy, Event, Asset, Institution, Country |
 
+### 4.3 Dynamic-Graph Temporal Metadata
+
+**Modified files:** `operate.py`, `utils.py`
+
+- Node and edge merge paths now preserve `created_at` for existing graph elements
+- New graph elements initialize:
+  - `created_at`
+  - `last_confirmed_at`
+  - `confirmation_count=1`
+- Existing graph elements update:
+  - keep original `created_at`
+  - refresh `last_confirmed_at`
+  - increment `confirmation_count`
+- Query result formatting passes through:
+  - entity / relationship `created_at`
+  - entity / relationship `last_confirmed_at`
+  - entity / relationship `confirmation_count`
+  - entity / relationship `rank`
+
+**Semantics:**
+
+- `confirmation_count` currently means cumulative confirmation events, not unique independent sources
+- Missing legacy fields must remain backward compatible and never crash query formatting
+
 ---
 
 ## 5. Core Data Flows
@@ -224,7 +249,7 @@ User calls LightRAG.ainsert(documents)
   → operate.py: extract_entities()             # LLM entity/relation extraction
       ├─ prompt.py: static prompt templates
       └─ operate.py: _build_domain_schema_prompt_appendix()  # Optional schema append
-  → operate.py: merge_nodes_and_edges()        # Graph merging (with keyed lock)
+  → operate.py: merge_nodes_and_edges()        # Graph merging (with keyed lock + temporal metadata updates)
   → kg/*_impl: write to Graph / Vector / KV / DocStatus
 ```
 
@@ -237,6 +262,8 @@ User calls LightRAG.aquery(query, param)
       ├─ Vector retrieval (entities_vdb / relationships_vdb / chunks_vdb)
       ├─ Graph traversal (graph_storage)
       ├─ Text chunk recall
+      ├─ raw result assembly keeps `rank`
+      ├─ `utils.convert_to_user_format()` passes temporal metadata through to user-facing results
       └─ LLM generates final answer
 ```
 
@@ -317,6 +344,7 @@ Before modifying code under `lightrag_fork/`, verify the following:
 | Add domain schema | Create profile file under `schemas/`, export in `schemas/__init__.py` |
 | Modify extraction behavior | Prefer schema injection; avoid directly modifying `operate.py` main flow |
 | Modify query behavior | Handle by mode branch in `kg_query()` in `operate.py` |
+| Extend dynamic-graph freshness ranking | Prefer changes in `operate.py` ranking paths over inventing fake scores in upper layers |
 | Add API route | Create new route file under `api/routers/` |
 
 ### 8.3 Things Not to Do in This Directory
@@ -338,6 +366,7 @@ Before modifying code under `lightrag_fork/`, verify the following:
 | `merge_nodes_and_edges()` | `operate.py` | Graph node/relation merging (with locks) |
 | `kg_query()` | `operate.py` | local/global/hybrid/mix retrieval |
 | `naive_query()` | `operate.py` | Naive vector-only retrieval |
+| `convert_to_user_format()` | `utils.py` | Convert internal query data to user-facing format and pass through temporal metadata |
 | `DomainSchema` | `schema.py` | Domain schema data structure |
 | `normalize_addon_schema_config()` | `schema.py` | Schema config normalization |
 | `LockBackend` | `kg/lock_backend.py` | Lock interface abstraction |
@@ -354,6 +383,8 @@ Before modifying code under `lightrag_fork/`, verify the following:
 - **Redis distributed locks** still have window risks during master-slave failover/network partition scenarios
 - **`fallback_local`** is only suitable for development degradation; does not provide strong consistency
 - **No global transactions across storage backends**; inserts/deletes use eventual consistency
+- **Temporal metadata** is now stored and returned, but deeper freshness-aware ranking still has not been moved into the core `local/global/hybrid` ranking chain
+- **`confirmation_count` semantics** are cumulative confirmation events; there is no built-in notion of unique-source confirmation count yet
 
 ---
 
