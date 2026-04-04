@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import AsyncIterator
@@ -9,6 +10,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=".env", override=False)
+logger = logging.getLogger(__name__)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -38,6 +40,29 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _first_env_value(*names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value is None:
+            continue
+        normalized = value.strip()
+        if normalized:
+            return normalized
+    return ""
+
+
+def _first_env_float(default: float, *names: str) -> float:
+    for name in names:
+        value = os.getenv(name)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except ValueError:
+            continue
+    return default
+
+
 @dataclass
 class AgentModelConfig:
     provider: str = "openai_compatible"
@@ -47,26 +72,74 @@ class AgentModelConfig:
     timeout_s: float = 60.0
 
     @classmethod
-    def from_env(cls) -> "AgentModelConfig":
+    def from_env_keys(
+        cls,
+        *,
+        provider_keys: tuple[str, ...],
+        model_keys: tuple[str, ...],
+        base_url_keys: tuple[str, ...],
+        api_key_keys: tuple[str, ...],
+        timeout_keys: tuple[str, ...],
+        default_provider: str = "openai_compatible",
+        default_timeout: float = 60.0,
+    ) -> "AgentModelConfig":
         return cls(
-            provider=os.getenv("KG_AGENT_MODEL_PROVIDER", "openai_compatible"),
-            model_name=os.getenv(
-                "KG_AGENT_MODEL_NAME",
-                os.getenv("LLM_MODEL", os.getenv("OPENAI_MODEL", "")),
-            ),
-            base_url=os.getenv(
+            provider=_first_env_value(*provider_keys) or default_provider,
+            model_name=_first_env_value(*model_keys),
+            base_url=_first_env_value(*base_url_keys),
+            api_key=_first_env_value(*api_key_keys),
+            timeout_s=_first_env_float(default_timeout, *timeout_keys),
+        )
+
+    @classmethod
+    def from_env(cls) -> "AgentModelConfig":
+        return cls.from_env_keys(
+            provider_keys=("KG_AGENT_MODEL_PROVIDER",),
+            model_keys=("KG_AGENT_MODEL_NAME", "LLM_MODEL", "OPENAI_MODEL"),
+            base_url_keys=(
                 "KG_AGENT_MODEL_BASE_URL",
-                os.getenv("OPENAI_BASE_URL", os.getenv("LLM_BINDING_HOST", "")),
+                "OPENAI_BASE_URL",
+                "LLM_BINDING_HOST",
             ),
-            api_key=os.getenv(
+            api_key_keys=(
                 "KG_AGENT_MODEL_API_KEY",
-                os.getenv("OPENAI_API_KEY", os.getenv("LLM_BINDING_API_KEY", "")),
+                "OPENAI_API_KEY",
+                "LLM_BINDING_API_KEY",
             ),
-            timeout_s=_env_float("KG_AGENT_MODEL_TIMEOUT_S", 60.0),
+            timeout_keys=("KG_AGENT_MODEL_TIMEOUT_S",),
+        )
+
+    @classmethod
+    def from_utility_env(cls) -> "AgentModelConfig":
+        return cls.from_env_keys(
+            provider_keys=(
+                "KG_AGENT_UTILITY_MODEL_PROVIDER",
+                "UTILITY_LLM_PROVIDER",
+            ),
+            model_keys=(
+                "KG_AGENT_UTILITY_MODEL_NAME",
+                "UTILITY_LLM_MODEL",
+            ),
+            base_url_keys=(
+                "KG_AGENT_UTILITY_MODEL_BASE_URL",
+                "UTILITY_LLM_BINDING_HOST",
+            ),
+            api_key_keys=(
+                "KG_AGENT_UTILITY_MODEL_API_KEY",
+                "UTILITY_LLM_BINDING_API_KEY",
+            ),
+            timeout_keys=(
+                "KG_AGENT_UTILITY_MODEL_TIMEOUT_S",
+                "UTILITY_LLM_TIMEOUT",
+            ),
         )
 
     def is_configured(self) -> bool:
-        return bool(self.model_name and self.base_url)
+        return bool(
+            self.model_name
+            and self.base_url
+            and self.provider in {"openai_compatible", "openai"}
+        )
 
 
 @dataclass
@@ -338,6 +411,7 @@ class AgentRuntimeConfig:
 @dataclass
 class KGAgentConfig:
     agent_model: AgentModelConfig = field(default_factory=AgentModelConfig)
+    utility_model: AgentModelConfig = field(default_factory=AgentModelConfig)
     tool_config: ToolConfig = field(default_factory=ToolConfig)
     crawler: CrawlerConfig = field(default_factory=CrawlerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -352,6 +426,7 @@ class KGAgentConfig:
     def from_env(cls) -> "KGAgentConfig":
         return cls(
             agent_model=AgentModelConfig.from_env(),
+            utility_model=AgentModelConfig.from_utility_env(),
             tool_config=ToolConfig.from_env(),
             crawler=CrawlerConfig.from_env(),
             scheduler=SchedulerConfig.from_env(),
@@ -475,3 +550,53 @@ class AgentLLMClient:
         if start == -1 or end == -1 or end <= start:
             raise ValueError(f"LLM did not return a JSON object: {raw_text}")
         return json.loads(payload[start : end + 1])
+
+
+class FallbackLLMClient:
+    """Prefer a lightweight utility client and fall back to the main client when needed."""
+
+    def __init__(
+        self,
+        *,
+        primary: AgentLLMClient | None,
+        fallback: AgentLLMClient | None,
+        label: str,
+    ):
+        self.primary = primary
+        self.fallback = fallback
+        self.label = label
+        self._warned_primary_unavailable = False
+
+    def is_available(self) -> bool:
+        return bool(
+            (self.primary is not None and self.primary.is_available())
+            or (self.fallback is not None and self.fallback.is_available())
+        )
+
+    def _resolve_client(self) -> AgentLLMClient:
+        if self.primary is not None and self.primary.is_available():
+            return self.primary
+        if self.fallback is not None and self.fallback.is_available():
+            if not self._warned_primary_unavailable:
+                logger.warning(
+                    "Utility model is not configured for %s; falling back to the main agent model.",
+                    self.label,
+                )
+                self._warned_primary_unavailable = True
+            return self.fallback
+        raise RuntimeError(
+            f"No LLM client is available for {self.label}. Configure the utility model or the main agent model."
+        )
+
+    async def complete_text(self, **kwargs) -> str:
+        client = self._resolve_client()
+        return await client.complete_text(**kwargs)
+
+    async def stream_text(self, **kwargs) -> AsyncIterator[str]:
+        client = self._resolve_client()
+        async for chunk in client.stream_text(**kwargs):
+            yield chunk
+
+    async def complete_json(self, **kwargs) -> dict[str, Any]:
+        client = self._resolve_client()
+        return await client.complete_json(**kwargs)

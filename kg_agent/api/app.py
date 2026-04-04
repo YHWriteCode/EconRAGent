@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 from contextlib import asynccontextmanager
 from typing import Any
@@ -82,6 +83,66 @@ def _normalize_ollama_host(base_url: str) -> str:
     if normalized.endswith("/v1"):
         return normalized[: -len("/v1")]
     return normalized
+
+
+def _build_rerank_model_func_from_env():
+    binding = (get_env_value("RERANK_BINDING", "null", str) or "null").strip().lower()
+    min_rerank_score = get_env_value("MIN_RERANK_SCORE", 0.0, float)
+    if binding in {"", "null", "none", "disabled", "false"}:
+        return None, min_rerank_score
+
+    from lightrag_fork.rerank import ali_rerank, cohere_rerank, jina_rerank
+
+    rerank_functions = {
+        "cohere": cohere_rerank,
+        "jina": jina_rerank,
+        "aliyun": ali_rerank,
+    }
+    selected_rerank_func = rerank_functions.get(binding)
+    if selected_rerank_func is None:
+        raise ValueError(f"Unsupported rerank binding: {binding}")
+
+    rerank_model = get_env_value("RERANK_MODEL", None, special_none=True)
+    rerank_binding_host = get_env_value(
+        "RERANK_BINDING_HOST", None, special_none=True
+    )
+    rerank_binding_api_key = get_env_value("RERANK_BINDING_API_KEY", None)
+
+    if rerank_model is None or rerank_binding_host is None:
+        signature = inspect.signature(selected_rerank_func)
+        if rerank_model is None and "model" in signature.parameters:
+            default_model = signature.parameters["model"].default
+            if default_model is not inspect.Parameter.empty:
+                rerank_model = default_model
+        if rerank_binding_host is None and "base_url" in signature.parameters:
+            default_base_url = signature.parameters["base_url"].default
+            if default_base_url is not inspect.Parameter.empty:
+                rerank_binding_host = default_base_url
+
+    async def rerank_model_func(
+        query: str,
+        documents: list[str],
+        top_n: int | None = None,
+        extra_body: dict | None = None,
+    ):
+        kwargs = {
+            "query": query,
+            "documents": documents,
+            "top_n": top_n,
+            "api_key": rerank_binding_api_key,
+            "model": rerank_model,
+            "base_url": rerank_binding_host,
+        }
+        if binding == "cohere":
+            kwargs["enable_chunking"] = get_env_value(
+                "RERANK_ENABLE_CHUNKING", False, bool
+            )
+            kwargs["max_tokens_per_doc"] = get_env_value(
+                "RERANK_MAX_TOKENS_PER_DOC", 4096, int
+            )
+        return await selected_rerank_func(**kwargs, extra_body=extra_body)
+
+    return rerank_model_func, min_rerank_score
 
 
 def _build_llm_model_func_from_env(
@@ -172,6 +233,47 @@ def _build_llm_model_func_from_env(
         )
 
     return openai_like_complete, {}
+
+
+def _build_optional_utility_llm_from_env():
+    utility_binding = get_env_value(
+        "UTILITY_LLM_BINDING",
+        get_env_value("LLM_BINDING", "openai", str),
+        str,
+    )
+    if utility_binding == "openai-ollama":
+        utility_binding = "openai"
+
+    utility_model = (
+        get_env_value("KG_AGENT_UTILITY_MODEL_NAME", None, special_none=True)
+        or get_env_value("UTILITY_LLM_MODEL", None, special_none=True)
+    )
+    utility_host = (
+        get_env_value("KG_AGENT_UTILITY_MODEL_BASE_URL", None, special_none=True)
+        or get_env_value("UTILITY_LLM_BINDING_HOST", None, special_none=True)
+    )
+    if not utility_model or not utility_host:
+        return None, None
+
+    utility_api_key = (
+        get_env_value("KG_AGENT_UTILITY_MODEL_API_KEY", None)
+        or get_env_value("UTILITY_LLM_BINDING_API_KEY", None)
+    )
+    utility_timeout = int(
+        get_env_value(
+            "KG_AGENT_UTILITY_MODEL_TIMEOUT_S",
+            get_env_value("UTILITY_LLM_TIMEOUT", DEFAULT_LLM_TIMEOUT, float),
+            float,
+        )
+    )
+    utility_llm_func, _ = _build_llm_model_func_from_env(
+        utility_binding,
+        utility_model,
+        utility_host,
+        utility_api_key,
+        utility_timeout,
+    )
+    return utility_llm_func, utility_model
 
 
 def _resolve_embedding_provider(binding: str):
@@ -332,6 +434,8 @@ def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
         llm_binding, llm_model, llm_host, llm_api_key, llm_timeout
     )
     embedding_func = build_embedding_func_from_env()
+    rerank_model_func, min_rerank_score = _build_rerank_model_func_from_env()
+    utility_llm_model_func, utility_llm_model_name = _build_optional_utility_llm_from_env()
 
     rag = LightRAG(
         working_dir=get_env_value("WORKING_DIR", "./rag_storage", str),
@@ -350,9 +454,13 @@ def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
         chunk_token_size=get_env_value("CHUNK_SIZE", 1200, int),
         chunk_overlap_token_size=get_env_value("CHUNK_OVERLAP_SIZE", 100, int),
         llm_model_kwargs=llm_model_kwargs,
+        utility_llm_model_func=utility_llm_model_func,
+        utility_llm_model_name=utility_llm_model_name,
         embedding_func=embedding_func,
         default_llm_timeout=llm_timeout,
         default_embedding_timeout=embedding_timeout,
+        rerank_model_func=rerank_model_func,
+        min_rerank_score=min_rerank_score,
         kv_storage=get_env_value("LIGHTRAG_KV_STORAGE", "JsonKVStorage", str),
         graph_storage=get_env_value("LIGHTRAG_GRAPH_STORAGE", "NetworkXStorage", str),
         vector_storage=get_env_value(

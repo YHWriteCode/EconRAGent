@@ -74,6 +74,7 @@ from dotenv import load_dotenv
 # allows to use different .env file for each lightrag instance
 # the OS environment variables take precedence over the .env file
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+_UTILITY_LLM_FALLBACK_WARNED: set[str] = set()
 
 
 def _freshness_decay_enabled(query_param: QueryParam) -> bool:
@@ -445,7 +446,10 @@ async def _summarize_descriptions(
     Returns:
         Summarized description string
     """
-    use_llm_func: callable = global_config["llm_model_func"]
+    use_llm_func: callable = _resolve_utility_llm_func(
+        global_config,
+        task_name=f"{description_type}_summary",
+    )
     # Apply higher priority (8) to entity/relation summary tasks
     use_llm_func = partial(use_llm_func, _priority=8)
 
@@ -507,6 +511,32 @@ async def _summarize_descriptions(
             )
 
     return summary
+
+
+def _resolve_utility_llm_func(
+    global_config: dict[str, Any],
+    *,
+    task_name: str,
+):
+    utility_llm_func = global_config.get("utility_llm_model_func")
+    if utility_llm_func is not None:
+        return utility_llm_func
+
+    main_llm_func = global_config.get("llm_model_func")
+    if main_llm_func is None:
+        raise RuntimeError(
+            f"No LLM function is configured for {task_name}. Configure utility_llm_model_func or llm_model_func."
+        )
+
+    workspace = str(global_config.get("workspace", "") or "")
+    warn_key = f"{workspace}:{task_name}"
+    if warn_key not in _UTILITY_LLM_FALLBACK_WARNED:
+        logger.warning(
+            "Utility LLM is not configured for %s; falling back to the main LLM model.",
+            task_name,
+        )
+        _UTILITY_LLM_FALLBACK_WARNED.add(warn_key)
+    return main_llm_func
 
 
 async def _handle_single_entity_extraction(

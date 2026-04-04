@@ -11,6 +11,7 @@ from fastapi.openapi.docs import (
 )
 import os
 import re
+import argparse
 import logging
 import logging.config
 import sys
@@ -606,11 +607,18 @@ def create_app(args):
 
         return optimized_gemini_model_complete
 
-    def create_llm_model_func(binding: str):
+    def create_llm_model_func(
+        binding: str,
+        *,
+        runtime_args=None,
+        timeout_override: int | None = None,
+    ):
         """
         Create LLM model function based on binding type.
         Uses optimized functions for OpenAI bindings and lazy import for others.
         """
+        runtime_args = runtime_args or args
+        effective_timeout = llm_timeout if timeout_override is None else timeout_override
         try:
             if binding == "lollms":
                 from lightrag_fork.llm.lollms import lollms_model_complete
@@ -625,17 +633,21 @@ def create_app(args):
             elif binding == "azure_openai":
                 # Use optimized function with pre-processed configuration
                 return create_optimized_azure_openai_llm_func(
-                    config_cache, args, llm_timeout
+                    config_cache, runtime_args, effective_timeout
                 )
             elif binding == "gemini":
-                return create_optimized_gemini_llm_func(config_cache, args, llm_timeout)
+                return create_optimized_gemini_llm_func(
+                    config_cache, runtime_args, effective_timeout
+                )
             else:  # openai and compatible
                 # Use optimized function with pre-processed configuration
-                return create_optimized_openai_llm_func(config_cache, args, llm_timeout)
+                return create_optimized_openai_llm_func(
+                    config_cache, runtime_args, effective_timeout
+                )
         except ImportError as e:
             raise Exception(f"Failed to import {binding} LLM binding: {e}")
 
-    def create_llm_model_kwargs(binding: str, args, llm_timeout: int) -> dict:
+    def create_llm_model_kwargs(binding: str, runtime_args, llm_timeout: int) -> dict:
         """
         Create LLM model kwargs based on binding type.
         Uses lazy import for binding-specific options.
@@ -645,14 +657,43 @@ def create_app(args):
                 from lightrag_fork.llm.binding_options import OllamaLLMOptions
 
                 return {
-                    "host": args.llm_binding_host,
+                    "host": runtime_args.llm_binding_host,
                     "timeout": llm_timeout,
-                    "options": OllamaLLMOptions.options_dict(args),
-                    "api_key": args.llm_binding_api_key,
+                    "options": OllamaLLMOptions.options_dict(runtime_args),
+                    "api_key": runtime_args.llm_binding_api_key,
                 }
             except ImportError as e:
                 raise Exception(f"Failed to import {binding} options: {e}")
         return {}
+
+    def create_utility_llm_config():
+        utility_model = get_env_value("UTILITY_LLM_MODEL", None, special_none=True)
+        utility_host = get_env_value(
+            "UTILITY_LLM_BINDING_HOST", None, special_none=True
+        )
+        if not utility_model or not utility_host:
+            return None, None, {}
+
+        utility_binding = get_env_value("UTILITY_LLM_BINDING", args.llm_binding, str)
+        if utility_binding == "openai-ollama":
+            utility_binding = "openai"
+        utility_timeout = get_env_value("UTILITY_LLM_TIMEOUT", llm_timeout, int)
+        utility_args = argparse.Namespace(**vars(args))
+        utility_args.llm_binding = utility_binding
+        utility_args.llm_model = utility_model
+        utility_args.llm_binding_host = utility_host
+        utility_args.llm_binding_api_key = get_env_value(
+            "UTILITY_LLM_BINDING_API_KEY", None
+        )
+        return (
+            create_llm_model_func(
+                utility_binding,
+                runtime_args=utility_args,
+                timeout_override=utility_timeout,
+            ),
+            utility_model,
+            create_llm_model_kwargs(utility_binding, utility_args, utility_timeout),
+        )
 
     def create_optimized_embedding_function(
         config_cache: LLMConfigCache, binding, model, host, api_key, args
@@ -1059,6 +1100,7 @@ def create_app(args):
     ollama_server_infos = OllamaServerInfos(
         name=args.simulated_model_name, tag=args.simulated_model_tag
     )
+    utility_llm_model_func, utility_llm_model_name, _ = create_utility_llm_config()
 
     # Initialize RAG with unified configuration
     try:
@@ -1075,6 +1117,8 @@ def create_app(args):
             llm_model_kwargs=create_llm_model_kwargs(
                 args.llm_binding, args, llm_timeout
             ),
+            utility_llm_model_func=utility_llm_model_func,
+            utility_llm_model_name=utility_llm_model_name,
             embedding_func=embedding_func,
             default_llm_timeout=llm_timeout,
             default_embedding_timeout=embedding_timeout,

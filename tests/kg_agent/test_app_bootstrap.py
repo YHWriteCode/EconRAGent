@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from kg_agent.api.app import (
     EnvLightRAGProvider,
     _normalize_ollama_host,
+    _build_optional_utility_llm_from_env,
     build_rag_from_env,
     create_app,
 )
@@ -32,6 +33,74 @@ def test_build_rag_from_env_returns_lightrag_instance(tmp_path, monkeypatch):
     assert rag.llm_model_name == "dummy-chat-model"
     assert rag.embedding_func.embedding_dim == 1536
     assert rag.vector_storage == "NanoVectorDBStorage"
+
+
+def test_build_rag_from_env_wires_rerank_settings(tmp_path, monkeypatch):
+    sentinel = object()
+    monkeypatch.setenv("WORKING_DIR", str(tmp_path / "rag_storage"))
+    monkeypatch.setenv("LIGHTRAG_KV_STORAGE", "JsonKVStorage")
+    monkeypatch.setenv("LIGHTRAG_GRAPH_STORAGE", "NetworkXStorage")
+    monkeypatch.setenv("LIGHTRAG_VECTOR_STORAGE", "NanoVectorDBStorage")
+    monkeypatch.setenv("LIGHTRAG_DOC_STATUS_STORAGE", "JsonDocStatusStorage")
+    monkeypatch.setenv("LLM_BINDING", "openai")
+    monkeypatch.setenv("EMBEDDING_BINDING", "openai")
+    monkeypatch.setenv("LLM_BINDING_HOST", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("EMBEDDING_BINDING_HOST", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("LLM_BINDING_API_KEY", "test-key")
+    monkeypatch.setenv("EMBEDDING_BINDING_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_MODEL", "dummy-chat-model")
+    monkeypatch.setenv("EMBEDDING_MODEL", "dummy-embed-model")
+    monkeypatch.setenv("EMBEDDING_DIM", "1536")
+    monkeypatch.setattr(
+        "kg_agent.api.app._build_rerank_model_func_from_env",
+        lambda: (sentinel, 0.42),
+    )
+
+    rag = build_rag_from_env()
+
+    assert rag.rerank_model_func is sentinel
+    assert rag.min_rerank_score == pytest.approx(0.42)
+
+
+def test_build_optional_utility_llm_from_env_returns_none_without_dedicated_config(
+    monkeypatch,
+):
+    monkeypatch.delenv("UTILITY_LLM_MODEL", raising=False)
+    monkeypatch.delenv("UTILITY_LLM_BINDING_HOST", raising=False)
+    monkeypatch.delenv("KG_AGENT_UTILITY_MODEL_NAME", raising=False)
+    monkeypatch.delenv("KG_AGENT_UTILITY_MODEL_BASE_URL", raising=False)
+
+    llm_func, model_name = _build_optional_utility_llm_from_env()
+
+    assert llm_func is None
+    assert model_name is None
+
+
+def test_build_rag_from_env_wires_utility_llm(tmp_path, monkeypatch):
+    sentinel = object()
+    monkeypatch.setenv("WORKING_DIR", str(tmp_path / "rag_storage"))
+    monkeypatch.setenv("LIGHTRAG_KV_STORAGE", "JsonKVStorage")
+    monkeypatch.setenv("LIGHTRAG_GRAPH_STORAGE", "NetworkXStorage")
+    monkeypatch.setenv("LIGHTRAG_VECTOR_STORAGE", "NanoVectorDBStorage")
+    monkeypatch.setenv("LIGHTRAG_DOC_STATUS_STORAGE", "JsonDocStatusStorage")
+    monkeypatch.setenv("LLM_BINDING", "openai")
+    monkeypatch.setenv("EMBEDDING_BINDING", "openai")
+    monkeypatch.setenv("LLM_BINDING_HOST", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("EMBEDDING_BINDING_HOST", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("LLM_BINDING_API_KEY", "test-key")
+    monkeypatch.setenv("EMBEDDING_BINDING_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_MODEL", "dummy-chat-model")
+    monkeypatch.setenv("EMBEDDING_MODEL", "dummy-embed-model")
+    monkeypatch.setenv("EMBEDDING_DIM", "1536")
+    monkeypatch.setattr(
+        "kg_agent.api.app._build_optional_utility_llm_from_env",
+        lambda: (sentinel, "utility-mini"),
+    )
+
+    rag = build_rag_from_env()
+
+    assert rag.utility_llm_model_func is sentinel
+    assert rag.utility_llm_model_name == "utility-mini"
 
 
 def test_create_app_bootstraps_rag_from_env(tmp_path, monkeypatch):

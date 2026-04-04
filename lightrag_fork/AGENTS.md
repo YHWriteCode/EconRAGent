@@ -240,6 +240,20 @@ LightRAG(addon_params=...)
 - `confirmation_count` currently means cumulative confirmation events, not unique independent sources
 - Missing legacy fields must remain backward compatible and never crash query formatting
 
+### 4.4 Utility LLM For Summary Tasks
+
+**Modified files:** `lightrag.py`, `operate.py`, `api/lightrag_server.py`
+
+- Entity/relation description summarization in `operate.py::_summarize_descriptions()` now prefers an optional dedicated lightweight utility LLM (`utility_llm_model_func`)
+- If the utility LLM is not configured, the summary path falls back to the main `llm_model_func` and emits a one-time warning per workspace/task
+- Direct API-server bootstrapping can provide the utility summary model through optional environment variables:
+  - `UTILITY_LLM_BINDING`
+  - `UTILITY_LLM_MODEL`
+  - `UTILITY_LLM_BINDING_HOST`
+  - `UTILITY_LLM_BINDING_API_KEY`
+  - `UTILITY_LLM_TIMEOUT`
+- Agent-managed bootstrapping can also inject `utility_llm_model_func` when building `LightRAG`
+
 ---
 
 ## 5. Core Data Flows
@@ -321,6 +335,7 @@ python -m lightrag_fork.api.lightrag_server
 **Environment variable requirements:** `.env` file in the project root or under `lightrag_fork/`, containing:
 
 - LLM config: `LLM_MODEL`, `LLM_BINDING`, `LLM_BINDING_HOST`
+- Optional utility-summary LLM config: `UTILITY_LLM_MODEL`, `UTILITY_LLM_BINDING_HOST` and optional `UTILITY_LLM_BINDING`, `UTILITY_LLM_BINDING_API_KEY`, `UTILITY_LLM_TIMEOUT`
 - Storage config: `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `QDRANT_URL`, `MONGO_URI`, `MONGO_DATABASE`
 - Lock config: `LIGHTRAG_LOCK_BACKEND`, `REDIS_URI` (when using Redis locks)
 
@@ -347,6 +362,7 @@ Before modifying code under `lightrag_fork/`, verify the following:
 | Add LLM adapter | Create new file under `llm/` |
 | Add domain schema | Create profile file under `schemas/`, export in `schemas/__init__.py` |
 | Modify extraction behavior | Prefer schema injection; avoid directly modifying `operate.py` main flow |
+| Change entity/relation summary model selection | Prefer wiring `utility_llm_model_func` / `utility_llm_model_name` over hardcoding another summary path |
 | Modify query behavior | Handle by mode branch in `kg_query()` in `operate.py` |
 | Extend dynamic-graph freshness ranking | Prefer changes in `operate.py` ranking paths over inventing fake scores in upper layers |
 | Add API route | Create new route file under `api/routers/` |

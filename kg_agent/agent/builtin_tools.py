@@ -21,6 +21,11 @@ from kg_agent.tools.graph_tools import graph_entity_lookup, graph_relation_trace
 from kg_agent.tools.quant_tools import quant_backtest
 from kg_agent.tools.kg_ingest import kg_ingest
 from kg_agent.tools.retrieval_tools import kg_hybrid_search, kg_naive_search
+from kg_agent.tools.rerank_utils import (
+    get_rerank_candidate_limit,
+    get_rerank_settings,
+    rerank_payloads,
+)
 from kg_agent.tools.web_search import web_search
 
 
@@ -30,6 +35,7 @@ async def memory_search(
     session_id: str,
     query: str,
     limit: int = 4,
+    rag=None,
     **_: Any,
 ) -> ToolResult:
     if memory_store is None:
@@ -39,7 +45,24 @@ async def memory_search(
             error="Memory store is not configured",
         )
 
-    matches = await memory_store.search(session_id=session_id, query=query, limit=limit)
+    rerank_model_func, min_rerank_score = get_rerank_settings(rag)
+    candidate_limit = get_rerank_candidate_limit(
+        final_limit=limit,
+        rerank_model_func=rerank_model_func,
+    )
+    matches = await memory_store.search(
+        session_id=session_id,
+        query=query,
+        limit=candidate_limit,
+    )
+    matches, rerank_metadata = await rerank_payloads(
+        query=query,
+        payloads=matches,
+        rerank_model_func=rerank_model_func,
+        top_n=limit,
+        min_rerank_score=min_rerank_score,
+        content_fields=("content",),
+    )
     return ToolResult(
         tool_name="memory_search",
         success=bool(matches),
@@ -48,7 +71,7 @@ async def memory_search(
             "summary": f"Loaded {len(matches)} memory items from the current session",
         },
         error=None if matches else "No relevant memory found in the current session",
-        metadata={"match_count": len(matches)},
+        metadata={"match_count": len(matches), **rerank_metadata},
     )
 
 
@@ -59,6 +82,7 @@ async def cross_session_search(
     session_id: str,
     query: str,
     limit: int = 5,
+    rag=None,
     **_: Any,
 ) -> ToolResult:
     if cross_session_store is None:
@@ -68,11 +92,24 @@ async def cross_session_search(
             error="Cross-session store is not configured",
         )
 
+    rerank_model_func, min_rerank_score = get_rerank_settings(rag)
+    candidate_limit = get_rerank_candidate_limit(
+        final_limit=limit,
+        rerank_model_func=rerank_model_func,
+    )
     matches = await cross_session_store.search(
         user_id,
         query=query,
-        limit=limit,
+        limit=candidate_limit,
         exclude_session_id=session_id,
+    )
+    matches, rerank_metadata = await rerank_payloads(
+        query=query,
+        payloads=matches,
+        rerank_model_func=rerank_model_func,
+        top_n=limit,
+        min_rerank_score=min_rerank_score,
+        content_fields=("content", "summary"),
     )
     return ToolResult(
         tool_name="cross_session_search",
@@ -82,7 +119,7 @@ async def cross_session_search(
             "summary": f"Loaded {len(matches)} memory items from prior sessions",
         },
         error=None if matches else "No relevant cross-session memory found",
-        metadata={"match_count": len(matches)},
+        metadata={"match_count": len(matches), **rerank_metadata},
     )
 
 

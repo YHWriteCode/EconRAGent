@@ -382,6 +382,12 @@ class LightRAG:
         default=int(os.getenv("LLM_TIMEOUT", DEFAULT_LLM_TIMEOUT))
     )
 
+    utility_llm_model_func: Callable[..., object] | None = field(default=None)
+    """Optional lightweight LLM function used for summaries and other utility post-processing."""
+
+    utility_llm_model_name: str | None = field(default=None)
+    """Optional lightweight LLM model name used for summaries and other utility post-processing."""
+
     # Rerank Configuration
     # ---
 

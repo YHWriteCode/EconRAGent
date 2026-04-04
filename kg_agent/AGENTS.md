@@ -100,6 +100,7 @@ kg_agent/
 - Keep it lightweight, self-built, and interpretable
 - Agent loop, tool invocation, and prompt assembly are all self-built
 - LLM calls go through `AgentLLMClient` (wrapping OpenAI AsyncClient)
+- `AgentCore` can attach a dedicated lightweight utility model for internal routing/explanation work; when it is not configured, Route Judge and Path Explainer warn once and fall back to the main agent model
 
 ### 3.4 Tools Are Managed Through ToolRegistry
 
@@ -286,6 +287,8 @@ The rule engine covers explicit patterns plus the default factual fallback:
 
 LLM refinement: When `llm_client` is available and the scenario is not simple/quant, the rule result is passed to the LLM for secondary adjustment (still constrained by `available_tools`; it will not invent nonexistent tools).
 
+`AgentCore` wires Route Judge to a utility-model client first. If `KG_AGENT_UTILITY_MODEL_*` / `UTILITY_LLM_*` is not configured, the module falls back to the main `KG_AGENT_MODEL_*` client and emits a one-time warning.
+
 **Important dynamic-graph rules:**
 
 - `correction_and_refresh` only fires when the current query matches correction intent and `session_context["recent_tool_calls"]` proves the previous assistant turn used KG retrieval tools
@@ -328,6 +331,7 @@ class PathExplainer:
 - Domain-agnostic module, not limited to economics (`domain_schema` is an optional parameter)
 - Does not modify the graph; only responsible for explanation
 - Does not blindly trust graph relationships; requires "graph connectivity + text support"
+- `AgentCore` wires Path Explainer through the same utility-model client used by Route Judge, with one-time fallback to the main agent model when no dedicated utility model is configured
 
 ---
 
@@ -438,6 +442,8 @@ When no explicit URLs are available, invokes `crawler_adapter.discover_urls(quer
 5. Applies per-domain limits and returns top-k ranked `DiscoveredUrl` items
 6. Crawls the discovered URLs and returns page data
 
+When the active `LightRAG` instance has a configured rerank model (`rerank_model_func`), `web_search` expands the candidate crawl set, reranks successful page payloads against the effective query, and trims the final returned page list back to `top_k`. Returned page dicts include `rerank_score` when rerank is applied.
+
 **Return data per page:**
 
 - `title`, `final_url`, `excerpt`, `markdown`, `links`, `metadata`
@@ -482,6 +488,7 @@ When no explicit URLs are available, invokes `crawler_adapter.discover_urls(quer
 - `search(session_id, query, limit)` — token-overlap search for relevant messages
 - `search_user_sessions(user_id, query, limit, exclude_session_id=None)` — search same-user messages across sessions
 - `clear_session(session_id)` — clear session
+- The `memory_search` tool can request a larger candidate window and rerank the final current-session matches when the active `LightRAG` instance has `rerank_model_func` configured
 
 `AgentCore` currently stores the following assistant metadata into memory:
 
@@ -503,6 +510,7 @@ When no explicit URLs are available, invokes `crawler_adapter.discover_urls(quer
 - Aging uses bounded snippet retention and summary rebuild rather than preserving every historical snippet forever
 - `search(user_id, query, limit, exclude_session_id=None)` first tries vector search, then falls back to `ConversationMemoryStore.search_user_sessions(...)`
 - Cross-session lookup is exposed as a first-class tool: `cross_session_search`
+- The `cross_session_search` tool also supports optional reranking of retrieved memory candidates through the active `LightRAG` rerank configuration
 
 ### 9.3 UserProfileStore (User Profile)
 
@@ -529,6 +537,21 @@ All configuration is read from environment variables with sensible defaults.
 | `KG_AGENT_MODEL_BASE_URL` | Falls back to `OPENAI_BASE_URL` → `LLM_BINDING_HOST` | API URL |
 | `KG_AGENT_MODEL_API_KEY` | Falls back to `OPENAI_API_KEY` → `LLM_BINDING_API_KEY` | API key |
 | `KG_AGENT_MODEL_TIMEOUT_S` | `60.0` | Timeout |
+
+Optional lightweight utility model for internal routing/explanation work:
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `KG_AGENT_UTILITY_MODEL_PROVIDER` | `openai_compatible` | Utility model provider |
+| `KG_AGENT_UTILITY_MODEL_NAME` | empty | Dedicated utility model name |
+| `KG_AGENT_UTILITY_MODEL_BASE_URL` | empty | Dedicated utility model API URL |
+| `KG_AGENT_UTILITY_MODEL_API_KEY` | empty | Dedicated utility model API key |
+| `KG_AGENT_UTILITY_MODEL_TIMEOUT_S` | Falls back to `UTILITY_LLM_TIMEOUT` → `60.0` | Dedicated utility model timeout |
+| `UTILITY_LLM_PROVIDER` | `openai_compatible` | Cross-layer fallback provider key also understood by `kg_agent` |
+| `UTILITY_LLM_MODEL` | empty | Cross-layer fallback utility model name |
+| `UTILITY_LLM_BINDING_HOST` | empty | Cross-layer fallback utility model API URL |
+| `UTILITY_LLM_BINDING_API_KEY` | empty | Cross-layer fallback utility model API key |
+| `UTILITY_LLM_TIMEOUT` | `60.0` | Cross-layer fallback utility model timeout |
 
 ### 10.2 Tool Switches (ToolConfig)
 
@@ -616,6 +639,20 @@ All configuration is read from environment variables with sensible defaults.
 | `KG_AGENT_ENABLE_AUTO_INGEST` | `false` | Allow realtime auto-ingest bridge during chat |
 | `KG_AGENT_STALENESS_DECAY_DAYS` | `7.0` | Half-life parameter for freshness-aware KG retrieval decay |
 | `KG_AGENT_ENABLE_FRESHNESS_DECAY` | `false` | Enable freshness-aware KG retrieval decay |
+
+### 10.8 Rerank Configuration
+
+`build_rag_from_env()` now forwards the standard LightRAG rerank environment variables into the agent-managed `LightRAG` instance, and tool-level query flows (`memory_search`, `cross_session_search`, `web_search`) reuse that same rerank configuration through `rag.rerank_model_func` / `rag.min_rerank_score`.
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `RERANK_BINDING` | `null` | Rerank provider binding (`cohere`, `jina`, `aliyun`, or disabled) |
+| `RERANK_MODEL` | Provider default | Rerank model name |
+| `RERANK_BINDING_HOST` | Provider default | Rerank API base URL |
+| `RERANK_BINDING_API_KEY` | empty | Rerank API key |
+| `MIN_RERANK_SCORE` | `0.0` | Minimum rerank score threshold applied after reranking |
+| `RERANK_ENABLE_CHUNKING` | `false` | Cohere-specific chunked rerank mode for long documents |
+| `RERANK_MAX_TOKENS_PER_DOC` | `4096` | Cohere-specific max token count per rerank document |
 
 ---
 
@@ -814,6 +851,7 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 | `build_default_tool_registry()` | `agent/builtin_tools.py` | Build default tool set |
 | `KGAgentConfig` | `config.py` | Unified configuration entry point |
 | `AgentLLMClient` | `config.py` | OpenAI-compatible LLM client |
+| `FallbackLLMClient` | `config.py` | Utility-model-first client wrapper with one-time fallback warning |
 | `ConversationMemoryStore` | `memory/conversation_memory.py` | In-session memory with optional SQLite or Mongo persistence |
 | `CrossSessionStore` | `memory/cross_session_store.py` | Cross-session retrieval over same-user prior sessions with optional Mongo/Qdrant vector backend |
 | `UserProfileStore` | `memory/user_profile.py` | User profile with optional SQLite or Mongo persistence |
@@ -834,8 +872,6 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 - **Playwright browser detection** uses Playwright sync API to verify the exact chromium executable exists; on version mismatch the adapter falls back to system Edge/Chrome via `browser_channel`
 - **CrossSessionStore** now supports an optional Mongo + Qdrant vector backend with heuristic compression and dedup, but it still falls back to conversation-memory token overlap when the vector backend is disabled or unavailable
 - Cross-session consolidation and background aging are heuristic only; they use vector similarity plus lightweight lexical guards and snippet packing, not LLM summarization or a full long-horizon memory graph
-- Add an optional dedicated LLM configuration for lightweight utility work across `kg_agent` and `lightrag_fork` (for example summaries and other basic LLM-driven post-processing), so these paths can use a cheaper / lower-capability model to save resources; if the dedicated config is missing, emit a warning and fall back to the main LLM config, and only raise an error when neither config is available
-- Memory-search and web-search query flows do not yet expose a dedicated rerank-model parameter/plumbing path the same way KG query flows already do; a consistent rerank-model handoff should be added for `query -> memory` and `query -> web`
 - **Streaming** now supports SSE for final-answer generation, but tool execution and path-explanation phases are still pre-stream setup work rather than incremental streamed stages
 - Path explanation scoring algorithm is based on simple token overlap; semantic similarity can be integrated later
 - Route Judge LLM refinement lacks multi-version prompt management

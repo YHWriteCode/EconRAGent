@@ -13,7 +13,7 @@ from kg_agent.agent.path_explainer import PathExplainer
 from kg_agent.agent.prompts import build_final_answer_prompt
 from kg_agent.agent.route_judge import RouteDecision, RouteJudge
 from kg_agent.agent.tool_registry import ToolRegistry
-from kg_agent.config import AgentLLMClient, KGAgentConfig
+from kg_agent.config import AgentLLMClient, FallbackLLMClient, KGAgentConfig
 from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.memory.cross_session_store import CrossSessionStore
@@ -113,6 +113,17 @@ class AgentCore:
         self._rag_provider = rag_provider
         self.config = config or KGAgentConfig.from_env()
         self.llm_client = AgentLLMClient(self.config.agent_model)
+        utility_model_config = getattr(self.config, "utility_model", None)
+        primary_utility_client = (
+            AgentLLMClient(utility_model_config)
+            if utility_model_config is not None
+            else None
+        )
+        self.utility_llm_client = FallbackLLMClient(
+            primary=primary_utility_client,
+            fallback=self.llm_client,
+            label="kg_agent internal utility work",
+        )
         self.conversation_memory = conversation_memory or ConversationMemoryStore()
         self.cross_session_store = cross_session_store or CrossSessionStore(
             conversation_memory=self.conversation_memory
@@ -122,11 +133,11 @@ class AgentCore:
             self.config, self.conversation_memory, self.cross_session_store
         )
         self.route_judge = route_judge or RouteJudge(
-            llm_client=self.llm_client,
+            llm_client=self.utility_llm_client,
             default_max_iterations=self.config.runtime.max_iterations,
         )
         self.path_explainer = path_explainer or PathExplainer(
-            llm_client=self.llm_client
+            llm_client=self.utility_llm_client
         )
         self.crawler_adapter = crawler_adapter
 
