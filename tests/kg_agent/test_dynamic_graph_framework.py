@@ -16,6 +16,8 @@ from kg_agent.config import (
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.tools.base import ToolDefinition, ToolResult
 from kg_agent.tools.retrieval_tools import kg_hybrid_search
+from lightrag_fork.base import QueryParam
+from lightrag_fork.operate import _sort_items_with_freshness_decay
 from lightrag_fork.utils import convert_to_user_format
 
 
@@ -373,6 +375,156 @@ async def test_agent_core_fresh_graph_skips_auto_ingest():
 
 
 @pytest.mark.asyncio
+async def test_agent_core_executes_generic_tool_input_bindings():
+    captured: dict[str, object] = {}
+
+    async def _produce_payload(**kwargs):
+        return ToolResult(
+            tool_name="payload_producer",
+            success=True,
+            data={
+                "payload": {
+                    "documents": ["doc-1", "doc-2"],
+                    "source": "custom://payload",
+                }
+            },
+        )
+
+    async def _consume_payload(**kwargs):
+        captured["content"] = kwargs.get("content")
+        captured["source"] = kwargs.get("source")
+        return ToolResult(
+            tool_name="payload_consumer",
+            success=True,
+            data={"status": "accepted"},
+        )
+
+    route_judge = _CapturingRouteJudge(
+        routes=[
+            RouteDecision(
+                need_tools=True,
+                need_memory=False,
+                need_web_search=False,
+                need_path_explanation=False,
+                strategy="custom_chain",
+                tool_sequence=[
+                    ToolCallPlan(tool="payload_producer"),
+                    ToolCallPlan(
+                        tool="payload_consumer",
+                        input_bindings={
+                            "content": {
+                                "from": "previous",
+                                "path": "data.payload.documents[]",
+                            },
+                            "source": {
+                                "from": "previous",
+                                "path": "data.payload.source",
+                            },
+                        },
+                    ),
+                ],
+                reason="test",
+                max_iterations=2,
+            )
+        ]
+    )
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False, enable_quant=False),
+            freshness=FreshnessConfig(enable_auto_ingest=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        tool_registry=_build_registry(
+            ("payload_producer", _produce_payload),
+            ("payload_consumer", _consume_payload),
+        ),
+        route_judge=route_judge,
+    )
+
+    response = await agent.chat(
+        query="chain the previous output",
+        session_id="s-chain-generic",
+        use_memory=False,
+    )
+
+    assert [item["tool"] for item in response.tool_calls] == [
+        "payload_producer",
+        "payload_consumer",
+    ]
+    assert captured["content"] == ["doc-1", "doc-2"]
+    assert captured["source"] == "custom://payload"
+
+
+@pytest.mark.asyncio
+async def test_agent_core_can_pipe_web_search_output_into_kg_ingest():
+    captured: dict[str, object] = {}
+
+    async def _capturing_kg_ingest(**kwargs):
+        captured["content"] = kwargs.get("content")
+        captured["source"] = kwargs.get("source")
+        return await _stub_kg_ingest(**kwargs)
+
+    route_judge = _CapturingRouteJudge(
+        routes=[
+            RouteDecision(
+                need_tools=True,
+                need_memory=False,
+                need_web_search=True,
+                need_path_explanation=False,
+                strategy="kg_ingest_request",
+                tool_sequence=[
+                    ToolCallPlan(tool="web_search"),
+                    ToolCallPlan(
+                        tool="kg_ingest",
+                        input_bindings={
+                            "content": {
+                                "from": "web_search",
+                                "transform": "web_pages_markdown",
+                            },
+                            "source": {
+                                "from": "web_search",
+                                "transform": "web_pages_sources",
+                            },
+                        },
+                    ),
+                ],
+                reason="ingest request",
+                max_iterations=2,
+            )
+        ]
+    )
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False, enable_quant=False, enable_kg_ingest=True),
+            freshness=FreshnessConfig(enable_auto_ingest=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        tool_registry=_build_registry(
+            ("web_search", _stub_web_search),
+            ("kg_ingest", _capturing_kg_ingest),
+        ),
+        route_judge=route_judge,
+    )
+
+    response = await agent.chat(
+        query="ingest the source into kg",
+        session_id="s-chain-web",
+        use_memory=False,
+    )
+
+    assert [item["tool"] for item in response.tool_calls] == [
+        "web_search",
+        "kg_ingest",
+    ]
+    assert captured["content"] == "fresh page content"
+    assert captured["source"] == "https://example.com/news"
+
+
+@pytest.mark.asyncio
 async def test_retrieval_freshness_decay_prefers_newer_items():
     older = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     newer = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
@@ -453,3 +605,20 @@ def test_convert_to_user_format_preserves_temporal_metadata_and_rank():
     assert relationship["last_confirmed_at"] == "2026-04-02T00:00:00+00:00"
     assert relationship["confirmation_count"] == 2
     assert relationship["rank"] == 5
+
+
+def test_operate_freshness_decay_prefers_newer_items_at_lower_layer():
+    older = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+    newer = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    items = [
+        {"entity_name": "Legacy", "rank": 2, "last_confirmed_at": older},
+        {"entity_name": "Fresh", "rank": 1, "last_confirmed_at": newer},
+    ]
+
+    reordered, applied = _sort_items_with_freshness_decay(
+        items,
+        QueryParam(enable_freshness_decay=True, staleness_decay_days=7.0),
+    )
+
+    assert applied is True
+    assert [item["entity_name"] for item in reordered] == ["Fresh", "Legacy"]

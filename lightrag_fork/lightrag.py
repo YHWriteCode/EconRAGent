@@ -2770,6 +2770,8 @@ class LightRAG:
             model_func=param.model_func,
             user_prompt=param.user_prompt,
             enable_rerank=param.enable_rerank,
+            enable_freshness_decay=param.enable_freshness_decay,
+            staleness_decay_days=param.staleness_decay_days,
         )
 
         query_result = None

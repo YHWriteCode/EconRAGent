@@ -25,9 +25,12 @@ from kg_agent.agent.agent_core import AgentCore
 from kg_agent.api.agent_routes import create_agent_routes
 from kg_agent.config import KGAgentConfig
 from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
-from kg_agent.crawler.crawl_state_store import JsonCrawlStateStore
-from kg_agent.crawler.scheduler import IngestScheduler
-from kg_agent.crawler.source_registry import JsonSourceRegistry
+from kg_agent.crawler.crawl_state_store import build_crawl_state_store
+from kg_agent.crawler.scheduler import IngestScheduler, build_scheduler_coordinator
+from kg_agent.crawler.source_registry import build_source_registry
+from kg_agent.memory.conversation_memory import ConversationMemoryStore
+from kg_agent.memory.cross_session_store import CrossSessionStore
+from kg_agent.memory.user_profile import UserProfileStore
 
 load_dotenv(dotenv_path=".env", override=False)
 
@@ -285,23 +288,40 @@ def _build_embedding_func_from_env(
     )
 
 
-def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
-    llm_binding = get_env_value("LLM_BINDING", "openai", str)
+def build_embedding_func_from_env() -> EmbeddingFunc:
     embedding_binding = get_env_value("EMBEDDING_BINDING", "openai", str)
-    if llm_binding == "openai-ollama":
-        llm_binding = "openai"
+    if get_env_value("LLM_BINDING", "openai", str) == "openai-ollama":
         embedding_binding = "ollama"
 
-    llm_host = get_env_value("LLM_BINDING_HOST", get_default_host(llm_binding), str)
     embedding_host = get_env_value(
         "EMBEDDING_BINDING_HOST", get_default_host(embedding_binding), str
     )
-    llm_api_key = get_env_value("LLM_BINDING_API_KEY", None)
     embedding_api_key = get_env_value("EMBEDDING_BINDING_API_KEY", None)
-    llm_model = get_env_value("LLM_MODEL", "gpt-4o-mini", str)
     embedding_model = get_env_value("EMBEDDING_MODEL", None, special_none=True)
     embedding_dim = get_env_value("EMBEDDING_DIM", None, int, special_none=True)
     embedding_send_dim = get_env_value("EMBEDDING_SEND_DIM", False, bool)
+    embedding_timeout = get_env_value(
+        "EMBEDDING_TIMEOUT", DEFAULT_EMBEDDING_TIMEOUT, int
+    )
+    return _build_embedding_func_from_env(
+        embedding_binding,
+        embedding_model,
+        embedding_host,
+        embedding_api_key,
+        embedding_timeout,
+        embedding_dim,
+        embedding_send_dim,
+    )
+
+
+def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
+    llm_binding = get_env_value("LLM_BINDING", "openai", str)
+    if llm_binding == "openai-ollama":
+        llm_binding = "openai"
+
+    llm_host = get_env_value("LLM_BINDING_HOST", get_default_host(llm_binding), str)
+    llm_api_key = get_env_value("LLM_BINDING_API_KEY", None)
+    llm_model = get_env_value("LLM_MODEL", "gpt-4o-mini", str)
 
     llm_timeout = get_env_value("LLM_TIMEOUT", DEFAULT_LLM_TIMEOUT, int)
     embedding_timeout = get_env_value(
@@ -311,15 +331,7 @@ def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
     llm_model_func, llm_model_kwargs = _build_llm_model_func_from_env(
         llm_binding, llm_model, llm_host, llm_api_key, llm_timeout
     )
-    embedding_func = _build_embedding_func_from_env(
-        embedding_binding,
-        embedding_model,
-        embedding_host,
-        embedding_api_key,
-        embedding_timeout,
-        embedding_dim,
-        embedding_send_dim,
-    )
+    embedding_func = build_embedding_func_from_env()
 
     rag = LightRAG(
         working_dir=get_env_value("WORKING_DIR", "./rag_storage", str),
@@ -364,6 +376,45 @@ def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
     return rag
 
 
+def build_cross_session_store_from_env(
+    *,
+    config: KGAgentConfig,
+    conversation_memory: ConversationMemoryStore,
+) -> CrossSessionStore:
+    embedding_func = None
+    if config.persistence.cross_session_backend.strip().lower() != "memory":
+        embedding_func = build_embedding_func_from_env()
+    return CrossSessionStore(
+        conversation_memory=conversation_memory,
+        backend=config.persistence.cross_session_backend,
+        embedding_func=embedding_func,
+        mongo_collection=config.persistence.cross_session_mongo_collection,
+        qdrant_collection_prefix=config.persistence.cross_session_qdrant_collection_prefix,
+        min_content_chars=config.persistence.cross_session_min_content_chars,
+        max_content_chars=config.persistence.cross_session_max_content_chars,
+        max_session_refs=config.persistence.cross_session_max_session_refs,
+        enable_consolidation=config.persistence.cross_session_enable_consolidation,
+        consolidation_similarity_threshold=(
+            config.persistence.cross_session_consolidation_similarity_threshold
+        ),
+        consolidation_top_k=config.persistence.cross_session_consolidation_top_k,
+        max_cluster_snippets=config.persistence.cross_session_max_cluster_snippets,
+        enable_background_maintenance=(
+            config.persistence.cross_session_enable_background_maintenance
+        ),
+        maintenance_interval_seconds=(
+            config.persistence.cross_session_maintenance_interval_seconds
+        ),
+        maintenance_batch_size=config.persistence.cross_session_maintenance_batch_size,
+        aging_stale_after_days=config.persistence.cross_session_aging_stale_after_days,
+        aging_delete_after_days=config.persistence.cross_session_aging_delete_after_days,
+        aging_keep_min_occurrences=(
+            config.persistence.cross_session_aging_keep_min_occurrences
+        ),
+        aging_max_snippets=config.persistence.cross_session_aging_max_snippets,
+    )
+
+
 def build_agent_core_from_env(
     *,
     rag: LightRAG | None = None,
@@ -371,16 +422,36 @@ def build_agent_core_from_env(
     crawler_adapter: Crawl4AIAdapter | None = None,
 ) -> AgentCore:
     config = KGAgentConfig.from_env()
+    conversation_memory = ConversationMemoryStore(
+        backend=config.persistence.memory_backend,
+        sqlite_path=config.persistence.memory_sqlite_path,
+        mongo_collection=config.persistence.memory_mongo_collection,
+    )
+    user_profile_store = UserProfileStore(
+        backend=config.persistence.user_profile_backend,
+        sqlite_path=config.persistence.user_profile_sqlite_path,
+        mongo_collection=config.persistence.user_profile_mongo_collection,
+    )
+    cross_session_store = build_cross_session_store_from_env(
+        config=config,
+        conversation_memory=conversation_memory,
+    )
     if rag_provider is not None:
         return AgentCore(
             rag_provider=rag_provider,
             config=config,
             crawler_adapter=crawler_adapter,
+            conversation_memory=conversation_memory,
+            cross_session_store=cross_session_store,
+            user_profile_store=user_profile_store,
         )
     return AgentCore(
         rag=rag or build_rag_from_env(),
         config=config,
         crawler_adapter=crawler_adapter,
+        conversation_memory=conversation_memory,
+        cross_session_store=cross_session_store,
+        user_profile_store=user_profile_store,
     )
 
 
@@ -408,6 +479,20 @@ def create_app(
 
     if agent_core is None:
         crawler_adapter = build_crawler_adapter_from_env(config=config_obj)
+        conversation_memory = ConversationMemoryStore(
+            backend=config_obj.persistence.memory_backend,
+            sqlite_path=config_obj.persistence.memory_sqlite_path,
+            mongo_collection=config_obj.persistence.memory_mongo_collection,
+        )
+        user_profile_store = UserProfileStore(
+            backend=config_obj.persistence.user_profile_backend,
+            sqlite_path=config_obj.persistence.user_profile_sqlite_path,
+            mongo_collection=config_obj.persistence.user_profile_mongo_collection,
+        )
+        cross_session_store = build_cross_session_store_from_env(
+            config=config_obj,
+            conversation_memory=conversation_memory,
+        )
         if rag_instance is None:
             rag_provider = EnvLightRAGProvider(config=config_obj)
             manage_rag_lifecycle = True
@@ -415,12 +500,18 @@ def create_app(
                 rag_provider=rag_provider.get,
                 config=config_obj,
                 crawler_adapter=crawler_adapter,
+                conversation_memory=conversation_memory,
+                cross_session_store=cross_session_store,
+                user_profile_store=user_profile_store,
             )
         else:
             agent_core = AgentCore(
                 rag=rag_instance,
                 config=config_obj,
                 crawler_adapter=crawler_adapter,
+                conversation_memory=conversation_memory,
+                cross_session_store=cross_session_store,
+                user_profile_store=user_profile_store,
             )
     elif rag_instance is None:
         rag_instance = getattr(agent_core, "_rag", None)
@@ -433,10 +524,22 @@ def create_app(
         scheduler = IngestScheduler(
             rag_provider=agent_core._resolve_rag,
             crawler_adapter=crawler_adapter,
-            source_registry=JsonSourceRegistry(config_obj.scheduler.sources_file),
-            state_store=JsonCrawlStateStore(config_obj.scheduler.state_file),
+            source_registry=build_source_registry(
+                backend=config_obj.persistence.scheduler_store_backend,
+                file_path=config_obj.scheduler.sources_file,
+                sqlite_path=config_obj.persistence.scheduler_store_sqlite_path,
+            ),
+            state_store=build_crawl_state_store(
+                backend=config_obj.persistence.scheduler_store_backend,
+                file_path=config_obj.scheduler.state_file,
+                sqlite_path=config_obj.persistence.scheduler_store_sqlite_path,
+            ),
             enabled=config_obj.scheduler.enable_scheduler,
             check_interval_seconds=config_obj.scheduler.check_interval_seconds,
+            coordinator=build_scheduler_coordinator(config_obj.scheduler),
+            coordination_ttl_seconds=config_obj.scheduler.coordination_ttl_seconds,
+            enable_leader_election=config_obj.scheduler.enable_leader_election,
+            loop_lease_key=config_obj.scheduler.loop_lease_key,
         )
 
     @asynccontextmanager
@@ -444,12 +547,33 @@ def create_app(
         try:
             if scheduler is not None:
                 await scheduler.start()
+            if agent_core is not None:
+                cross_session_store = getattr(agent_core, "cross_session_store", None)
+                start_maintenance = getattr(
+                    cross_session_store, "start_background_maintenance", None
+                )
+                if callable(start_maintenance):
+                    result = start_maintenance()
+                    if asyncio.iscoroutine(result):
+                        await result
             yield
         finally:
             if scheduler is not None:
                 await scheduler.stop()
             if crawler_adapter is not None:
                 await crawler_adapter.close()
+            if agent_core is not None:
+                for store_name in (
+                    "cross_session_store",
+                    "conversation_memory",
+                    "user_profile_store",
+                ):
+                    store = getattr(agent_core, store_name, None)
+                    close_method = getattr(store, "close", None)
+                    if callable(close_method):
+                        result = close_method()
+                        if asyncio.iscoroutine(result):
+                            await result
             if manage_rag_lifecycle and rag_provider is not None:
                 await rag_provider.finalize_all()
             elif manage_rag_lifecycle and rag_instance is not None:
@@ -494,6 +618,20 @@ def create_app(
                 scheduler is not None
                 and scheduler._task is not None
                 and not scheduler._task.done()
+            ),
+            "cross_session_maintenance_enabled": bool(
+                getattr(
+                    getattr(agent_core, "cross_session_store", None),
+                    "enable_background_maintenance",
+                    False,
+                )
+            ),
+            "cross_session_maintenance_running": bool(
+                getattr(
+                    getattr(agent_core, "cross_session_store", None),
+                    "maintenance_running",
+                    False,
+                )
             ),
         }
 

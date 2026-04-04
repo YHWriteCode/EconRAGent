@@ -366,8 +366,8 @@ def extract_search_results_from_markdown(
 
     results.sort(
         key=lambda item: (
-            not item.get("trusted_source", False),  # trusted sources first
             -item["score"],
+            not item.get("trusted_source", False),
             item["low_quality_domain"],
             item["generic_listing"],
             not item["article_like"],

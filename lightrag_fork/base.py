@@ -168,6 +168,14 @@ class QueryParam:
     containing citation information for the retrieved content.
     """
 
+    enable_freshness_decay: bool = False
+    """If True, apply freshness-aware ranking to entities and relationships
+    during knowledge-graph retrieval.
+    """
+
+    staleness_decay_days: float = 7.0
+    """Half-life in days for freshness decay when enable_freshness_decay is set."""
+
 
 @dataclass
 class StorageNameSpace(ABC):

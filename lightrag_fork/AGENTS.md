@@ -230,6 +230,10 @@ LightRAG(addon_params=...)
   - entity / relationship `last_confirmed_at`
   - entity / relationship `confirmation_count`
   - entity / relationship `rank`
+- Query-time freshness-aware ranking can now be enabled through:
+  - `QueryParam.enable_freshness_decay`
+  - `QueryParam.staleness_decay_days`
+- When enabled, `operate.py` applies freshness-aware reordering inside the KG retrieval pipeline and surfaces `metadata.freshness_decay_applied`
 
 **Semantics:**
 
@@ -383,7 +387,7 @@ Before modifying code under `lightrag_fork/`, verify the following:
 - **Redis distributed locks** still have window risks during master-slave failover/network partition scenarios
 - **`fallback_local`** is only suitable for development degradation; does not provide strong consistency
 - **No global transactions across storage backends**; inserts/deletes use eventual consistency
-- **Temporal metadata** is now stored and returned, but deeper freshness-aware ranking still has not been moved into the core `local/global/hybrid` ranking chain
+- **Freshness-aware ranking** now exists in the core KG retrieval flow, but it is still a v1 heuristic layered on existing ranking signals rather than a full ranking-model redesign
 - **`confirmation_count` semantics** are cumulative confirmation events; there is no built-in notion of unique-source confirmation count yet
 
 ---

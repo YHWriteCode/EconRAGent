@@ -1,4 +1,5 @@
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from kg_agent.api.app import (
@@ -7,6 +8,7 @@ from kg_agent.api.app import (
     build_rag_from_env,
     create_app,
 )
+from kg_agent.api.agent_routes import create_agent_routes
 
 
 def test_build_rag_from_env_returns_lightrag_instance(tmp_path, monkeypatch):
@@ -138,3 +140,76 @@ async def test_env_rag_provider_reuses_same_workspace_instance(monkeypatch):
 
     assert rag_a1.finalize_calls == 1
     assert rag_b.finalize_calls == 1
+
+
+def test_agent_chat_stream_endpoint_returns_sse():
+    class _StubAgentCore:
+        async def chat(self, **kwargs):
+            raise AssertionError("non-stream path should not be used")
+
+        async def chat_stream(self, **kwargs):
+            yield {"type": "meta", "metadata": {"streaming_supported": True}}
+            yield {"type": "delta", "content": "hello"}
+            yield {"type": "done", "answer": "hello"}
+
+    app = FastAPI()
+    app.include_router(create_agent_routes(_StubAgentCore()))
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/agent/chat",
+            json={
+                "query": "hello",
+                "session_id": "stream-session",
+                "stream": True,
+            },
+        ) as response:
+            body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert 'data: {"type": "delta", "content": "hello"}' in body
+    assert '"type": "done"' in body
+
+
+def test_create_app_starts_cross_session_background_maintenance():
+    class _StubCrossSessionStore:
+        def __init__(self):
+            self.enable_background_maintenance = True
+            self.maintenance_running = False
+            self.start_calls = 0
+            self.close_calls = 0
+
+        async def start_background_maintenance(self):
+            self.start_calls += 1
+            self.maintenance_running = True
+            return True
+
+        async def close(self):
+            self.close_calls += 1
+            self.maintenance_running = False
+
+    class _StubAgentCore:
+        def __init__(self):
+            self.cross_session_store = _StubCrossSessionStore()
+
+        async def chat(self, **kwargs):
+            return None
+
+        async def chat_stream(self, **kwargs):
+            if False:
+                yield None
+
+    agent_core = _StubAgentCore()
+    app = create_app(agent_core=agent_core)
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cross_session_maintenance_enabled"] is True
+    assert payload["cross_session_maintenance_running"] is True
+    assert agent_core.cross_session_store.start_calls == 1
+    assert agent_core.cross_session_store.close_calls == 1

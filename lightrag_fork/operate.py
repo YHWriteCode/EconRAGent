@@ -5,6 +5,7 @@ from pathlib import Path
 import asyncio
 import json
 import json_repair
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, overload, Literal
 from collections import Counter, defaultdict
 
@@ -73,6 +74,86 @@ from dotenv import load_dotenv
 # allows to use different .env file for each lightrag instance
 # the OS environment variables take precedence over the .env file
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+
+
+def _freshness_decay_enabled(query_param: QueryParam) -> bool:
+    return bool(getattr(query_param, "enable_freshness_decay", False))
+
+
+def _freshness_decay_days(query_param: QueryParam) -> float:
+    try:
+        return max(0.1, float(getattr(query_param, "staleness_decay_days", 7.0)))
+    except (TypeError, ValueError):
+        return 7.0
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _item_base_rank(item: dict[str, Any], fallback_rank: float) -> float:
+    for key in ("rank", "weight", "distance"):
+        value = item.get(key)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return fallback_rank
+
+
+def _freshness_weighted_score(
+    item: dict[str, Any],
+    *,
+    fallback_rank: float,
+    decay_days: float,
+    now: datetime,
+) -> float:
+    base_rank = _item_base_rank(item, fallback_rank)
+    confirmed_at = _parse_iso_datetime(item.get("last_confirmed_at"))
+    if confirmed_at is None:
+        return base_rank
+    age_days = max(0.0, (now - confirmed_at).total_seconds() / 86400.0)
+    freshness_score = 0.5 ** (age_days / decay_days)
+    return base_rank * (0.3 + 0.7 * freshness_score)
+
+
+def _sort_items_with_freshness_decay(
+    items: list[dict[str, Any]],
+    query_param: QueryParam,
+) -> tuple[list[dict[str, Any]], bool]:
+    if not items or not _freshness_decay_enabled(query_param):
+        return items, False
+
+    now = datetime.now(timezone.utc)
+    decay_days = _freshness_decay_days(query_param)
+    decorated: list[tuple[float, int, dict[str, Any]]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        fallback_rank = float(max(1, len(items) - index))
+        decorated.append(
+            (
+                _freshness_weighted_score(
+                    item,
+                    fallback_rank=fallback_rank,
+                    decay_days=decay_days,
+                    now=now,
+                ),
+                len(items) - index,
+                item,
+            )
+        )
+
+    if not decorated:
+        return items, False
+
+    decorated.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+    return [entry[2] for entry in decorated], True
 
 
 def _build_domain_schema_prompt_appendix(domain_schema: dict[str, Any] | None) -> str:
@@ -3637,6 +3718,7 @@ async def _perform_kg_search(
     query_embedding = None
     ll_embedding = None
     hl_embedding = None
+    freshness_decay_applied = False
 
     mode = query_param.mode
     need_ll = mode in ("local", "hybrid", "mix") and bool(ll_keywords)
@@ -3735,6 +3817,28 @@ async def _perform_kg_search(
                 else:
                     logger.warning(f"Vector chunk missing chunk_id: {chunk}")
 
+    if _freshness_decay_enabled(query_param):
+        local_entities, applied = _sort_items_with_freshness_decay(
+            local_entities,
+            query_param,
+        )
+        freshness_decay_applied = freshness_decay_applied or applied
+        local_relations, applied = _sort_items_with_freshness_decay(
+            local_relations,
+            query_param,
+        )
+        freshness_decay_applied = freshness_decay_applied or applied
+        global_entities, applied = _sort_items_with_freshness_decay(
+            global_entities,
+            query_param,
+        )
+        freshness_decay_applied = freshness_decay_applied or applied
+        global_relations, applied = _sort_items_with_freshness_decay(
+            global_relations,
+            query_param,
+        )
+        freshness_decay_applied = freshness_decay_applied or applied
+
     # Round-robin merge entities
     final_entities = []
     seen_entities = set()
@@ -3795,12 +3899,25 @@ async def _perform_kg_search(
         f"Raw search results: {len(final_entities)} entities, {len(final_relations)} relations, {len(vector_chunks)} vector chunks"
     )
 
+    if _freshness_decay_enabled(query_param):
+        final_entities, applied = _sort_items_with_freshness_decay(
+            final_entities,
+            query_param,
+        )
+        freshness_decay_applied = freshness_decay_applied or applied
+        final_relations, applied = _sort_items_with_freshness_decay(
+            final_relations,
+            query_param,
+        )
+        freshness_decay_applied = freshness_decay_applied or applied
+
     return {
         "final_entities": final_entities,
         "final_relations": final_relations,
         "vector_chunks": vector_chunks,
         "chunk_tracking": chunk_tracking,
         "query_embedding": query_embedding,
+        "freshness_decay_applied": freshness_decay_applied,
     }
 
 
@@ -4361,6 +4478,13 @@ async def _build_query_context(
         "high_level": hl_keywords_list,
         "low_level": ll_keywords_list,
     }
+    raw_data["metadata"]["freshness_decay_applied"] = bool(
+        search_result.get("freshness_decay_applied", False)
+    )
+    if raw_data["metadata"]["freshness_decay_applied"]:
+        raw_data["metadata"]["staleness_decay_days"] = _freshness_decay_days(
+            query_param
+        )
     raw_data["metadata"]["processing_info"] = {
         "total_entities_found": len(search_result.get("final_entities", [])),
         "total_relations_found": len(search_result.get("final_relations", [])),
@@ -4372,6 +4496,9 @@ async def _build_query_context(
         ),
         "merged_chunks_count": len(merged_chunks),
         "final_chunks_count": len(raw_data.get("data", {}).get("chunks", [])),
+        "freshness_decay_applied": bool(
+            search_result.get("freshness_decay_applied", False)
+        ),
     }
 
     logger.debug(
@@ -4423,6 +4550,7 @@ async def _get_node_data(
             **n,
             "entity_name": k["entity_name"],
             "rank": d,
+            "distance": k.get("distance"),
             "created_at": n.get("created_at", k.get("created_at")),
             "last_confirmed_at": n.get("last_confirmed_at"),
             "confirmation_count": n.get("confirmation_count"),
@@ -4701,6 +4829,9 @@ async def _get_edge_data(
                 "src_id": k["src_id"],
                 "tgt_id": k["tgt_id"],
                 "created_at": k.get("created_at", None),
+                "distance": k.get("distance"),
+                "last_confirmed_at": edge_props.get("last_confirmed_at"),
+                "confirmation_count": edge_props.get("confirmation_count"),
                 **edge_props,
             }
             edge_datas.append(combined)

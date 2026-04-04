@@ -41,6 +41,13 @@ async def kg_hybrid_search(
         param.user_prompt = user_prompt
     if session_context and session_context.get("history"):
         param.conversation_history = session_context["history"]
+    if freshness_config is not None:
+        param.enable_freshness_decay = bool(
+            getattr(freshness_config, "enable_freshness_decay", False)
+        )
+        param.staleness_decay_days = float(
+            getattr(freshness_config, "staleness_decay_days", 7.0)
+        )
 
     result = await rag.aquery_data(effective_query, param=param)
     _apply_freshness_decay(result, freshness_config)
@@ -72,6 +79,13 @@ async def kg_naive_search(
         param.chunk_top_k = chunk_top_k
     if session_context and session_context.get("history"):
         param.conversation_history = session_context["history"]
+    if freshness_config is not None:
+        param.enable_freshness_decay = bool(
+            getattr(freshness_config, "enable_freshness_decay", False)
+        )
+        param.staleness_decay_days = float(
+            getattr(freshness_config, "staleness_decay_days", 7.0)
+        )
 
     result = await rag.aquery_data(effective_query, param=param)
     _apply_freshness_decay(result, freshness_config)
@@ -90,6 +104,9 @@ def _apply_freshness_decay(result: dict[str, Any], freshness_config: Any) -> Non
     if freshness_config is None or not getattr(
         freshness_config, "enable_freshness_decay", False
     ):
+        return
+    metadata = result.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("freshness_decay_applied"):
         return
 
     data = result.get("data")

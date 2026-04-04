@@ -4,7 +4,7 @@ import inspect
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from lightrag_fork import LightRAG
 
@@ -79,6 +79,18 @@ class DynamicGraphUpdateResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class PreparedAgentRun:
+    context: AgentRunContext
+    session_context: dict[str, Any]
+    route: RouteDecision
+    raw_tool_calls: list[dict[str, Any]]
+    public_tool_calls: list[dict[str, Any]]
+    answer_tool_calls: list[dict[str, Any]]
+    path_explanation_dict: dict[str, Any] | None
+    metadata: dict[str, Any]
+
+
 RagProvider = Callable[[str | None], LightRAG | Awaitable[LightRAG]]
 
 
@@ -102,10 +114,12 @@ class AgentCore:
         self.config = config or KGAgentConfig.from_env()
         self.llm_client = AgentLLMClient(self.config.agent_model)
         self.conversation_memory = conversation_memory or ConversationMemoryStore()
-        self.cross_session_store = cross_session_store or CrossSessionStore()
+        self.cross_session_store = cross_session_store or CrossSessionStore(
+            conversation_memory=self.conversation_memory
+        )
         self.user_profile_store = user_profile_store or UserProfileStore()
         self.tool_registry = tool_registry or build_default_tool_registry(
-            self.config, self.conversation_memory
+            self.config, self.conversation_memory, self.cross_session_store
         )
         self.route_judge = route_judge or RouteJudge(
             llm_client=self.llm_client,
@@ -127,8 +141,12 @@ class AgentCore:
         session_context = await self._build_session_context(
             session_id=session_id,
             use_memory=use_memory,
+            user_id=user_id,
         )
-        available_tools = self._available_tool_names(include_memory=use_memory)
+        available_tools = self._available_tool_names(
+            include_memory=use_memory,
+            include_cross_session=bool(user_id),
+        )
         profile = await self.user_profile_store.get_profile(user_id)
         return await self.route_judge.plan(
             query=query,
@@ -150,7 +168,7 @@ class AgentCore:
         debug: bool = False,
         stream: bool = False,
     ) -> AgentResponse:
-        context = AgentRunContext(
+        prepared = await self._prepare_agent_run(
             query=query,
             session_id=session_id,
             user_id=user_id,
@@ -161,17 +179,174 @@ class AgentCore:
             debug=debug,
             stream=stream,
         )
+        answer = await self._build_final_answer(
+            query=prepared.context.query,
+            route=prepared.route,
+            tool_calls=prepared.answer_tool_calls,
+            path_explanation=prepared.path_explanation_dict,
+            conversation_history=prepared.session_context["history"],
+        )
+        answer = self._apply_answer_annotations(answer, prepared.metadata)
+
+        if prepared.context.use_memory and self.config.tool_config.enable_memory:
+            await self._persist_memory(
+                context=prepared.context,
+                answer=answer,
+                route=prepared.route,
+                raw_tool_calls=prepared.raw_tool_calls,
+                response_metadata=prepared.metadata,
+            )
+
+        return AgentResponse(
+            answer=answer,
+            route=asdict(prepared.route),
+            tool_calls=prepared.public_tool_calls,
+            path_explanation=prepared.path_explanation_dict,
+            metadata=prepared.metadata,
+            streaming_supported=True,
+        )
+
+    async def chat_stream(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        user_id: str | None = None,
+        workspace: str | None = None,
+        domain_schema: str | dict[str, Any] | None = None,
+        max_iterations: int | None = None,
+        use_memory: bool = True,
+        debug: bool = False,
+    ) -> AsyncIterator[dict[str, Any]]:
+        prepared = await self._prepare_agent_run(
+            query=query,
+            session_id=session_id,
+            user_id=user_id,
+            workspace=workspace or self.config.runtime.default_workspace or None,
+            domain_schema=domain_schema or self.config.runtime.default_domain_schema,
+            max_iterations=max_iterations,
+            use_memory=use_memory,
+            debug=debug,
+            stream=True,
+        )
+
+        metadata = dict(prepared.metadata)
+        metadata["streaming_supported"] = True
+        yield {
+            "type": "meta",
+            "route": asdict(prepared.route),
+            "tool_calls": prepared.public_tool_calls,
+            "path_explanation": prepared.path_explanation_dict,
+            "metadata": metadata,
+        }
+
+        chunks: list[str] = []
+        annotation_prefix = self._build_answer_annotation_prefix(metadata)
+        if annotation_prefix:
+            chunks.append(annotation_prefix)
+            yield {"type": "delta", "content": annotation_prefix}
+
+        streamed = False
+        if self.llm_client.is_available():
+            try:
+                async for delta in self._build_final_answer_stream(
+                    query=prepared.context.query,
+                    route=prepared.route,
+                    tool_calls=prepared.answer_tool_calls,
+                    path_explanation=prepared.path_explanation_dict,
+                    conversation_history=prepared.session_context["history"],
+                ):
+                    if not delta:
+                        continue
+                    streamed = True
+                    chunks.append(delta)
+                    yield {"type": "delta", "content": delta}
+            except Exception:
+                streamed = False
+
+        if not streamed:
+            fallback_answer = self._fallback_answer(
+                prepared.context.query,
+                prepared.route,
+                prepared.answer_tool_calls,
+                prepared.path_explanation_dict,
+            )
+            if not chunks or fallback_answer not in "".join(chunks):
+                chunks.append(fallback_answer)
+                yield {"type": "delta", "content": fallback_answer}
+
+        answer = "".join(chunks).strip()
+        if prepared.context.use_memory and self.config.tool_config.enable_memory:
+            await self._persist_memory(
+                context=prepared.context,
+                answer=answer,
+                route=prepared.route,
+                raw_tool_calls=prepared.raw_tool_calls,
+                response_metadata=metadata,
+            )
+
+        yield {
+            "type": "done",
+            "answer": answer,
+            "route": asdict(prepared.route),
+            "tool_calls": prepared.public_tool_calls,
+            "path_explanation": prepared.path_explanation_dict,
+            "metadata": metadata,
+        }
+
+    async def _resolve_rag(self, workspace: str | None) -> LightRAG:
+        if self._rag_provider is not None:
+            resolved = self._rag_provider(workspace or "")
+            if inspect.isawaitable(resolved):
+                return await resolved
+            return resolved
+        if self._rag is None:
+            raise RuntimeError("AgentCore requires a LightRAG instance or rag_provider")
+        if workspace and self._rag.workspace and workspace != self._rag.workspace:
+            raise RuntimeError(
+                f"AgentCore is bound to workspace '{self._rag.workspace}', received '{workspace}'"
+            )
+        return self._rag
+
+    async def _prepare_agent_run(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        user_id: str | None = None,
+        workspace: str | None = None,
+        domain_schema: str | dict[str, Any] | None = None,
+        max_iterations: int | None = None,
+        use_memory: bool = True,
+        debug: bool = False,
+        stream: bool = False,
+    ) -> PreparedAgentRun:
+        context = AgentRunContext(
+            query=query,
+            session_id=session_id,
+            user_id=user_id,
+            workspace=workspace,
+            domain_schema=domain_schema,
+            max_iterations=max_iterations,
+            use_memory=use_memory,
+            debug=debug,
+            stream=stream,
+        )
         rag = await self._resolve_rag(context.workspace)
         session_context = await self._build_session_context(
             session_id=context.session_id,
             use_memory=context.use_memory,
+            user_id=context.user_id,
         )
         user_profile = await self.user_profile_store.get_profile(user_id)
         route = await self.route_judge.plan(
             query=context.query,
             session_context=session_context,
             user_profile=user_profile,
-            available_tools=self._available_tool_names(include_memory=context.use_memory),
+            available_tools=self._available_tool_names(
+                include_memory=context.use_memory,
+                include_cross_session=bool(context.user_id),
+            ),
         )
 
         raw_tool_calls: list[dict[str, Any]] = []
@@ -183,14 +358,14 @@ class AgentCore:
         )
 
         for index, tool_plan in enumerate(route.tool_sequence[:execution_limit]):
-            tool_kwargs = self._build_tool_execution_kwargs(
+            result = await self._execute_tool_plan(
                 context=context,
                 rag=rag,
                 session_context=session_context,
                 user_profile=user_profile,
-                tool_args=tool_plan.args,
+                tool_plan=tool_plan,
+                raw_tool_calls=raw_tool_calls,
             )
-            result = await self.tool_registry.execute(tool_plan.tool, **tool_kwargs)
             raw_tool_calls.append(
                 self._record_tool_call(result=result, optional=tool_plan.optional)
             )
@@ -235,14 +410,6 @@ class AgentCore:
             )
             path_explanation_dict = asdict(path_explanation)
 
-        answer = await self._build_final_answer(
-            query=context.query,
-            route=route,
-            tool_calls=answer_tool_calls,
-            path_explanation=path_explanation_dict,
-            conversation_history=session_context["history"],
-        )
-
         metadata = {
             "session_id": context.session_id,
             "user_id": context.user_id,
@@ -250,48 +417,26 @@ class AgentCore:
             "domain_schema": context.domain_schema,
             "route_strategy": route.strategy,
             "stream_requested": context.stream,
-            "streaming_supported": False,
+            "streaming_supported": True,
             **dynamic_update.metadata,
         }
-        answer = self._apply_answer_annotations(answer, metadata)
-
-        if context.use_memory and self.config.tool_config.enable_memory:
-            await self._persist_memory(
-                context=context,
-                answer=answer,
-                route=route,
-                raw_tool_calls=raw_tool_calls,
-                response_metadata=metadata,
-            )
-
-        return AgentResponse(
-            answer=answer,
-            route=asdict(route),
-            tool_calls=public_tool_calls,
-            path_explanation=path_explanation_dict,
+        return PreparedAgentRun(
+            context=context,
+            session_context=session_context,
+            route=route,
+            raw_tool_calls=raw_tool_calls,
+            public_tool_calls=public_tool_calls,
+            answer_tool_calls=answer_tool_calls,
+            path_explanation_dict=path_explanation_dict,
             metadata=metadata,
-            streaming_supported=False,
         )
-
-    async def _resolve_rag(self, workspace: str | None) -> LightRAG:
-        if self._rag_provider is not None:
-            resolved = self._rag_provider(workspace or "")
-            if inspect.isawaitable(resolved):
-                return await resolved
-            return resolved
-        if self._rag is None:
-            raise RuntimeError("AgentCore requires a LightRAG instance or rag_provider")
-        if workspace and self._rag.workspace and workspace != self._rag.workspace:
-            raise RuntimeError(
-                f"AgentCore is bound to workspace '{self._rag.workspace}', received '{workspace}'"
-            )
-        return self._rag
 
     async def _build_session_context(
         self,
         *,
         session_id: str,
         use_memory: bool,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         if not use_memory or not self.config.tool_config.enable_memory:
             return {"history": [], "recent_tool_calls": []}
@@ -303,7 +448,11 @@ class AgentCore:
             session_id,
             assistant_turns=1,
         )
-        return {"history": history, "recent_tool_calls": recent_tool_calls}
+        return {
+            "history": history,
+            "recent_tool_calls": recent_tool_calls,
+            "cross_session_enabled": bool(user_id),
+        }
 
     async def _persist_memory(
         self,
@@ -314,13 +463,14 @@ class AgentCore:
         raw_tool_calls: list[dict[str, Any]],
         response_metadata: dict[str, Any],
     ) -> None:
-        await self.conversation_memory.append_message(
+        user_message = await self.conversation_memory.append_message(
             context.session_id,
             "user",
             context.query,
             metadata={"workspace": context.workspace},
+            user_id=context.user_id,
         )
-        await self.conversation_memory.append_message(
+        assistant_message = await self.conversation_memory.append_message(
             context.session_id,
             "assistant",
             answer,
@@ -344,7 +494,11 @@ class AgentCore:
                     }
                 },
             },
+            user_id=context.user_id,
         )
+        if self.cross_session_store is not None and context.user_id:
+            await self.cross_session_store.index_message(user_message)
+            await self.cross_session_store.index_message(assistant_message)
 
     async def _build_final_answer(
         self,
@@ -375,6 +529,30 @@ class AgentCore:
             except Exception:
                 pass
         return self._fallback_answer(query, route, tool_calls, path_explanation)
+
+    async def _build_final_answer_stream(
+        self,
+        *,
+        query: str,
+        route: RouteDecision,
+        tool_calls: list[dict[str, Any]],
+        path_explanation: dict[str, Any] | None,
+        conversation_history: list[dict[str, str]],
+    ) -> AsyncIterator[str]:
+        system_prompt, user_prompt = build_final_answer_prompt(
+            query=query,
+            route=asdict(route),
+            tool_results=tool_calls,
+            path_explanation=path_explanation,
+            conversation_history=conversation_history,
+        )
+        async for delta in self.llm_client.stream_text(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=0.2,
+            max_tokens=1200,
+        ):
+            yield delta
 
     async def _maybe_handle_dynamic_graph_update(
         self,
@@ -471,15 +649,22 @@ class AgentCore:
             current_query=context.query,
             session_context=session_context,
         )
-        ingest_result = await self._bridge_web_pages_into_kg(
-            context=context,
-            rag=rag,
-            session_context=session_context,
-            user_profile=user_profile,
-            raw_tool_calls=raw_tool_calls,
-            query_override=correction_query,
+        existing_ingest = self._find_last_tool_call(raw_tool_calls, "kg_ingest")
+        ingest_result = DynamicGraphUpdateResult()
+        if existing_ingest is None:
+            ingest_result = await self._bridge_web_pages_into_kg(
+                context=context,
+                rag=rag,
+                session_context=session_context,
+                user_profile=user_profile,
+                raw_tool_calls=raw_tool_calls,
+                query_override=correction_query,
+            )
+
+        last_ingest = existing_ingest or (
+            ingest_result.raw_tool_calls[-1] if ingest_result.raw_tool_calls else None
         )
-        if not ingest_result.raw_tool_calls:
+        if last_ingest is None:
             return DynamicGraphUpdateResult(
                 metadata={
                     "freshness_action": "correction_refresh_skipped",
@@ -489,7 +674,6 @@ class AgentCore:
                 }
             )
 
-        last_ingest = ingest_result.raw_tool_calls[-1]
         return DynamicGraphUpdateResult(
             raw_tool_calls=ingest_result.raw_tool_calls,
             metadata={
@@ -520,29 +704,62 @@ class AgentCore:
         if not pages:
             return DynamicGraphUpdateResult()
 
-        documents = [page["markdown"] for page in pages]
-        sources = [
-            page.get("final_url") or page.get("url") or f"web:{index}"
-            for index, page in enumerate(pages, start=1)
-        ]
-        base_kwargs = self._build_tool_base_kwargs(
+        plan = type("ToolPlanLike", (), {})()
+        plan.tool = "kg_ingest"
+        plan.args = {}
+        plan.optional = True
+        plan.input_bindings = {
+            "content": {
+                "from": "web_search",
+                "transform": "web_pages_markdown",
+            },
+            "source": {
+                "from": "web_search",
+                "transform": "web_pages_sources",
+            },
+        }
+        result = await self._execute_tool_plan(
             context=context,
             rag=rag,
             session_context=session_context,
             user_profile=user_profile,
-        )
-        result = await self.tool_registry.execute(
-            "kg_ingest",
-            **{
-                **base_kwargs,
-                "query": query_override,
-                "content": documents if len(documents) > 1 else documents[0],
-                "source": sources if len(sources) > 1 else sources[0],
-            },
+            tool_plan=plan,
+            raw_tool_calls=raw_tool_calls,
+            query_override=query_override,
         )
         return DynamicGraphUpdateResult(
             raw_tool_calls=[self._record_tool_call(result=result, optional=True)]
         )
+
+    async def _execute_tool_plan(
+        self,
+        *,
+        context: AgentRunContext,
+        rag: LightRAG,
+        session_context: dict[str, Any],
+        user_profile: dict[str, Any] | None,
+        tool_plan: Any,
+        raw_tool_calls: list[dict[str, Any]],
+        query_override: str | None = None,
+    ):
+        tool_kwargs = self._build_tool_execution_kwargs(
+            context=context,
+            rag=rag,
+            session_context=session_context,
+            user_profile=user_profile,
+            tool_args=getattr(tool_plan, "args", None),
+        )
+        if query_override is not None:
+            tool_kwargs["query"] = query_override
+        input_bindings = getattr(tool_plan, "input_bindings", {}) or {}
+        if isinstance(input_bindings, dict):
+            tool_kwargs.update(
+                self._resolve_tool_input_bindings(
+                    input_bindings=input_bindings,
+                    raw_tool_calls=raw_tool_calls,
+                )
+            )
+        return await self.tool_registry.execute(tool_plan.tool, **tool_kwargs)
 
     def _build_tool_execution_kwargs(
         self,
@@ -568,6 +785,112 @@ class AgentCore:
         }
         return {**base_kwargs, **sanitized_tool_args}
 
+    def _resolve_tool_input_bindings(
+        self,
+        *,
+        input_bindings: dict[str, dict[str, Any]],
+        raw_tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        resolved: dict[str, Any] = {}
+        for arg_name, binding in input_bindings.items():
+            if not isinstance(binding, dict):
+                continue
+            value = self._resolve_tool_binding(
+                binding=binding,
+                raw_tool_calls=raw_tool_calls,
+            )
+            if value is not None:
+                resolved[arg_name] = value
+        return resolved
+
+    def _resolve_tool_binding(
+        self,
+        *,
+        binding: dict[str, Any],
+        raw_tool_calls: list[dict[str, Any]],
+    ) -> Any:
+        source_name = str(binding.get("from") or "previous").strip().lower()
+        if source_name in {"previous", "__previous__"}:
+            source_call = raw_tool_calls[-1] if raw_tool_calls else None
+        else:
+            source_call = self._find_last_tool_call(raw_tool_calls, source_name)
+        if not source_call:
+            return None
+        if not bool(binding.get("allow_failed", False)) and not source_call.get("success"):
+            return None
+
+        transform = binding.get("transform")
+        if isinstance(transform, str) and transform.strip():
+            return self._apply_tool_binding_transform(source_call, transform.strip())
+
+        path = binding.get("path")
+        if isinstance(path, str) and path.strip():
+            return self._extract_binding_path(source_call, path.strip())
+
+        return source_call.get("data")
+
+    def _apply_tool_binding_transform(
+        self,
+        source_call: dict[str, Any],
+        transform: str,
+    ) -> Any:
+        if transform == "web_pages_markdown":
+            pages = self._extract_successful_web_pages(source_call)
+            documents = [
+                page["markdown"]
+                for page in pages
+                if isinstance(page.get("markdown"), str) and page["markdown"].strip()
+            ]
+            if not documents:
+                return None
+            return documents[0] if len(documents) == 1 else documents
+        if transform == "web_pages_sources":
+            pages = self._extract_successful_web_pages(source_call)
+            sources = [
+                page.get("final_url") or page.get("url") or f"web:{index}"
+                for index, page in enumerate(pages, start=1)
+            ]
+            if not sources:
+                return None
+            return sources[0] if len(sources) == 1 else sources
+        return None
+
+    @classmethod
+    def _extract_binding_path(cls, value: Any, path: str) -> Any:
+        current: list[Any] = [value]
+        for raw_token in path.split("."):
+            token = raw_token.strip()
+            if not token:
+                continue
+            expand = token.endswith("[]")
+            key = token[:-2] if expand else token
+            next_values: list[Any] = []
+            for item in current:
+                extracted = cls._extract_binding_token(item, key)
+                if extracted is None:
+                    continue
+                if expand:
+                    if isinstance(extracted, list):
+                        next_values.extend(extracted)
+                    else:
+                        next_values.append(extracted)
+                else:
+                    next_values.append(extracted)
+            current = next_values
+            if not current:
+                return None
+        if not current:
+            return None
+        return current[0] if len(current) == 1 else current
+
+    @staticmethod
+    def _extract_binding_token(value: Any, token: str) -> Any:
+        if not token:
+            return value
+        if isinstance(value, dict):
+            return value.get(token)
+        return getattr(value, token, None)
+
     def _build_tool_base_kwargs(
         self,
         *,
@@ -585,6 +908,7 @@ class AgentCore:
             "user_profile": user_profile,
             "domain_schema": context.domain_schema,
             "memory_store": self.conversation_memory,
+            "cross_session_store": self.cross_session_store,
             "crawler_adapter": self.crawler_adapter,
             "freshness_config": self.config.freshness,
         }
@@ -732,12 +1056,21 @@ class AgentCore:
             return False
         return all(getattr(item, "optional", False) for item in remaining)
 
-    def _available_tool_names(self, *, include_memory: bool) -> list[str]:
+    def _available_tool_names(
+        self,
+        *,
+        include_memory: bool,
+        include_cross_session: bool = False,
+    ) -> list[str]:
         tools = []
         for tool in self.tool_registry.list_tools():
             if not tool.enabled:
                 continue
             if tool.name == "memory_search" and not include_memory:
+                continue
+            if tool.name == "cross_session_search" and (
+                not include_memory or not include_cross_session
+            ):
                 continue
             tools.append(tool.name)
         return tools
@@ -887,8 +1220,13 @@ class AgentCore:
 
     @staticmethod
     def _apply_answer_annotations(answer: str, metadata: dict[str, Any]) -> str:
-        if metadata.get("freshness_action") == "user_correction_refresh":
-            note = "Refreshed the graph using your correction feedback."
-            if note not in answer:
-                return f"{note}\n\n{answer}".strip()
+        prefix = AgentCore._build_answer_annotation_prefix(metadata)
+        if prefix and prefix not in answer:
+            return f"{prefix}{answer}".strip()
         return answer
+
+    @staticmethod
+    def _build_answer_annotation_prefix(metadata: dict[str, Any]) -> str:
+        if metadata.get("freshness_action") == "user_correction_refresh":
+            return "Refreshed the graph using your correction feedback.\n\n"
+        return ""

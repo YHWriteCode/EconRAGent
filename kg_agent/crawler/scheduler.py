@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+from lightrag_fork.kg.redis_lock_backend import RedisLockBackend
 from lightrag_fork.utils import compute_mdhash_id
 
+from kg_agent.config import SchedulerConfig
 from kg_agent.crawler.crawl_state_store import (
     CrawlStateRecord,
     CrawlStateStore,
@@ -22,6 +27,151 @@ from kg_agent.crawler.source_registry import (
 logger = logging.getLogger(__name__)
 
 RagResolver = Callable[[str | None], Any | Awaitable[Any]]
+
+
+@dataclass
+class SchedulerCoordinationLease:
+    key: str
+    backend: str
+    payload: Any = None
+
+
+class SchedulerCoordinator:
+    backend_name = "local"
+
+    async def acquire(
+        self,
+        key: str,
+        *,
+        ttl_s: int,
+        wait_timeout_s: float | None = 0.0,
+    ) -> SchedulerCoordinationLease | None:
+        raise NotImplementedError
+
+    async def release(self, lease: SchedulerCoordinationLease | None) -> None:
+        raise NotImplementedError
+
+
+class LocalSchedulerCoordinator(SchedulerCoordinator):
+    backend_name = "local"
+
+    def __init__(self):
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def acquire(
+        self,
+        key: str,
+        *,
+        ttl_s: int,
+        wait_timeout_s: float | None = 0.0,
+    ) -> SchedulerCoordinationLease | None:
+        del ttl_s, wait_timeout_s
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        if lock.locked():
+            return None
+        await lock.acquire()
+        return SchedulerCoordinationLease(
+            key=key,
+            backend=self.backend_name,
+            payload=lock,
+        )
+
+    async def release(self, lease: SchedulerCoordinationLease | None) -> None:
+        if lease is None or not isinstance(lease.payload, asyncio.Lock):
+            return
+        if lease.payload.locked():
+            lease.payload.release()
+
+
+class RedisSchedulerCoordinator(SchedulerCoordinator):
+    backend_name = "redis"
+
+    def __init__(
+        self,
+        *,
+        redis_url: str,
+        key_prefix: str = "kg_agent:scheduler",
+        local_fallback: SchedulerCoordinator | None = None,
+    ):
+        self._owner = f"{socket.gethostname()}:{uuid.uuid4().hex[:12]}"
+        self._backend = RedisLockBackend(
+            redis_url=redis_url,
+            key_prefix=key_prefix,
+            fail_mode="strict",
+        )
+        self._local_fallback = local_fallback
+
+    async def acquire(
+        self,
+        key: str,
+        *,
+        ttl_s: int,
+        wait_timeout_s: float | None = 0.0,
+    ) -> SchedulerCoordinationLease | None:
+        try:
+            lease = await self._backend.acquire(
+                key=key,
+                owner=self._owner,
+                ttl_s=ttl_s,
+                wait_timeout_s=wait_timeout_s,
+                retry_interval_s=0.05,
+                auto_renew=True,
+            )
+        except Exception as exc:
+            if self._local_fallback is None:
+                raise
+            logger.warning(
+                "Redis scheduler coordination failed for key '%s', falling back to local coordination: %s",
+                key,
+                exc,
+            )
+            return await self._local_fallback.acquire(
+                key,
+                ttl_s=ttl_s,
+                wait_timeout_s=wait_timeout_s,
+            )
+
+        if lease is None:
+            return None
+        return SchedulerCoordinationLease(
+            key=key,
+            backend=self.backend_name,
+            payload=lease,
+        )
+
+    async def release(self, lease: SchedulerCoordinationLease | None) -> None:
+        if lease is None:
+            return
+        if lease.backend == "local" and self._local_fallback is not None:
+            await self._local_fallback.release(lease)
+            return
+        if lease.payload is None:
+            return
+        await self._backend.release(lease.payload)
+
+
+def build_scheduler_coordinator(
+    config: SchedulerConfig | None,
+) -> SchedulerCoordinator:
+    config_obj = config or SchedulerConfig()
+    backend = (config_obj.coordination_backend or "auto").strip().lower()
+    redis_url = (config_obj.coordination_redis_url or "").strip()
+    local = LocalSchedulerCoordinator()
+    if backend == "local":
+        return local
+    if backend == "redis":
+        if not redis_url:
+            raise RuntimeError(
+                "KG_AGENT_SCHEDULER_COORDINATION_BACKEND=redis requires KG_AGENT_SCHEDULER_COORDINATION_REDIS_URL or REDIS_URI"
+            )
+        return RedisSchedulerCoordinator(redis_url=redis_url, local_fallback=local)
+    if backend != "auto":
+        raise RuntimeError(
+            f"Unsupported scheduler coordination backend: {backend}"
+        )
+    if redis_url:
+        return RedisSchedulerCoordinator(redis_url=redis_url, local_fallback=local)
+    return local
 
 
 def _utcnow_iso() -> str:
@@ -47,6 +197,10 @@ class IngestScheduler:
         state_store: CrawlStateStore | None = None,
         enabled: bool = False,
         check_interval_seconds: int = 60,
+        coordinator: SchedulerCoordinator | None = None,
+        coordination_ttl_seconds: int = 120,
+        enable_leader_election: bool = False,
+        loop_lease_key: str = "scheduler:loop",
     ):
         self._rag_provider = rag_provider
         self.crawler_adapter = crawler_adapter
@@ -54,6 +208,10 @@ class IngestScheduler:
         self.state_store = state_store or JsonCrawlStateStore()
         self.enabled = bool(enabled)
         self.check_interval_seconds = max(1, int(check_interval_seconds))
+        self.coordinator = coordinator or LocalSchedulerCoordinator()
+        self.coordination_ttl_seconds = max(5, int(coordination_ttl_seconds))
+        self.enable_leader_election = bool(enable_leader_election)
+        self.loop_lease_key = (loop_lease_key or "scheduler:loop").strip() or "scheduler:loop"
 
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
@@ -63,6 +221,8 @@ class IngestScheduler:
         self._last_tick_at: str | None = None
         self._last_error: str | None = None
         self._loop_iterations = 0
+        self._leader_role = "disabled"
+        self._loop_leader_lease: SchedulerCoordinationLease | None = None
 
     async def start(self) -> None:
         if self._task is not None:
@@ -78,12 +238,15 @@ class IngestScheduler:
         task = self._task
         self._task = None
         if task is None:
+            await self._release_loop_leader_lease()
             return
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
+        finally:
+            await self._release_loop_leader_lease()
 
     async def list_sources(self) -> list[MonitoredSource]:
         return await self.source_registry.list_sources()
@@ -134,6 +297,10 @@ class IngestScheduler:
             "enabled": self.enabled,
             "running": self._task is not None and not self._task.done(),
             "check_interval_seconds": self.check_interval_seconds,
+            "coordination_backend": getattr(self.coordinator, "backend_name", "local"),
+            "leader_election_enabled": self.enable_leader_election,
+            "leader_role": self._leader_role,
+            "loop_lease_key": self.loop_lease_key,
             "started_at": self._started_at,
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
@@ -147,9 +314,7 @@ class IngestScheduler:
     async def _run_loop(self) -> None:
         try:
             while not self._stop_event.is_set():
-                self._last_tick_at = _utcnow_iso()
-                self._loop_iterations += 1
-                await self._poll_due_sources()
+                await self._run_once()
                 try:
                     await asyncio.wait_for(
                         self._stop_event.wait(),
@@ -164,6 +329,45 @@ class IngestScheduler:
             async with self._status_lock:
                 self._last_error = str(exc)
 
+    async def _run_once(self) -> None:
+        self._last_tick_at = _utcnow_iso()
+        self._loop_iterations += 1
+        if not self.enable_leader_election:
+            self._leader_role = "disabled"
+            await self._poll_due_sources()
+            return
+
+        if not await self._ensure_loop_leader_lease():
+            self._leader_role = "standby"
+            return
+
+        self._leader_role = "leader"
+        await self._poll_due_sources()
+
+    async def _ensure_loop_leader_lease(self) -> bool:
+        if self._loop_leader_lease is not None:
+            return True
+        lease = await self.coordinator.acquire(
+            self.loop_lease_key,
+            ttl_s=self.coordination_ttl_seconds,
+            wait_timeout_s=0.0,
+        )
+        if lease is None:
+            return False
+        self._loop_leader_lease = lease
+        return True
+
+    async def _release_loop_leader_lease(self) -> None:
+        lease = self._loop_leader_lease
+        self._loop_leader_lease = None
+        if lease is None:
+            if self.enable_leader_election:
+                self._leader_role = "standby"
+            return
+        await self.coordinator.release(lease)
+        if self.enable_leader_election:
+            self._leader_role = "standby"
+
     async def _poll_due_sources(self) -> None:
         sources = await self.source_registry.list_sources()
         for source in sources:
@@ -175,8 +379,23 @@ class IngestScheduler:
             await self._poll_source(source)
 
     async def _poll_source(self, source: MonitoredSource) -> dict[str, Any]:
+        coordination_lease = await self.coordinator.acquire(
+            f"source:{source.source_id}",
+            ttl_s=self.coordination_ttl_seconds,
+            wait_timeout_s=0.0,
+        )
+        if coordination_lease is None:
+            return {
+                "status": "busy",
+                "source_id": source.source_id,
+                "summary": (
+                    f"Source '{source.source_id}' is already being polled by another scheduler instance"
+                ),
+            }
+
         lock = self._source_locks.setdefault(source.source_id, asyncio.Lock())
         if lock.locked():
+            await self.coordinator.release(coordination_lease)
             return {
                 "status": "busy",
                 "source_id": source.source_id,
@@ -189,7 +408,7 @@ class IngestScheduler:
                 source_id=source.source_id
             )
             hashes = dict(previous.last_content_hashes)
-            requested_count = min(len(source.urls), source.max_pages)
+            requested_count = 0
             ingested_count = 0
             success_count = 0
             failure_messages: list[str] = []
@@ -200,6 +419,7 @@ class IngestScheduler:
                     source.urls,
                     max_pages=source.max_pages,
                 )
+                requested_count = len(pages)
                 for page in pages:
                     page_key = (page.final_url or page.url or "").strip() or page.url
                     if not page.success:
@@ -277,6 +497,8 @@ class IngestScheduler:
                     "ingested_count": ingested_count,
                     "summary": str(exc),
                 }
+            finally:
+                await self.coordinator.release(coordination_lease)
 
     async def _resolve_rag(self, workspace: str | None):
         resolved = self._rag_provider(workspace)

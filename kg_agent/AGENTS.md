@@ -61,9 +61,9 @@ kg_agent/
 │
 ├── memory/                        # Memory system
 │   ├── __init__.py
-│   ├── conversation_memory.py     # ConversationMemoryStore: in-session message storage and search
-│   ├── cross_session_store.py     # CrossSessionStore: cross-session retrieval (placeholder)
-│   └── user_profile.py            # UserProfileStore: user profile storage
+│   ├── conversation_memory.py     # ConversationMemoryStore: in-session message storage/search with memory/SQLite/Mongo backends
+│   ├── cross_session_store.py     # CrossSessionStore: same-user retrieval across prior sessions
+│   └── user_profile.py            # UserProfileStore: user profile storage with memory/SQLite/Mongo backends
 │
 ├── crawler/                       # Web crawling layer
 │   ├── __init__.py                # Exports Crawl4AIAdapter, CrawledPage, DiscoveredUrl, IngestScheduler, source/state types
@@ -133,10 +133,12 @@ These fields are injected uniformly by the framework; a tool handler's `args` ca
 
 ### 3.8 Dynamic-Graph v1 Constraints
 
-- `web_search -> kg_ingest` is currently implemented as an explicit `AgentCore` bridge, not as generic tool output piping
+- Generic tool chaining / output piping is now supported in `AgentCore` through `ToolCallPlan.input_bindings`
+- `web_search -> kg_ingest` can run either as an explicit dynamic-graph bridge or as a normal chained tool sequence with input bindings
 - `recent_tool_calls` should only inject compact tool history from the most recent assistant turn unless a later design explicitly changes that rule
 - `compact_tool_calls` must remain lightweight: store `tool`, `success`, `summary`, `strategy`, `timestamp`; do not persist full tool data or crawled page markdown in conversation memory
-- Scheduler v1 assumes single process / single worker deployment; do not add leader election or distributed coordination in `kg_agent/` without a dedicated design pass
+- Scheduler coordination now supports local in-process leases and optional Redis-backed leases for multi-worker / multi-instance polling coordination
+- Scheduler also supports optional loop leader election so one scheduler instance can own recurring due-source scans for a shared `loop_lease_key`
 - `sources_file=""` means in-memory source registry only; non-empty file paths must persist source CRUD changes to JSON
 
 ---
@@ -380,12 +382,13 @@ Runtime → ToolRegistry.execute(name, **kwargs)
 | `graph_entity_lookup` | `tools/graph_tools.py` | graph | Implemented | **Yes** |
 | `graph_relation_trace` | `tools/graph_tools.py` | graph, explanation | Implemented | **Yes** |
 | `memory_search` | `agent/builtin_tools.py` | memory | Implemented | **Yes** (controlled by `KG_AGENT_ENABLE_MEMORY`) |
+| `cross_session_search` | `agent/builtin_tools.py` | memory, cross-session | Implemented | **Yes** when memory is enabled and a user-scoped cross-session store is available |
 | `web_search` | `tools/web_search.py` | web | Implemented: direct URL crawling + DuckDuckGo search-engine URL discovery via Crawl4AI; supports `search_query` override | **No** (`KG_AGENT_ENABLE_WEB_SEARCH` defaults to false) |
 | `kg_ingest` | `tools/kg_ingest.py` | knowledge-graph, ingestion | Implemented: accepts text/markdown from any source and calls `rag.ainsert()`; `source` accepts `str \| list[str] \| None` | **Yes** (controlled by `KG_AGENT_ENABLE_KG_INGEST`) |
 | `quant_backtest` | `tools/quant_tools.py` | quant | Placeholder | **Yes** (controlled by `KG_AGENT_ENABLE_QUANT`) |
 
 > **Note:** "Tool registered" does not mean "enabled by default". `GET /agent/tools` only returns tools with `enabled=True`.
-> At default startup, 7 tools are available (`web_search` is disabled by default).
+> At default startup, 8 tools are available when `user_id` is present (`web_search` is disabled by default; `cross_session_search` is user-scoped).
 
 ### 8.5 Crawler Layer Architecture
 
@@ -460,8 +463,9 @@ When no explicit URLs are available, invokes `crawler_adapter.discover_urls(quer
 ### 8.7 Retrieval Freshness Decay
 
 - `kg_hybrid_search` and `kg_naive_search` both accept internal `search_query`
-- When `KG_AGENT_ENABLE_FRESHNESS_DECAY=true`, `retrieval_tools.py` reorders returned `entities` and `relationships` using existing `rank` plus `last_confirmed_at`
-- This is a v1 post-retrieval adjustment only; do not describe it as a deep `operate.py` ranking change
+- When `KG_AGENT_ENABLE_FRESHNESS_DECAY=true`, `retrieval_tools.py` passes freshness parameters into `QueryParam`
+- Lower-layer freshness-aware ranking now runs inside `lightrag_fork/operate.py`
+- `retrieval_tools.py` only keeps a compatibility fallback when lower-layer metadata does not mark `freshness_decay_applied`
 
 ---
 
@@ -469,11 +473,14 @@ When no explicit URLs are available, invokes `crawler_adapter.discover_urls(quer
 
 ### 9.1 ConversationMemoryStore (In-Session Memory)
 
-- In-memory implementation (`dict[session_id, list[MemoryMessage]]`)
-- `append_message(session_id, role, content)` — append message
+- Mongo backend reuses `MONGO_URI` / `MONGODB_URI` and `MONGO_DATABASE`; collection name is configurable
+
+- Supports `memory`, `sqlite`, and `mongo` backends
+- `append_message(session_id, role, content, metadata=None, user_id=None)` — append message
 - `get_recent_history(session_id, turns)` — get last N conversation turns
 - `get_recent_tool_calls(session_id, assistant_turns)` — returns flattened compact tool history from recent assistant turns
 - `search(session_id, query, limit)` — token-overlap search for relevant messages
+- `search_user_sessions(user_id, query, limit, exclude_session_id=None)` — search same-user messages across sessions
 - `clear_session(session_id)` — clear session
 
 `AgentCore` currently stores the following assistant metadata into memory:
@@ -484,15 +491,26 @@ When no explicit URLs are available, invokes `crawler_adapter.discover_urls(quer
 
 ### 9.2 CrossSessionStore (Cross-Session)
 
-- Placeholder implementation; `search()` currently returns an empty list
-- TODO: integrate with persistent storage (Redis / MongoDB)
+- Supports `memory`, `auto`, and `mongo_qdrant` modes
+- When `mongo_qdrant` is enabled, message documents are written to Mongo and embeddings are written to Qdrant
+- Reuses `.env` Mongo / Qdrant settings (`MONGO_URI` or `MONGODB_URI`, `MONGO_DATABASE`, `QDRANT_URL`, `QDRANT_API_KEY`)
+- `index_message(message)` stores user-scoped messages for future cross-session retrieval
+- Write path includes low-signal filtering, whitespace normalization, duplicate-sentence removal, bounded content compression, and stable fingerprint deduplication
+- Repeated same-user messages with the same normalized content are merged into one vector memory record using `occurrence_count`, `first_seen_at`, `last_seen_at`, and bounded `session_ids`
+- Optional semantic consolidation merges highly similar same-user messages into one clustered memory record and regenerates a bounded summary from retained snippets
+- Consolidated records keep `member_fingerprints`, bounded `source_snippets`, `cluster_size`, and `summary_strategy`
+- Optional background maintenance can periodically re-consolidate existing memories, compact stale records, and delete low-support aged singleton memories
+- Aging uses bounded snippet retention and summary rebuild rather than preserving every historical snippet forever
+- `search(user_id, query, limit, exclude_session_id=None)` first tries vector search, then falls back to `ConversationMemoryStore.search_user_sessions(...)`
+- Cross-session lookup is exposed as a first-class tool: `cross_session_search`
 
 ### 9.3 UserProfileStore (User Profile)
 
-- In-memory implementation (`dict[user_id, UserProfile]`)
+- Mongo backend reuses `MONGO_URI` / `MONGODB_URI` and `MONGO_DATABASE`; collection name is configurable
+
+- Supports `memory`, `sqlite`, and `mongo` backends
 - `get_profile(user_id)` — get profile attributes
 - `update_profile(user_id, attributes)` — update profile
-- TODO: integrate with persistent storage
 
 ---
 
@@ -554,15 +572,50 @@ All configuration is read from environment variables with sensible defaults.
 | `KG_AGENT_SCHEDULER_CHECK_INTERVAL` | `60` | Scheduler loop interval in seconds |
 | `KG_AGENT_SCHEDULER_SOURCES_FILE` | empty | Optional JSON file for source persistence |
 | `KG_AGENT_SCHEDULER_STATE_FILE` | `scheduler_state.json` | JSON file for crawl state persistence |
+| `KG_AGENT_SCHEDULER_ENABLE_LEADER_ELECTION` | `false` | Enable scheduler loop leader election |
+| `KG_AGENT_SCHEDULER_LOOP_LEASE_KEY` | `scheduler:loop` | Shared coordination key used for recurring loop ownership |
+| `KG_AGENT_SCHEDULER_COORDINATION_BACKEND` | `auto` | `auto`, `local`, or `redis` for scheduler coordination |
+| `KG_AGENT_SCHEDULER_COORDINATION_REDIS_URL` | empty | Redis URL for scheduler coordination when Redis backend is used |
+| `KG_AGENT_SCHEDULER_COORDINATION_TTL_SECONDS` | `120` | Lease TTL for scheduler coordination and loop ownership |
 
-### 10.6 Freshness Configuration (FreshnessConfig)
+### 10.6 Persistence Configuration (PersistenceConfig)
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `KG_AGENT_MEMORY_BACKEND` | `memory` | `memory`, `sqlite`, or `mongo` for conversation memory |
+| `KG_AGENT_MEMORY_SQLITE_PATH` | `kg_agent_memory.sqlite3` | SQLite file used by conversation memory |
+| `KG_AGENT_MEMORY_MONGO_COLLECTION` | `kg_agent_conversation_messages` | Mongo collection used for conversation memory messages |
+| `KG_AGENT_USER_PROFILE_BACKEND` | `memory` | `memory`, `sqlite`, or `mongo` for user profiles |
+| `KG_AGENT_USER_PROFILE_SQLITE_PATH` | `kg_agent_profiles.sqlite3` | SQLite file used by user profiles |
+| `KG_AGENT_USER_PROFILE_MONGO_COLLECTION` | `kg_agent_user_profiles` | Mongo collection used for user profiles |
+| `KG_AGENT_SCHEDULER_STORE_BACKEND` | `json` | `json` or `sqlite` for source/state persistence |
+| `KG_AGENT_SCHEDULER_STORE_SQLITE_PATH` | `kg_agent_scheduler.sqlite3` | SQLite file used by scheduler source/state stores |
+| `KG_AGENT_CROSS_SESSION_BACKEND` | `memory` | `memory`, `auto`, or `mongo_qdrant` for cross-session retrieval |
+| `KG_AGENT_CROSS_SESSION_MONGO_COLLECTION` | `kg_agent_cross_session_messages` | Mongo collection used for cross-session message documents |
+| `KG_AGENT_CROSS_SESSION_QDRANT_COLLECTION_PREFIX` | `kg_agent_cross_session` | Qdrant collection prefix; actual collection adds embedding model suffix |
+| `KG_AGENT_CROSS_SESSION_MIN_CONTENT_CHARS` | `8` | Minimum normalized message length before vector indexing |
+| `KG_AGENT_CROSS_SESSION_MAX_CONTENT_CHARS` | `1200` | Maximum indexed content length after compression |
+| `KG_AGENT_CROSS_SESSION_MAX_SESSION_REFS` | `12` | Maximum number of session IDs retained on a deduplicated memory record |
+| `KG_AGENT_CROSS_SESSION_ENABLE_CONSOLIDATION` | `true` | Enable semantic consolidation of similar cross-session memories |
+| `KG_AGENT_CROSS_SESSION_CONSOLIDATION_SIMILARITY_THRESHOLD` | `0.82` | Minimum vector similarity required before merging memories into one cluster |
+| `KG_AGENT_CROSS_SESSION_CONSOLIDATION_TOP_K` | `3` | Number of nearest same-user memory candidates checked for consolidation |
+| `KG_AGENT_CROSS_SESSION_MAX_CLUSTER_SNIPPETS` | `6` | Maximum number of retained snippets used to rebuild a consolidated memory summary |
+| `KG_AGENT_CROSS_SESSION_ENABLE_BACKGROUND_MAINTENANCE` | `false` | Enable periodic background re-consolidation and memory aging |
+| `KG_AGENT_CROSS_SESSION_MAINTENANCE_INTERVAL_SECONDS` | `1800` | Interval between background maintenance passes |
+| `KG_AGENT_CROSS_SESSION_MAINTENANCE_BATCH_SIZE` | `100` | Maximum number of stored memories processed per maintenance pass |
+| `KG_AGENT_CROSS_SESSION_AGING_STALE_AFTER_DAYS` | `14.0` | Age threshold after which memories are compacted into stale summaries |
+| `KG_AGENT_CROSS_SESSION_AGING_DELETE_AFTER_DAYS` | `60.0` | Age threshold after which low-support memories may be deleted |
+| `KG_AGENT_CROSS_SESSION_AGING_KEEP_MIN_OCCURRENCES` | `2` | Minimum support required to protect an old memory from aging-based deletion |
+| `KG_AGENT_CROSS_SESSION_AGING_MAX_SNIPPETS` | `3` | Maximum snippets retained when rebuilding an aged memory summary |
+
+### 10.7 Freshness Configuration (FreshnessConfig)
 
 | Environment Variable | Default | Description |
 |---|---|---|
 | `KG_AGENT_FRESHNESS_THRESHOLD_SECONDS` | `604800` | Freshness threshold for graph age checks |
 | `KG_AGENT_ENABLE_AUTO_INGEST` | `false` | Allow realtime auto-ingest bridge during chat |
-| `KG_AGENT_STALENESS_DECAY_DAYS` | `7.0` | Half-life parameter for retrieval freshness decay |
-| `KG_AGENT_ENABLE_FRESHNESS_DECAY` | `false` | Enable retrieval-layer freshness decay |
+| `KG_AGENT_STALENESS_DECAY_DAYS` | `7.0` | Half-life parameter for freshness-aware KG retrieval decay |
+| `KG_AGENT_ENABLE_FRESHNESS_DECAY` | `false` | Enable freshness-aware KG retrieval decay |
 
 ---
 
@@ -727,9 +780,9 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 | Improve path explanation | Adjust scoring/evidence selection logic in `path_explainer.py` |
 | Extend search-engine discovery | Add engine support in `content_extractor.build_search_url()` and adapter |
 | Integrate quant service | Replace placeholder implementation in `tools/quant_tools.py` |
-| Persist conversation memory | Rewrite `memory/conversation_memory.py` to integrate Redis/MongoDB |
-| Cross-session memory | Implement `search()` in `memory/cross_session_store.py` |
-| Persist user profiles | Rewrite `memory/user_profile.py` to integrate persistent storage |
+| Persist conversation memory | Use `sqlite` or `mongo` backend in `memory/conversation_memory.py`, or add a new backend following the same pattern |
+| Cross-session memory | Extend `memory/cross_session_store.py` backends or ranking logic |
+| Persist user profiles | Use `sqlite` or `mongo` backend in `memory/user_profile.py`, or add a new backend following the same pattern |
 | Add API routes | Create new route file under `api/`, `include_router` in `app.py` |
 
 ### 13.3 Things Not to Do in This Directory
@@ -761,9 +814,9 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 | `build_default_tool_registry()` | `agent/builtin_tools.py` | Build default tool set |
 | `KGAgentConfig` | `config.py` | Unified configuration entry point |
 | `AgentLLMClient` | `config.py` | OpenAI-compatible LLM client |
-| `ConversationMemoryStore` | `memory/conversation_memory.py` | In-session memory |
-| `CrossSessionStore` | `memory/cross_session_store.py` | Cross-session retrieval (placeholder) |
-| `UserProfileStore` | `memory/user_profile.py` | User profile |
+| `ConversationMemoryStore` | `memory/conversation_memory.py` | In-session memory with optional SQLite or Mongo persistence |
+| `CrossSessionStore` | `memory/cross_session_store.py` | Cross-session retrieval over same-user prior sessions with optional Mongo/Qdrant vector backend |
+| `UserProfileStore` | `memory/user_profile.py` | User profile with optional SQLite or Mongo persistence |
 | `EnvLightRAGProvider` | `api/app.py` | Dynamic workspace LightRAG instance management |
 | `build_rag_from_env()` | `api/app.py` | Build LightRAG instance from environment variables |
 | `create_app()` | `api/app.py` | FastAPI app factory |
@@ -773,17 +826,17 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 
 ## 15. Known Limitations and TODOs
 
-- **ConversationMemoryStore** and **UserProfileStore** are currently in-memory implementations; data is lost on restart; persistent storage integration is needed
-- **CrossSessionStore** is an empty placeholder; cross-session vector retrieval needs to be designed
 - **quant_backtest** placeholder not implemented; needs integration with quantitative engine
-- **ConversationMemoryStore** still uses in-memory storage; `compact_tool_calls` and recent tool history are lost on restart
-- **Scheduler** is implemented for single-process deployments only; no multi-worker coordination or leader election exists yet
-- **Source persistence** is JSON/local-file based; there is no database-backed registry or state store yet
-- **Generic tool chaining** is still not implemented; `web_search -> kg_ingest` works only through explicit `AgentCore` bridge logic
-- **RSS / Feed source support** is not implemented
-- **Freshness decay** is implemented only at retrieval-tool post-processing level; it has not been pushed into deeper `lightrag_fork/operate.py` ranking logic
+- **Scheduler** now supports optional loop leader election plus source-level coordination, but it still does not implement scheduler sharding or a richer distributed control plane
+- **Source persistence** now supports `json` and `sqlite`, but there is still no Redis/Mongo/Postgres-backed scheduler registry/state implementation
+- **RSS / Feed source support** is implemented for direct feed URLs, but discovery/management is still URL-centric and does not include feed-specific scheduling policy
+- **Freshness decay** now has lower-layer support through `QueryParam.enable_freshness_decay` and `lightrag_fork/operate.py`, while retrieval-layer fallback remains for compatibility
 - **Playwright browser detection** uses Playwright sync API to verify the exact chromium executable exists; on version mismatch the adapter falls back to system Edge/Chrome via `browser_channel`
-- **Streaming (stream)** API parameter is reserved but streaming output is not yet implemented
+- **CrossSessionStore** now supports an optional Mongo + Qdrant vector backend with heuristic compression and dedup, but it still falls back to conversation-memory token overlap when the vector backend is disabled or unavailable
+- Cross-session consolidation and background aging are heuristic only; they use vector similarity plus lightweight lexical guards and snippet packing, not LLM summarization or a full long-horizon memory graph
+- Add an optional dedicated LLM configuration for lightweight utility work across `kg_agent` and `lightrag_fork` (for example summaries and other basic LLM-driven post-processing), so these paths can use a cheaper / lower-capability model to save resources; if the dedicated config is missing, emit a warning and fall back to the main LLM config, and only raise an error when neither config is available
+- Memory-search and web-search query flows do not yet expose a dedicated rerank-model parameter/plumbing path the same way KG query flows already do; a consistent rerank-model handoff should be added for `query -> memory` and `query -> web`
+- **Streaming** now supports SSE for final-answer generation, but tool execution and path-explanation phases are still pre-stream setup work rather than incremental streamed stages
 - Path explanation scoring algorithm is based on simple token overlap; semantic similarity can be integrated later
 - Route Judge LLM refinement lacks multi-version prompt management
 - Smart truncation for dynamic attention window is not yet implemented (currently uses fixed turns truncation)

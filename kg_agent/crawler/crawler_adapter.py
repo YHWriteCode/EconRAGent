@@ -5,6 +5,9 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from urllib.parse import urljoin
+from urllib.request import Request, urlopen
+import xml.etree.ElementTree as ET
 
 from kg_agent.config import CrawlerConfig
 from kg_agent.crawler.content_extractor import (
@@ -115,14 +118,39 @@ class Crawl4AIAdapter:
         max_content_chars: int | None = None,
     ) -> list[CrawledPage]:
         pages: list[CrawledPage] = []
-        for url in urls[: max_pages or self.config.max_pages]:
+        target_urls: list[str] = []
+        page_limit = max_pages or self.config.max_pages
+
+        for url in urls:
+            if len(target_urls) >= page_limit or len(pages) >= page_limit:
+                break
+            expanded_urls, feed_error = await self._expand_feed_url(
+                url,
+                remaining=page_limit - len(target_urls),
+            )
+            if expanded_urls is not None:
+                if not expanded_urls:
+                    pages.append(
+                        CrawledPage(
+                            url=url,
+                            success=False,
+                            final_url=url,
+                            error=feed_error or "Feed source did not yield crawlable item links",
+                        )
+                    )
+                    continue
+                target_urls.extend(expanded_urls)
+                continue
+            target_urls.append(url)
+
+        for url in target_urls[: max(0, page_limit - len(pages))]:
             pages.append(
                 await self.crawl_url(
                     url,
                     max_content_chars=max_content_chars,
                 )
             )
-        return pages
+        return pages[:page_limit]
 
     async def discover_urls(
         self,
@@ -154,6 +182,15 @@ class Crawl4AIAdapter:
             )
             for item in discovered
         ]
+
+    async def discover_feed_urls(
+        self,
+        feed_url: str,
+        *,
+        top_k: int = 5,
+    ) -> list[DiscoveredUrl]:
+        payload, final_url = await self._fetch_url_text(feed_url)
+        return self._parse_feed_entries(payload, base_url=final_url or feed_url, top_k=top_k)
 
     @staticmethod
     def _import_crawl4ai():
@@ -201,6 +238,138 @@ class Crawl4AIAdapter:
             "Playwright browser runtime is unavailable and no system Edge/Chrome browser was found; falling back to Playwright chromium channel."
         )
         return "chromium"
+
+    async def _expand_feed_url(
+        self,
+        url: str,
+        *,
+        remaining: int,
+    ) -> tuple[list[str] | None, str | None]:
+        if remaining <= 0:
+            return [], None
+        if not self._looks_like_feed_url(url):
+            return None, None
+        try:
+            discovered = await self.discover_feed_urls(url, top_k=remaining)
+        except Exception as exc:
+            logger.warning("Failed to expand feed URL '%s': %s", url, exc)
+            return [], str(exc)
+        return [item.url for item in discovered[:remaining]], None
+
+    async def _fetch_url_text(self, url: str) -> tuple[str, str]:
+        timeout_seconds = max(1, int(self.config.page_timeout_ms / 1000))
+
+        def _read() -> tuple[str, str]:
+            request = Request(
+                url,
+                headers={"User-Agent": "kg-agent-feed-reader/1.0"},
+            )
+            with urlopen(request, timeout=timeout_seconds) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                payload = response.read().decode(charset, errors="replace")
+                return payload, response.geturl()
+
+        return await asyncio.to_thread(_read)
+
+    @classmethod
+    def _parse_feed_entries(
+        cls,
+        payload: str,
+        *,
+        base_url: str,
+        top_k: int,
+    ) -> list[DiscoveredUrl]:
+        if not payload.strip():
+            return []
+        root = ET.fromstring(payload)
+        root_name = cls._xml_local_name(root.tag)
+        entries: list[DiscoveredUrl] = []
+        seen: set[str] = set()
+
+        if root_name == "rss":
+            for item in root.findall(".//item"):
+                url = cls._extract_rss_item_url(item, base_url)
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                entries.append(
+                    DiscoveredUrl(
+                        title=(item.findtext("title") or url).strip(),
+                        url=url,
+                        source="rss",
+                    )
+                )
+                if len(entries) >= top_k:
+                    break
+            return entries
+
+        if root_name == "feed":
+            for entry in root.findall(".//{*}entry"):
+                url = cls._extract_atom_entry_url(entry, base_url)
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                title = ""
+                title_node = entry.find("{*}title")
+                if title_node is not None and title_node.text:
+                    title = title_node.text.strip()
+                entries.append(
+                    DiscoveredUrl(
+                        title=title or url,
+                        url=url,
+                        source="atom",
+                    )
+                )
+                if len(entries) >= top_k:
+                    break
+            return entries
+
+        return []
+
+    @staticmethod
+    def _extract_rss_item_url(item: ET.Element, base_url: str) -> str | None:
+        candidates = [
+            item.findtext("link"),
+            item.findtext("{*}link"),
+            item.findtext("{*}guid"),
+        ]
+        for candidate in candidates:
+            normalized = (candidate or "").strip()
+            if normalized.startswith("http://") or normalized.startswith("https://"):
+                return normalized
+            if normalized:
+                return urljoin(base_url, normalized)
+        return None
+
+    @staticmethod
+    def _extract_atom_entry_url(entry: ET.Element, base_url: str) -> str | None:
+        for link_node in entry.findall("{*}link"):
+            href = (link_node.get("href") or "").strip()
+            rel = (link_node.get("rel") or "alternate").strip().lower()
+            if not href or rel not in {"alternate", ""}:
+                continue
+            return href if href.startswith(("http://", "https://")) else urljoin(base_url, href)
+        return None
+
+    @staticmethod
+    def _xml_local_name(tag: str) -> str:
+        return (tag or "").rsplit("}", 1)[-1].lower()
+
+    @staticmethod
+    def _looks_like_feed_url(url: str) -> bool:
+        normalized = (url or "").strip().lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "/feed",
+                "/rss",
+                "rss.xml",
+                "atom.xml",
+                "feed.xml",
+                "format=rss",
+                "format=atom",
+            )
+        )
 
     @staticmethod
     def _playwright_browser_root() -> str:

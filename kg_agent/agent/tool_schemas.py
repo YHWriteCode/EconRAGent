@@ -50,6 +50,16 @@ MEMORY_SEARCH_SCHEMA = {
     "required": ["query", "session_id"],
 }
 
+CROSS_SESSION_SEARCH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "query": {"type": "string"},
+        "user_id": {"type": "string"},
+        "limit": {"type": "integer", "minimum": 1},
+    },
+    "required": ["query", "user_id"],
+}
+
 WEB_SEARCH_SCHEMA = {
     "type": "object",
     "properties": {

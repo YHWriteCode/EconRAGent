@@ -4,6 +4,7 @@ from typing import Any
 
 from kg_agent.agent.tool_registry import ToolRegistry
 from kg_agent.agent.tool_schemas import (
+    CROSS_SESSION_SEARCH_SCHEMA,
     GRAPH_ENTITY_LOOKUP_SCHEMA,
     GRAPH_RELATION_TRACE_SCHEMA,
     KG_HYBRID_SEARCH_SCHEMA,
@@ -14,6 +15,7 @@ from kg_agent.agent.tool_schemas import (
     WEB_SEARCH_SCHEMA,
 )
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
+from kg_agent.memory.cross_session_store import CrossSessionStore
 from kg_agent.tools.base import ToolDefinition, ToolResult
 from kg_agent.tools.graph_tools import graph_entity_lookup, graph_relation_trace
 from kg_agent.tools.quant_tools import quant_backtest
@@ -50,7 +52,45 @@ async def memory_search(
     )
 
 
-def build_default_tool_registry(config, memory_store: ConversationMemoryStore) -> ToolRegistry:
+async def cross_session_search(
+    *,
+    cross_session_store: CrossSessionStore | None,
+    user_id: str | None,
+    session_id: str,
+    query: str,
+    limit: int = 5,
+    **_: Any,
+) -> ToolResult:
+    if cross_session_store is None:
+        return ToolResult(
+            tool_name="cross_session_search",
+            success=False,
+            error="Cross-session store is not configured",
+        )
+
+    matches = await cross_session_store.search(
+        user_id,
+        query=query,
+        limit=limit,
+        exclude_session_id=session_id,
+    )
+    return ToolResult(
+        tool_name="cross_session_search",
+        success=bool(matches),
+        data={
+            "matches": matches,
+            "summary": f"Loaded {len(matches)} memory items from prior sessions",
+        },
+        error=None if matches else "No relevant cross-session memory found",
+        metadata={"match_count": len(matches)},
+    )
+
+
+def build_default_tool_registry(
+    config,
+    memory_store: ConversationMemoryStore,
+    cross_session_store: CrossSessionStore | None = None,
+) -> ToolRegistry:
     registry = ToolRegistry()
 
     registry.register(
@@ -97,6 +137,16 @@ def build_default_tool_registry(config, memory_store: ConversationMemoryStore) -
             handler=memory_search,
             enabled=config.tool_config.enable_memory,
             tags=["memory"],
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="cross_session_search",
+            description="Search messages from the same user across prior sessions.",
+            input_schema=CROSS_SESSION_SEARCH_SCHEMA,
+            handler=cross_session_search,
+            enabled=config.tool_config.enable_memory and cross_session_store is not None,
+            tags=["memory", "cross-session"],
         )
     )
     registry.register(

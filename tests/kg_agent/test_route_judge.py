@@ -38,6 +38,21 @@ async def test_route_judge_followup_prefers_memory_first():
 
 
 @pytest.mark.asyncio
+async def test_route_judge_followup_can_use_cross_session_memory():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query="continue the previous supplier topic",
+        session_context={"history": []},
+        user_profile={},
+        available_tools=["cross_session_search", "kg_hybrid_search"],
+    )
+
+    assert route.need_memory is True
+    assert route.tool_sequence[0].tool == "cross_session_search"
+
+
+@pytest.mark.asyncio
 async def test_route_judge_quant_request_uses_quant_tool():
     judge = RouteJudge(default_max_iterations=3)
 

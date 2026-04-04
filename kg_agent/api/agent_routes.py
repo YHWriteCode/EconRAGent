@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from kg_agent.crawler.source_registry import MonitoredSource
@@ -142,6 +144,10 @@ class SchedulerStatusResponse(BaseModel):
     enabled: bool
     running: bool
     check_interval_seconds: int
+    coordination_backend: str = "local"
+    leader_election_enabled: bool = False
+    leader_role: str = "disabled"
+    loop_lease_key: str | None = None
     started_at: str | None = None
     last_tick_at: str | None = None
     last_error: str | None = None
@@ -180,9 +186,28 @@ class SchedulerTriggerResponse(BaseModel):
 def create_agent_routes(agent_core, scheduler=None):
     router = APIRouter(tags=["agent"])
 
+    async def _sse_stream(request: ChatRequest):
+        async for event in agent_core.chat_stream(
+            query=request.query,
+            session_id=request.session_id,
+            user_id=request.user_id,
+            workspace=request.workspace,
+            domain_schema=request.domain_schema,
+            max_iterations=request.max_iterations,
+            use_memory=request.use_memory,
+            debug=request.debug,
+        ):
+            payload = json.dumps(event, ensure_ascii=False)
+            yield f"data: {payload}\n\n"
+
     @router.post("/agent/chat", response_model=ChatResponse)
     async def agent_chat(request: ChatRequest):
         try:
+            if request.stream:
+                return StreamingResponse(
+                    _sse_stream(request),
+                    media_type="text/event-stream",
+                )
             response = await agent_core.chat(
                 query=request.query,
                 session_id=request.session_id,
@@ -248,6 +273,10 @@ def create_agent_routes(agent_core, scheduler=None):
                 enabled=False,
                 running=False,
                 check_interval_seconds=0,
+                coordination_backend="local",
+                leader_election_enabled=False,
+                leader_role="disabled",
+                loop_lease_key=None,
                 source_count=0,
                 sources=[],
             )

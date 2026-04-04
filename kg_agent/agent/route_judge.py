@@ -127,6 +127,7 @@ class ToolCallPlan:
     tool: str
     args: dict[str, Any] = field(default_factory=dict)
     optional: bool = False
+    input_bindings: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -184,9 +185,12 @@ class RouteJudge:
             else []
         )
         has_history = bool(history)
+        has_cross_session_tool = "cross_session_search" in available_tools
 
         is_simple = bool(SIMPLE_PATTERN.search(normalized_query))
-        is_followup = bool(FOLLOWUP_PATTERN.search(normalized_query)) and has_history
+        is_followup = bool(FOLLOWUP_PATTERN.search(normalized_query)) and (
+            has_history or has_cross_session_tool
+        )
         needs_realtime = bool(REALTIME_PATTERN.search(normalized_query))
         is_quant = bool(QUANT_PATTERN.search(normalized_query))
         is_relation = bool(RELATION_PATTERN.search(normalized_query))
@@ -217,8 +221,11 @@ class RouteJudge:
                 max_iterations=1,
             )
 
-        if is_followup and "memory_search" in available_tools and not is_correction:
+        if is_followup and "memory_search" in available_tools and has_history and not is_correction:
             sequence.append(ToolCallPlan(tool="memory_search", args={"limit": 4}))
+            need_memory = True
+        elif is_followup and has_cross_session_tool and not is_correction:
+            sequence.append(ToolCallPlan(tool="cross_session_search", args={"limit": 4}))
             need_memory = True
 
         if is_correction and "web_search" in available_tools:
@@ -234,16 +241,51 @@ class RouteJudge:
                     },
                 )
             )
+            if "kg_ingest" in available_tools:
+                sequence.append(
+                    ToolCallPlan(
+                        tool="kg_ingest",
+                        input_bindings={
+                            "content": {
+                                "from": "web_search",
+                                "transform": "web_pages_markdown",
+                            },
+                            "source": {
+                                "from": "web_search",
+                                "transform": "web_pages_sources",
+                            },
+                        },
+                    )
+                )
             reason = (
                 "The user is correcting prior graph-backed information, so refresh from the web first."
             )
         elif is_ingest and "kg_ingest" in available_tools:
             strategy = "kg_ingest_request"
-            if direct_urls and "web_search" in available_tools:
+            if "web_search" in available_tools:
                 sequence.append(
-                    ToolCallPlan(tool="web_search", args={"urls": direct_urls[:3]})
+                    ToolCallPlan(
+                        tool="web_search",
+                        args={"urls": direct_urls[:3]} if direct_urls else {},
+                    )
                 )
-            sequence.append(ToolCallPlan(tool="kg_ingest"))
+                sequence.append(
+                    ToolCallPlan(
+                        tool="kg_ingest",
+                        input_bindings={
+                            "content": {
+                                "from": "web_search",
+                                "transform": "web_pages_markdown",
+                            },
+                            "source": {
+                                "from": "web_search",
+                                "transform": "web_pages_sources",
+                            },
+                        },
+                    )
+                )
+            else:
+                sequence.append(ToolCallPlan(tool="kg_ingest"))
             reason = "The user wants to ingest content into the knowledge graph."
         elif direct_urls and "web_search" in available_tools:
             strategy = "direct_url_crawl"
@@ -302,6 +344,11 @@ class RouteJudge:
             strategy = "memory_first_then_hybrid"
             reason = (
                 "The query continues prior context, so memory is checked before hybrid retrieval."
+            )
+        elif need_memory and strategy == "simple_answer_no_tool":
+            strategy = "cross_session_memory_first"
+            reason = (
+                "The query continues prior context and needs memory from earlier sessions."
             )
         elif need_memory and strategy == "graph_entity_lookup_first":
             strategy = "memory_first_then_entity_lookup"
@@ -409,6 +456,11 @@ class RouteJudge:
                     tool=tool_name,
                     args=item.get("args", {}) if isinstance(item.get("args"), dict) else {},
                     optional=bool(item.get("optional", False)),
+                    input_bindings=(
+                        item.get("input_bindings")
+                        if isinstance(item.get("input_bindings"), dict)
+                        else {}
+                    ),
                 )
             )
 

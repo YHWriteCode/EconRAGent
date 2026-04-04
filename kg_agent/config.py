@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from typing import AsyncIterator
 from typing import Any
 
 from dotenv import load_dotenv
@@ -126,6 +127,11 @@ class SchedulerConfig:
     check_interval_seconds: int = 60
     sources_file: str = ""
     state_file: str = "scheduler_state.json"
+    coordination_backend: str = "auto"
+    coordination_redis_url: str = ""
+    coordination_ttl_seconds: int = 120
+    enable_leader_election: bool = False
+    loop_lease_key: str = "scheduler:loop"
 
     @classmethod
     def from_env(cls) -> "SchedulerConfig":
@@ -139,6 +145,24 @@ class SchedulerConfig:
                 "KG_AGENT_SCHEDULER_STATE_FILE", "scheduler_state.json"
             ).strip()
             or "scheduler_state.json",
+            coordination_backend=os.getenv(
+                "KG_AGENT_SCHEDULER_COORDINATION_BACKEND", "auto"
+            ).strip()
+            or "auto",
+            coordination_redis_url=os.getenv(
+                "KG_AGENT_SCHEDULER_COORDINATION_REDIS_URL",
+                os.getenv("REDIS_URI", ""),
+            ).strip(),
+            coordination_ttl_seconds=_env_int(
+                "KG_AGENT_SCHEDULER_COORDINATION_TTL_SECONDS", 120
+            ),
+            enable_leader_election=_env_bool(
+                "KG_AGENT_SCHEDULER_ENABLE_LEADER_ELECTION", False
+            ),
+            loop_lease_key=os.getenv(
+                "KG_AGENT_SCHEDULER_LOOP_LEASE_KEY", "scheduler:loop"
+            ).strip()
+            or "scheduler:loop",
         )
 
 
@@ -161,6 +185,129 @@ class FreshnessConfig:
             ),
             enable_freshness_decay=_env_bool(
                 "KG_AGENT_ENABLE_FRESHNESS_DECAY", False
+            ),
+        )
+
+
+@dataclass
+class PersistenceConfig:
+    memory_backend: str = "memory"
+    memory_sqlite_path: str = "kg_agent_memory.sqlite3"
+    memory_mongo_collection: str = "kg_agent_conversation_messages"
+    user_profile_backend: str = "memory"
+    user_profile_sqlite_path: str = "kg_agent_profiles.sqlite3"
+    user_profile_mongo_collection: str = "kg_agent_user_profiles"
+    scheduler_store_backend: str = "json"
+    scheduler_store_sqlite_path: str = "kg_agent_scheduler.sqlite3"
+    cross_session_backend: str = "memory"
+    cross_session_mongo_collection: str = "kg_agent_cross_session_messages"
+    cross_session_qdrant_collection_prefix: str = "kg_agent_cross_session"
+    cross_session_min_content_chars: int = 8
+    cross_session_max_content_chars: int = 1200
+    cross_session_max_session_refs: int = 12
+    cross_session_enable_consolidation: bool = True
+    cross_session_consolidation_similarity_threshold: float = 0.82
+    cross_session_consolidation_top_k: int = 3
+    cross_session_max_cluster_snippets: int = 6
+    cross_session_enable_background_maintenance: bool = False
+    cross_session_maintenance_interval_seconds: int = 1800
+    cross_session_maintenance_batch_size: int = 100
+    cross_session_aging_stale_after_days: float = 14.0
+    cross_session_aging_delete_after_days: float = 60.0
+    cross_session_aging_keep_min_occurrences: int = 2
+    cross_session_aging_max_snippets: int = 3
+
+    @classmethod
+    def from_env(cls) -> "PersistenceConfig":
+        return cls(
+            memory_backend=os.getenv("KG_AGENT_MEMORY_BACKEND", "memory").strip()
+            or "memory",
+            memory_sqlite_path=os.getenv(
+                "KG_AGENT_MEMORY_SQLITE_PATH", "kg_agent_memory.sqlite3"
+            ).strip()
+            or "kg_agent_memory.sqlite3",
+            memory_mongo_collection=os.getenv(
+                "KG_AGENT_MEMORY_MONGO_COLLECTION",
+                "kg_agent_conversation_messages",
+            ).strip()
+            or "kg_agent_conversation_messages",
+            user_profile_backend=os.getenv(
+                "KG_AGENT_USER_PROFILE_BACKEND", "memory"
+            ).strip()
+            or "memory",
+            user_profile_sqlite_path=os.getenv(
+                "KG_AGENT_USER_PROFILE_SQLITE_PATH", "kg_agent_profiles.sqlite3"
+            ).strip()
+            or "kg_agent_profiles.sqlite3",
+            user_profile_mongo_collection=os.getenv(
+                "KG_AGENT_USER_PROFILE_MONGO_COLLECTION",
+                "kg_agent_user_profiles",
+            ).strip()
+            or "kg_agent_user_profiles",
+            scheduler_store_backend=os.getenv(
+                "KG_AGENT_SCHEDULER_STORE_BACKEND", "json"
+            ).strip()
+            or "json",
+            scheduler_store_sqlite_path=os.getenv(
+                "KG_AGENT_SCHEDULER_STORE_SQLITE_PATH",
+                "kg_agent_scheduler.sqlite3",
+            ).strip()
+            or "kg_agent_scheduler.sqlite3",
+            cross_session_backend=os.getenv(
+                "KG_AGENT_CROSS_SESSION_BACKEND", "memory"
+            ).strip()
+            or "memory",
+            cross_session_mongo_collection=os.getenv(
+                "KG_AGENT_CROSS_SESSION_MONGO_COLLECTION",
+                "kg_agent_cross_session_messages",
+            ).strip()
+            or "kg_agent_cross_session_messages",
+            cross_session_qdrant_collection_prefix=os.getenv(
+                "KG_AGENT_CROSS_SESSION_QDRANT_COLLECTION_PREFIX",
+                "kg_agent_cross_session",
+            ).strip()
+            or "kg_agent_cross_session",
+            cross_session_min_content_chars=_env_int(
+                "KG_AGENT_CROSS_SESSION_MIN_CONTENT_CHARS", 8
+            ),
+            cross_session_max_content_chars=_env_int(
+                "KG_AGENT_CROSS_SESSION_MAX_CONTENT_CHARS", 1200
+            ),
+            cross_session_max_session_refs=_env_int(
+                "KG_AGENT_CROSS_SESSION_MAX_SESSION_REFS", 12
+            ),
+            cross_session_enable_consolidation=_env_bool(
+                "KG_AGENT_CROSS_SESSION_ENABLE_CONSOLIDATION", True
+            ),
+            cross_session_consolidation_similarity_threshold=_env_float(
+                "KG_AGENT_CROSS_SESSION_CONSOLIDATION_SIMILARITY_THRESHOLD", 0.82
+            ),
+            cross_session_consolidation_top_k=_env_int(
+                "KG_AGENT_CROSS_SESSION_CONSOLIDATION_TOP_K", 3
+            ),
+            cross_session_max_cluster_snippets=_env_int(
+                "KG_AGENT_CROSS_SESSION_MAX_CLUSTER_SNIPPETS", 6
+            ),
+            cross_session_enable_background_maintenance=_env_bool(
+                "KG_AGENT_CROSS_SESSION_ENABLE_BACKGROUND_MAINTENANCE", False
+            ),
+            cross_session_maintenance_interval_seconds=_env_int(
+                "KG_AGENT_CROSS_SESSION_MAINTENANCE_INTERVAL_SECONDS", 1800
+            ),
+            cross_session_maintenance_batch_size=_env_int(
+                "KG_AGENT_CROSS_SESSION_MAINTENANCE_BATCH_SIZE", 100
+            ),
+            cross_session_aging_stale_after_days=_env_float(
+                "KG_AGENT_CROSS_SESSION_AGING_STALE_AFTER_DAYS", 14.0
+            ),
+            cross_session_aging_delete_after_days=_env_float(
+                "KG_AGENT_CROSS_SESSION_AGING_DELETE_AFTER_DAYS", 60.0
+            ),
+            cross_session_aging_keep_min_occurrences=_env_int(
+                "KG_AGENT_CROSS_SESSION_AGING_KEEP_MIN_OCCURRENCES", 2
+            ),
+            cross_session_aging_max_snippets=_env_int(
+                "KG_AGENT_CROSS_SESSION_AGING_MAX_SNIPPETS", 3
             ),
         )
 
@@ -195,6 +342,7 @@ class KGAgentConfig:
     crawler: CrawlerConfig = field(default_factory=CrawlerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     freshness: FreshnessConfig = field(default_factory=FreshnessConfig)
+    persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
     runtime: AgentRuntimeConfig = field(default_factory=AgentRuntimeConfig)
     judge_model: AgentModelConfig | None = None
     answer_model: AgentModelConfig | None = None
@@ -208,6 +356,7 @@ class KGAgentConfig:
             crawler=CrawlerConfig.from_env(),
             scheduler=SchedulerConfig.from_env(),
             freshness=FreshnessConfig.from_env(),
+            persistence=PersistenceConfig.from_env(),
             runtime=AgentRuntimeConfig.from_env(),
         )
 
@@ -274,6 +423,33 @@ class AgentLLMClient:
         )
         message = response.choices[0].message
         return message.content or ""
+
+    async def stream_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.2,
+        max_tokens: int = 1200,
+    ) -> AsyncIterator[str]:
+        client = self._ensure_client()
+        stream = await client.chat.completions.create(
+            model=self.config.model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        async for chunk in stream:
+            try:
+                delta = chunk.choices[0].delta.content
+            except (AttributeError, IndexError):
+                delta = None
+            if isinstance(delta, str) and delta:
+                yield delta
 
     async def complete_json(
         self,

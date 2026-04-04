@@ -14,17 +14,17 @@
 - [x] 新增功能默认关闭，不改变普通问答默认路径。
 - [x] 未引入 LangChain、未引入新 ORM、未修改 `prompt.py` 静态模板。
 - [x] 图谱溯源继续复用 `file_path`，未新增 `source_urls`。
-- [x] 当前执行器仍不支持通用 tool chaining；`web_search -> kg_ingest` 继续由 `AgentCore` bridge。
+- [x] 当前执行器已支持通用 tool chaining / output piping；`web_search -> kg_ingest` 可通过 `ToolCallPlan.input_bindings` 正常串联，动态刷新场景仍可复用 `AgentCore` bridge。
 - [x] `rag.ainsert().file_paths` 继续兼容 `str | list[str] | None`。
 
 ---
 
 ## 1. 关键决策
 
-- `web_search -> kg_ingest` 保留为目标链路，但 v1 不做通用 output piping。
+- `web_search -> kg_ingest` 保留为目标链路，现已同时支持通用 output piping 与 `AgentCore` bridge 两种执行方式。
 - `confirmation_count` 在 v1 语义固定为“累计确认事件次数”，不是“独立来源数”。
-- scheduler 以单进程 / 单 worker 为前提，不实现 leader election。
-- Phase D2 采用 retrieval tool 层的 freshness decay v1 实现，不下沉到 `operate.py` 排序主链路。
+- scheduler 已支持基于 source lease 的多 worker / 多实例协调，并新增可选 loop leader election。
+- Phase D2 已下沉到 `lightrag_fork/operate.py` 的 KG 检索排序主链路，retrieval tool 层仅保留兼容性 fallback。
 - `sources_file=""` 时 source API 只保存在内存；非空时必须 JSON 落盘并支持重启恢复。
 
 ---
@@ -91,7 +91,7 @@
 ### 3.2 v1 边界
 
 - [x] 仅支持直接网页 URL。
-- [x] RSS / Feed 解析不在本轮范围。
+- [x] RSS / Feed 解析已支持 direct feed URL 展开并抓取文章页。
 - [x] scheduler 直接调用 `rag.ainsert(...)`，不强制改为走 `kg_ingest` 工具。
 - [x] 不做多实例协调。
 
@@ -184,14 +184,14 @@
 - [x] 仅在开关开启时，对 `entities` / `relationships` 按 `rank + last_confirmed_at` 做 v1 重排。
 - [x] 老数据缺失 `last_confirmed_at` 时退回原始 `rank`，不报错。
 
-### 7.2 尚未下沉的增强项
+### 7.2 当前实现说明
 
-- [ ] 未下沉到 `lightrag_fork/operate.py` 的底层排序主链路。
-- [ ] 未把 freshness 参与更深层的 local/global/hybrid 排序融合。
+- [x] 已下沉到 `lightrag_fork/operate.py` 的 KG 检索排序主链路。
+- [x] freshness 已参与 local/global/hybrid/mix 的底层排序融合，retrieval tool 层仅保留兼容性 fallback。
 
 ### 7.3 验收结论
 
-- D2 已完成 v1 版本。
+- D2 已完成并下沉到底层 KG 检索链路，当前版本仍属于启发式排序增强而非完整排序模型重构。
 
 ---
 
@@ -230,19 +230,24 @@
 | `KG_AGENT_SCHEDULER_CHECK_INTERVAL` | `60` | scheduler 主循环检查间隔 |
 | `KG_AGENT_SCHEDULER_SOURCES_FILE` | `""` | source 持久化文件；为空时仅内存态 |
 | `KG_AGENT_SCHEDULER_STATE_FILE` | `"scheduler_state.json"` | crawl state 持久化文件 |
+| `KG_AGENT_SCHEDULER_ENABLE_LEADER_ELECTION` | `false` | 是否启用 scheduler loop leader election |
+| `KG_AGENT_SCHEDULER_LOOP_LEASE_KEY` | `"scheduler:loop"` | scheduler 主循环所有权协调 key |
+| `KG_AGENT_SCHEDULER_COORDINATION_BACKEND` | `"auto"` | scheduler 协调后端：`auto/local/redis` |
+| `KG_AGENT_SCHEDULER_COORDINATION_REDIS_URL` | `""` | Redis 协调地址 |
+| `KG_AGENT_SCHEDULER_COORDINATION_TTL_SECONDS` | `120` | scheduler 协调租约 TTL |
 | `KG_AGENT_FRESHNESS_THRESHOLD_SECONDS` | `604800` | freshness 判定阈值 |
 | `KG_AGENT_ENABLE_AUTO_INGEST` | `false` | 是否允许对话中自动入库 |
-| `KG_AGENT_STALENESS_DECAY_DAYS` | `7.0` | freshness decay 半衰期参数 |
-| `KG_AGENT_ENABLE_FRESHNESS_DECAY` | `false` | 是否启用 retrieval 层 freshness decay |
+| `KG_AGENT_STALENESS_DECAY_DAYS` | `7.0` | freshness-aware KG retrieval decay 半衰期参数 |
+| `KG_AGENT_ENABLE_FRESHNESS_DECAY` | `false` | 是否启用 freshness-aware KG retrieval decay |
 
 ---
 
 ## 10. 剩余增强项
 
-- [ ] 多 worker / 多实例部署下的 scheduler 协调。
-- [ ] 通用 tool chaining / output piping。
-- [ ] RSS / Feed source 支持。
-- [ ] D2 下沉到 `lightrag_fork/operate.py` 的底层排序链路。
+- [x] 多 worker / 多实例部署下的 scheduler 协调已实现（source lease + 可选 loop leader election）。
+- [x] 通用 tool chaining / output piping 已通过 `ToolCallPlan.input_bindings` + `AgentCore` 执行器实现。
+- [x] RSS / Feed source 已支持直接 feed URL 展开并抓取文章页。
+- [x] D2 已下沉到 `lightrag_fork/operate.py` 的 KG 检索排序链路，retrieval tool 层仅保留兼容性 fallback。
 
 ---
 
