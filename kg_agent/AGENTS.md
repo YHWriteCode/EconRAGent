@@ -47,7 +47,7 @@ kg_agent/
 │   ├── path_explainer.py          # Path explanation layer: PathExplainer.explain() → PathExplanation
 │   ├── tool_registry.py           # Tool registration protocol: ToolRegistry (register, find, execute)
 │   ├── builtin_tools.py           # Assembly layer: wraps functions from tools/ and registers them to ToolRegistry
-│   ├── prompts.py                 # All prompt templates (route judge / path explainer / final answer)
+│   ├── prompts.py                 # All prompt templates (route judge version registry / path explainer / final answer)
 │   └── tool_schemas.py            # Tool parameter JSON Schema definitions
 │
 ├── tools/                         # General tool layer (one file per tool)
@@ -67,11 +67,11 @@ kg_agent/
 │
 ├── crawler/                       # Web crawling layer
 │   ├── __init__.py                # Exports Crawl4AIAdapter, CrawledPage, DiscoveredUrl, IngestScheduler, source/state types
-│   ├── crawler_adapter.py         # Crawl4AIAdapter: start/close/crawl_url/crawl_urls/discover_urls; CrawledPage, DiscoveredUrl dataclasses
+│   ├── crawler_adapter.py         # Crawl4AIAdapter: start/close/crawl_url/crawl_urls/discover_urls; feed parsing also extracts published_at from RSS/Atom entries
 │   ├── content_extractor.py       # Search-result extraction, URL scoring/ranking, Markdown normalization, DuckDuckGo redirect decoding
-│   ├── source_registry.py         # MonitoredSource, SourceRegistry, JsonSourceRegistry
-│   ├── crawl_state_store.py       # CrawlStateRecord, CrawlStateStore, JsonCrawlStateStore
-│   └── scheduler.py               # IngestScheduler: recurring crawl + content-hash dedup + JSON-backed state
+│   ├── source_registry.py         # MonitoredSource (page/feed typing + feed filter/retention policy), SourceRegistry, Json/SQLite source persistence
+│   ├── crawl_state_store.py       # CrawlStateRecord (hashes + recent feed item history + item published_at map + failure/no-change streaks), CrawlStateStore, Json/SQLite state persistence
+│   └── scheduler.py               # IngestScheduler: recurring crawl + content-hash dedup + feed-aware adaptive scheduling/filtering/retention
 │
 └── api/                           # External API
     ├── __init__.py
@@ -140,6 +140,10 @@ These fields are injected uniformly by the framework; a tool handler's `args` ca
 - `compact_tool_calls` must remain lightweight: store `tool`, `success`, `summary`, `strategy`, `timestamp`; do not persist full tool data or crawled page markdown in conversation memory
 - Scheduler coordination now supports local in-process leases and optional Redis-backed leases for multi-worker / multi-instance polling coordination
 - Scheduler also supports optional loop leader election so one scheduler instance can own recurring due-source scans for a shared `loop_lease_key`
+- `MonitoredSource` now supports `source_type` (`auto` / `page` / `feed`) and `schedule_mode` (`auto` / `fixed` / `adaptive_feed`) so feed-like URLs can opt into different polling behavior without changing the generic scheduler API
+- Feed-aware source policies now live on `MonitoredSource`: `feed_filter` (title/url substring filters plus author/category/domain constraints) and `feed_retention` (`keep_all` or `latest` with `max_items`) are enforced by the scheduler rather than by the generic `web_search` tool path
+- `MonitoredSource.feed_priority` now controls feed item ranking before crawl: `mode="published_desc"` prefers newer entries, while `mode="priority_score"` ranks entries by configured title/url pattern hits plus preferred domain/author/category matches and then falls back to `published_at`
+- Feed-aware source policies also support publication-time windows: `feed_filter.max_age_days` skips stale entries before crawl, while `feed_retention.max_age_days` prunes old tracked feed items from scheduler state when entry timestamps are available
 - `sources_file=""` means in-memory source registry only; non-empty file paths must persist source CRUD changes to JSON
 
 ---
@@ -200,7 +204,7 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
    └─ Provider mode: await self._rag_provider(workspace) → lazy-load + cache reuse
 
 1. Load context
-   ├─ Session history (ConversationMemoryStore.get_recent_history)
+   ├─ Session history (ConversationMemoryStore.get_context_window: recent-turn anchor + query-aware older-turn backfill within token budget)
    ├─ User profile (UserProfileStore.get_profile)
    └─ Available tool list (enabled tools from ToolRegistry)
 
@@ -286,6 +290,15 @@ The rule engine covers explicit patterns plus the default factual fallback:
 | Default factual QA | Fallback | `factual_qa` | kg_hybrid_search |
 
 LLM refinement: When `llm_client` is available and the scenario is not simple/quant, the rule result is passed to the LLM for secondary adjustment (still constrained by `available_tools`; it will not invent nonexistent tools).
+
+Route Judge prompt management now supports versioned templates through `agent/prompts.py`:
+
+- `build_route_judge_prompt(..., prompt_version=...)` resolves the configured version before rendering
+- `list_route_judge_prompt_versions()` exposes the registered versions
+- unknown versions fall back to `v1` with a warning
+- current built-in versions are:
+  - `v1`: original concise route-refinement prompt
+  - `v2`: more conservative refinement prompt that emphasizes minimal edits to the rule-based plan
 
 `AgentCore` wires Route Judge to a utility-model client first. If `KG_AGENT_UTILITY_MODEL_*` / `UTILITY_LLM_*` is not configured, the module falls back to the main `KG_AGENT_MODEL_*` client and emits a one-time warning.
 
@@ -417,6 +430,15 @@ web_search(query, urls, top_k)
             └─ _normalize_result() → CrawledPage
 ```
 
+Recurring ingest uses the same crawler stack, but the scheduler layer now distinguishes generic pages from feed sources:
+
+- `MonitoredSource.resolved_source_type()` auto-detects feed-like URLs when `source_type="auto"`
+- `MonitoredSource.resolved_schedule_mode()` resolves `auto` to `adaptive_feed` for feed sources and `fixed` for normal page sources
+- `IngestScheduler` tracks `consecutive_no_change` in crawl state and increases the effective poll interval for feed sources after repeated no-change polls; a successful new ingest resets that feed backoff
+- For feed sources, the scheduler now calls `discover_feed_urls()` first, applies `feed_filter.include_patterns` / `exclude_patterns`, optional author/category/domain constraints, and optional `feed_filter.max_age_days` against feed entry metadata, then applies `feed_priority` ranking across the discovered feed entries before crawling only the selected article URLs
+- `DiscoveredUrl.published_at` is populated from RSS `pubDate` / Atom `updated` or `published` when available; `DiscoveredUrl.author` and `DiscoveredUrl.categories` are also extracted from RSS/Atom feed entry metadata when present
+- `CrawlStateRecord.recent_item_keys` maintains feed item recency ordering, `item_published_at` stores per-item timestamps when known, and `feed_retention.mode="latest"` / `feed_retention.max_age_days` prune `last_content_hashes` down to the retained tracked feed entries
+
 **Key content_extractor constants:**
 
 | Constant | Purpose |
@@ -484,11 +506,13 @@ When the active `LightRAG` instance has a configured rerank model (`rerank_model
 - Supports `memory`, `sqlite`, and `mongo` backends
 - `append_message(session_id, role, content, metadata=None, user_id=None)` — append message
 - `get_recent_history(session_id, turns)` — get last N conversation turns
+- `get_context_window(session_id, query, turns, min_recent_turns, max_tokens)` — build a dynamic attention window: keep the newest turns, then backfill older query-relevant turns under a soft token budget
 - `get_recent_tool_calls(session_id, assistant_turns)` — returns flattened compact tool history from recent assistant turns
 - `search(session_id, query, limit)` — token-overlap search for relevant messages
 - `search_user_sessions(user_id, query, limit, exclude_session_id=None)` — search same-user messages across sessions
 - `clear_session(session_id)` — clear session
 - The `memory_search` tool can request a larger candidate window and rerank the final current-session matches when the active `LightRAG` instance has `rerank_model_func` configured
+- `AgentCore` now loads `session_context["history"]` through `get_context_window(...)` rather than blindly taking the last fixed N turns, so follow-up routing can retain older but still relevant facts
 
 `AgentCore` currently stores the following assistant metadata into memory:
 
@@ -569,7 +593,10 @@ Optional lightweight utility model for internal routing/explanation work:
 | `KG_AGENT_DEFAULT_WORKSPACE` | Falls back to `WORKSPACE` | Default workspace |
 | `KG_AGENT_DEFAULT_DOMAIN_SCHEMA` | `general` | Default domain schema |
 | `KG_AGENT_MAX_ITERATIONS` | `3` | Maximum tool invocation rounds |
-| `KG_AGENT_MEMORY_WINDOW_TURNS` | `6` | Conversation memory window size |
+| `KG_AGENT_ROUTE_JUDGE_PROMPT_VERSION` | `v1` | Version key for Route Judge LLM refinement prompt templates |
+| `KG_AGENT_MEMORY_WINDOW_TURNS` | `6` | Maximum number of conversation turns considered for the dynamic attention window |
+| `KG_AGENT_MEMORY_MIN_RECENT_TURNS` | `2` | Minimum number of newest turns always kept in the dynamic attention window |
+| `KG_AGENT_MEMORY_MAX_CONTEXT_TOKENS` | `1200` | Soft token budget used when selecting conversation history for routing/final answer prompts |
 | `KG_AGENT_DEBUG` | `false` | Debug mode |
 
 ### 10.4 Crawler Configuration (CrawlerConfig)
@@ -600,6 +627,26 @@ Optional lightweight utility model for internal routing/explanation work:
 | `KG_AGENT_SCHEDULER_COORDINATION_BACKEND` | `auto` | `auto`, `local`, or `redis` for scheduler coordination |
 | `KG_AGENT_SCHEDULER_COORDINATION_REDIS_URL` | empty | Redis URL for scheduler coordination when Redis backend is used |
 | `KG_AGENT_SCHEDULER_COORDINATION_TTL_SECONDS` | `120` | Lease TTL for scheduler coordination and loop ownership |
+
+Per-source scheduler behavior is controlled through `MonitoredSource` rather than global env vars:
+
+- `source_type`: `auto`, `page`, or `feed`
+- `schedule_mode`: `auto`, `fixed`, or `adaptive_feed`
+- Feed sources default to `adaptive_feed` when `schedule_mode="auto"`; repeated `no_change` polls increase `effective_interval_seconds`, while newly ingested content resets the no-change streak
+- `feed_filter.include_patterns`: optional case-insensitive substring allowlist over feed entry title + URL
+- `feed_filter.exclude_patterns`: optional case-insensitive substring denylist over feed entry title + URL
+- `feed_filter.include_authors` / `exclude_authors`: optional case-insensitive substring filters over parsed feed author metadata
+- `feed_filter.include_categories` / `exclude_categories`: optional case-insensitive substring filters over parsed feed category/tag metadata
+- `feed_filter.allowed_domains` / `blocked_domains`: optional host-based filters; subdomains match parent domains
+- `feed_filter.max_age_days`: optional age filter; when `published_at` is available, entries older than this threshold are skipped before crawl
+- `feed_retention.mode`: `keep_all` or `latest`
+- `feed_retention.max_items`: required when `feed_retention.mode="latest"`; caps the number of tracked feed items retained in scheduler state
+- `feed_retention.max_age_days`: optional state-pruning threshold; when tracked feed items have `published_at`, items older than this threshold are removed from scheduler state even if their content hashes still exist
+- `feed_priority.mode`: `auto`, `feed_order`, `published_desc`, or `priority_score`; `auto` resolves to `priority_score` when any preference signals are configured, otherwise `feed_order`
+- `feed_priority.priority_patterns`: optional case-insensitive substring boosts over feed entry title + URL
+- `feed_priority.preferred_domains`: optional host-based boost list; subdomains match parent domains
+- `feed_priority.preferred_authors`: optional case-insensitive substring boosts over parsed feed author metadata
+- `feed_priority.preferred_categories`: optional case-insensitive substring boosts over parsed feed category/tag metadata
 
 ### 10.6 Persistence Configuration (PersistenceConfig)
 
@@ -687,7 +734,7 @@ Optional lightweight utility model for internal routing/explanation work:
 | `max_iterations` | `int` | No | Maximum tool invocation rounds (1–8) |
 | `use_memory` | `bool` | No | Enable memory (default true) |
 | `debug` | `bool` | No | Return full tool data |
-| `stream` | `bool` | No | Streaming (reserved, not yet supported) |
+| `stream` | `bool` | No | When `true`, return SSE events for route selection, tool execution, optional path explanation, and final answer generation |
 
 **Response Body (ChatResponse):**
 
@@ -698,6 +745,20 @@ Optional lightweight utility model for internal routing/explanation work:
 | `tool_calls` | `list[dict]` | Tool invocation records |
 | `path_explanation` | `dict \| null` | Path explanation result |
 | `metadata` | `dict` | Metadata, including dynamic-graph markers such as `freshness_action` / `freshness_reason` when applicable |
+
+**Streaming SSE events (`stream=true`):**
+
+- `meta` — initial stream metadata (`streaming_supported`, session/workspace metadata)
+- `route` — structured route decision before tool execution
+- `tool_start` — one tool execution is beginning
+- `tool_result` — one tool execution finished; includes serialized tool result
+- `tool_skip` — optional remaining tools were skipped after an earlier successful result
+- `status` — metadata update emitted after freshness/correction dynamic-update handling
+- `path_explanation_start` — path explanation stage has started
+- `path_explanation` — path explanation payload before final answer generation
+- `answer_start` — final answer generation stage has started
+- `delta` — incremental answer text chunk
+- `done` — terminal payload with final answer, route, tool calls, path explanation, and metadata
 
 ### 11.2 POST /agent/ingest
 
@@ -722,11 +783,11 @@ Optional lightweight utility model for internal routing/explanation work:
 ### 11.3 Scheduler and Source APIs
 
 - `GET /agent/scheduler/status`
-  - Returns scheduler configured/enabled/running flags, persistence file paths, loop counters, and per-source status
+  - Returns scheduler configured/enabled/running flags, persistence file paths, loop counters, and per-source status including resolved source type / schedule mode / feed priority mode, `consecutive_no_change`, `tracked_item_count`, and `effective_interval_seconds`
 - `GET /agent/sources`
-  - Returns all monitored sources
+  - Returns all monitored sources, including `source_type`, `schedule_mode`, `feed_filter`, `feed_retention`, `feed_priority`, `resolved_source_type`, `resolved_schedule_mode`, and `resolved_feed_priority_mode`
 - `POST /agent/sources`
-  - Upserts a `MonitoredSource`
+  - Upserts a `MonitoredSource`; request payload accepts `source_type`, `schedule_mode`, `feed_filter`, `feed_retention`, and `feed_priority`
 - `DELETE /agent/sources/{source_id}`
   - Removes a source and its state record
 - `POST /agent/sources/{source_id}/trigger`
@@ -867,12 +928,9 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 - **quant_backtest** placeholder not implemented; needs integration with quantitative engine
 - **Scheduler** now supports optional loop leader election plus source-level coordination, but it still does not implement scheduler sharding or a richer distributed control plane
 - **Source persistence** now supports `json` and `sqlite`, but there is still no Redis/Mongo/Postgres-backed scheduler registry/state implementation
-- **RSS / Feed source support** is implemented for direct feed URLs, but discovery/management is still URL-centric and does not include feed-specific scheduling policy
+- **RSS / Feed source support** now includes auto-detected feed typing, `adaptive_feed` scheduling, entry filtering, RSS/Atom `published_at` extraction, author/category/domain-aware filtering, and both latest-item and age-based retention, but discovery/management is still URL-centric and does not yet provide richer feed semantics such as feed-native ranking, source credibility scoring, or full feed graph provenance
 - **Freshness decay** now has lower-layer support through `QueryParam.enable_freshness_decay` and `lightrag_fork/operate.py`, while retrieval-layer fallback remains for compatibility
 - **Playwright browser detection** uses Playwright sync API to verify the exact chromium executable exists; on version mismatch the adapter falls back to system Edge/Chrome via `browser_channel`
 - **CrossSessionStore** now supports an optional Mongo + Qdrant vector backend with heuristic compression and dedup, but it still falls back to conversation-memory token overlap when the vector backend is disabled or unavailable
 - Cross-session consolidation and background aging are heuristic only; they use vector similarity plus lightweight lexical guards and snippet packing, not LLM summarization or a full long-horizon memory graph
-- **Streaming** now supports SSE for final-answer generation, but tool execution and path-explanation phases are still pre-stream setup work rather than incremental streamed stages
 - Path explanation scoring algorithm is based on simple token overlap; semantic similarity can be integrated later
-- Route Judge LLM refinement lacks multi-version prompt management
-- Smart truncation for dynamic attention window is not yet implemented (currently uses fixed turns truncation)

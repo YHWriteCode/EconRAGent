@@ -4,7 +4,11 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from kg_agent.agent.prompts import build_route_judge_prompt
+from kg_agent.agent.prompts import (
+    DEFAULT_ROUTE_JUDGE_PROMPT_VERSION,
+    build_route_judge_prompt,
+    resolve_route_judge_prompt_version,
+)
 
 
 FOLLOWUP_PATTERN = re.compile(
@@ -143,9 +147,16 @@ class RouteDecision:
 
 
 class RouteJudge:
-    def __init__(self, *, llm_client=None, default_max_iterations: int = 3):
+    def __init__(
+        self,
+        *,
+        llm_client=None,
+        default_max_iterations: int = 3,
+        prompt_version: str = DEFAULT_ROUTE_JUDGE_PROMPT_VERSION,
+    ):
         self.llm_client = llm_client
         self.default_max_iterations = default_max_iterations
+        self.prompt_version = resolve_route_judge_prompt_version(prompt_version)
 
     async def plan(
         self,
@@ -435,6 +446,7 @@ class RouteJudge:
             session_context={**(session_context or {}), "user_profile": user_profile or {}},
             available_tools=available_tools,
             current_plan=asdict(base_decision),
+            prompt_version=self.prompt_version,
         )
         try:
             payload = await self.llm_client.complete_json(

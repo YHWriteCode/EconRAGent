@@ -93,6 +93,32 @@ class IngestResponse(BaseModel):
     message: str = ""
 
 
+class FeedFilterConfigModel(BaseModel):
+    include_patterns: list[str] = Field(default_factory=list)
+    exclude_patterns: list[str] = Field(default_factory=list)
+    include_authors: list[str] = Field(default_factory=list)
+    exclude_authors: list[str] = Field(default_factory=list)
+    include_categories: list[str] = Field(default_factory=list)
+    exclude_categories: list[str] = Field(default_factory=list)
+    allowed_domains: list[str] = Field(default_factory=list)
+    blocked_domains: list[str] = Field(default_factory=list)
+    max_age_days: float = Field(default=0.0, ge=0.0)
+
+
+class FeedRetentionConfigModel(BaseModel):
+    mode: str = "keep_all"
+    max_items: int = Field(default=0, ge=0)
+    max_age_days: float = Field(default=0.0, ge=0.0)
+
+
+class FeedPriorityConfigModel(BaseModel):
+    mode: str = "auto"
+    priority_patterns: list[str] = Field(default_factory=list)
+    preferred_domains: list[str] = Field(default_factory=list)
+    preferred_authors: list[str] = Field(default_factory=list)
+    preferred_categories: list[str] = Field(default_factory=list)
+
+
 class SourceRequest(BaseModel):
     source_id: str | None = None
     name: str = Field(min_length=1)
@@ -102,6 +128,15 @@ class SourceRequest(BaseModel):
     max_pages: int = Field(default=3, ge=1)
     enabled: bool = True
     workspace: str | None = None
+    source_type: str = "auto"
+    schedule_mode: str = "auto"
+    feed_filter: FeedFilterConfigModel = Field(default_factory=FeedFilterConfigModel)
+    feed_retention: FeedRetentionConfigModel = Field(
+        default_factory=FeedRetentionConfigModel
+    )
+    feed_priority: FeedPriorityConfigModel = Field(
+        default_factory=FeedPriorityConfigModel
+    )
 
     @field_validator("name", mode="after")
     @classmethod
@@ -130,9 +165,23 @@ class SchedulerSourceStatus(BaseModel):
     max_pages: int
     enabled: bool
     workspace: str | None = None
+    source_type: str = "auto"
+    schedule_mode: str = "auto"
+    feed_filter: FeedFilterConfigModel = Field(default_factory=FeedFilterConfigModel)
+    feed_retention: FeedRetentionConfigModel = Field(
+        default_factory=FeedRetentionConfigModel
+    )
+    feed_priority: FeedPriorityConfigModel = Field(
+        default_factory=FeedPriorityConfigModel
+    )
+    resolved_source_type: str
+    resolved_schedule_mode: str
+    resolved_feed_priority_mode: str
     last_crawled_at: str | None = None
     last_status: str
     consecutive_failures: int = 0
+    consecutive_no_change: int = 0
+    tracked_item_count: int = 0
     total_ingested_count: int = 0
     last_error: str | None = None
     effective_interval_seconds: int
@@ -167,6 +216,18 @@ class SourceResponse(BaseModel):
     max_pages: int
     enabled: bool
     workspace: str | None = None
+    source_type: str = "auto"
+    schedule_mode: str = "auto"
+    feed_filter: FeedFilterConfigModel = Field(default_factory=FeedFilterConfigModel)
+    feed_retention: FeedRetentionConfigModel = Field(
+        default_factory=FeedRetentionConfigModel
+    )
+    feed_priority: FeedPriorityConfigModel = Field(
+        default_factory=FeedPriorityConfigModel
+    )
+    resolved_source_type: str
+    resolved_schedule_mode: str
+    resolved_feed_priority_mode: str
 
 
 class SourceMutationResponse(BaseModel):
@@ -180,6 +241,9 @@ class SchedulerTriggerResponse(BaseModel):
     requested_count: int | None = None
     success_count: int | None = None
     ingested_count: int | None = None
+    feed_discovered_count: int | None = None
+    feed_filtered_count: int | None = None
+    tracked_item_count: int | None = None
     summary: str = ""
 
 
@@ -287,7 +351,7 @@ def create_agent_routes(agent_core, scheduler=None):
         if scheduler is None:
             raise HTTPException(status_code=503, detail="Scheduler is not configured")
         sources = await scheduler.list_sources()
-        return {"sources": [source.to_dict() for source in sources]}
+        return {"sources": [source.to_public_dict() for source in sources]}
 
     @router.post("/agent/sources", response_model=SourceResponse)
     async def add_source(request: SourceRequest):
@@ -303,11 +367,16 @@ def create_agent_routes(agent_core, scheduler=None):
                 max_pages=request.max_pages,
                 enabled=request.enabled,
                 workspace=request.workspace,
+                source_type=request.source_type,
+                schedule_mode=request.schedule_mode,
+                feed_filter=request.feed_filter.model_dump(),
+                feed_retention=request.feed_retention.model_dump(),
+                feed_priority=request.feed_priority.model_dump(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         stored = await scheduler.add_source(source)
-        return stored.to_dict()
+        return stored.to_public_dict()
 
     @router.delete("/agent/sources/{source_id}", response_model=SourceMutationResponse)
     async def delete_source(source_id: str):

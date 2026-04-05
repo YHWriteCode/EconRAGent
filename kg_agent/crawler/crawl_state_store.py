@@ -14,8 +14,11 @@ class CrawlStateRecord:
     source_id: str
     last_crawled_at: str | None = None
     last_content_hashes: dict[str, str] = field(default_factory=dict)
+    recent_item_keys: list[str] = field(default_factory=list)
+    item_published_at: dict[str, str] = field(default_factory=dict)
     last_status: str = "never_run"
     consecutive_failures: int = 0
+    consecutive_no_change: int = 0
     total_ingested_count: int = 0
     last_error: str | None = None
 
@@ -26,6 +29,12 @@ class CrawlStateRecord:
     def from_dict(cls, payload: dict[str, object]) -> "CrawlStateRecord":
         raw_hashes = payload.get("last_content_hashes")
         hashes = raw_hashes if isinstance(raw_hashes, dict) else {}
+        raw_recent_items = payload.get("recent_item_keys")
+        recent_items = raw_recent_items if isinstance(raw_recent_items, list) else []
+        raw_item_published_at = payload.get("item_published_at")
+        item_published_at = (
+            raw_item_published_at if isinstance(raw_item_published_at, dict) else {}
+        )
         return cls(
             source_id=str(payload.get("source_id") or ""),
             last_crawled_at=str(payload.get("last_crawled_at") or "").strip() or None,
@@ -34,8 +43,19 @@ class CrawlStateRecord:
                 for key, value in hashes.items()
                 if key is not None and value is not None
             },
+            recent_item_keys=[
+                str(item).strip()
+                for item in recent_items
+                if str(item).strip()
+            ],
+            item_published_at={
+                str(key): str(value).strip()
+                for key, value in item_published_at.items()
+                if key is not None and str(value).strip()
+            },
             last_status=str(payload.get("last_status") or "never_run"),
             consecutive_failures=max(0, int(payload.get("consecutive_failures") or 0)),
+            consecutive_no_change=max(0, int(payload.get("consecutive_no_change") or 0)),
             total_ingested_count=max(0, int(payload.get("total_ingested_count") or 0)),
             last_error=str(payload.get("last_error") or "").strip() or None,
         )
@@ -218,21 +238,47 @@ class SqliteCrawlStateStore(CrawlStateStore):
                     source_id TEXT PRIMARY KEY,
                     last_crawled_at TEXT,
                     last_content_hashes_json TEXT NOT NULL,
+                    recent_item_keys_json TEXT NOT NULL DEFAULT '[]',
+                    item_published_at_json TEXT NOT NULL DEFAULT '{}',
                     last_status TEXT NOT NULL,
                     consecutive_failures INTEGER NOT NULL,
+                    consecutive_no_change INTEGER NOT NULL DEFAULT 0,
                     total_ingested_count INTEGER NOT NULL,
                     last_error TEXT
                 )
                 """
             )
+            self._ensure_columns_sync(conn)
             conn.commit()
+
+    @staticmethod
+    def _ensure_columns_sync(conn: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(crawl_state_records)").fetchall()
+        }
+        if "consecutive_no_change" not in columns:
+            conn.execute(
+                "ALTER TABLE crawl_state_records ADD COLUMN consecutive_no_change INTEGER NOT NULL DEFAULT 0"
+            )
+        if "recent_item_keys_json" not in columns:
+            conn.execute(
+                "ALTER TABLE crawl_state_records ADD COLUMN recent_item_keys_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "item_published_at_json" not in columns:
+            conn.execute(
+                "ALTER TABLE crawl_state_records ADD COLUMN item_published_at_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def _list_records_sync(self) -> list[CrawlStateRecord]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT source_id, last_crawled_at, last_content_hashes_json, last_status,
-                       consecutive_failures, total_ingested_count, last_error
+                SELECT source_id, last_crawled_at, last_content_hashes_json,
+                       recent_item_keys_json, item_published_at_json,
+                       last_status, consecutive_failures,
+                       consecutive_no_change,
+                       total_ingested_count, last_error
                 FROM crawl_state_records
                 ORDER BY source_id ASC
                 """
@@ -243,8 +289,11 @@ class SqliteCrawlStateStore(CrawlStateStore):
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT source_id, last_crawled_at, last_content_hashes_json, last_status,
-                       consecutive_failures, total_ingested_count, last_error
+                SELECT source_id, last_crawled_at, last_content_hashes_json,
+                       recent_item_keys_json, item_published_at_json,
+                       last_status, consecutive_failures,
+                       consecutive_no_change,
+                       total_ingested_count, last_error
                 FROM crawl_state_records
                 WHERE source_id = ?
                 """,
@@ -257,14 +306,19 @@ class SqliteCrawlStateStore(CrawlStateStore):
             conn.execute(
                 """
                 INSERT INTO crawl_state_records (
-                    source_id, last_crawled_at, last_content_hashes_json, last_status,
-                    consecutive_failures, total_ingested_count, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    source_id, last_crawled_at, last_content_hashes_json,
+                    recent_item_keys_json, item_published_at_json,
+                    last_status, consecutive_failures,
+                    consecutive_no_change, total_ingested_count, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
                     last_crawled_at = excluded.last_crawled_at,
                     last_content_hashes_json = excluded.last_content_hashes_json,
+                    recent_item_keys_json = excluded.recent_item_keys_json,
+                    item_published_at_json = excluded.item_published_at_json,
                     last_status = excluded.last_status,
                     consecutive_failures = excluded.consecutive_failures,
+                    consecutive_no_change = excluded.consecutive_no_change,
                     total_ingested_count = excluded.total_ingested_count,
                     last_error = excluded.last_error
                 """,
@@ -272,8 +326,11 @@ class SqliteCrawlStateStore(CrawlStateStore):
                     record.source_id,
                     record.last_crawled_at,
                     json.dumps(record.last_content_hashes, ensure_ascii=False),
+                    json.dumps(record.recent_item_keys, ensure_ascii=False),
+                    json.dumps(record.item_published_at, ensure_ascii=False),
                     record.last_status,
                     record.consecutive_failures,
+                    record.consecutive_no_change,
                     record.total_ingested_count,
                     record.last_error,
                 ),
@@ -294,8 +351,11 @@ class SqliteCrawlStateStore(CrawlStateStore):
         source_id: str,
         last_crawled_at: str | None,
         last_content_hashes_json: str,
+        recent_item_keys_json: str,
+        item_published_at_json: str,
         last_status: str,
         consecutive_failures: int,
+        consecutive_no_change: int,
         total_ingested_count: int,
         last_error: str | None,
     ) -> CrawlStateRecord:
@@ -305,6 +365,18 @@ class SqliteCrawlStateStore(CrawlStateStore):
             hashes = {}
         if not isinstance(hashes, dict):
             hashes = {}
+        try:
+            recent_item_keys = json.loads(recent_item_keys_json or "[]")
+        except json.JSONDecodeError:
+            recent_item_keys = []
+        if not isinstance(recent_item_keys, list):
+            recent_item_keys = []
+        try:
+            item_published_at = json.loads(item_published_at_json or "{}")
+        except json.JSONDecodeError:
+            item_published_at = {}
+        if not isinstance(item_published_at, dict):
+            item_published_at = {}
         return CrawlStateRecord(
             source_id=source_id,
             last_crawled_at=(last_crawled_at or "").strip() or None,
@@ -313,8 +385,19 @@ class SqliteCrawlStateStore(CrawlStateStore):
                 for key, value in hashes.items()
                 if key is not None and value is not None
             },
+            recent_item_keys=[
+                str(item).strip()
+                for item in recent_item_keys
+                if str(item).strip()
+            ],
+            item_published_at={
+                str(key): str(value).strip()
+                for key, value in item_published_at.items()
+                if key is not None and str(value).strip()
+            },
             last_status=last_status,
             consecutive_failures=int(consecutive_failures),
+            consecutive_no_change=int(consecutive_no_change),
             total_ingested_count=int(total_ingested_count),
             last_error=(last_error or "").strip() or None,
         )

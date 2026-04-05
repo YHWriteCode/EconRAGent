@@ -5,8 +5,9 @@ import logging
 import socket
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlparse
 
 from lightrag_fork.kg.redis_lock_backend import RedisLockBackend
 from lightrag_fork.utils import compute_mdhash_id
@@ -17,7 +18,7 @@ from kg_agent.crawler.crawl_state_store import (
     CrawlStateStore,
     JsonCrawlStateStore,
 )
-from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
+from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter, DiscoveredUrl
 from kg_agent.crawler.source_registry import (
     JsonSourceRegistry,
     MonitoredSource,
@@ -27,6 +28,7 @@ from kg_agent.crawler.source_registry import (
 logger = logging.getLogger(__name__)
 
 RagResolver = Callable[[str | None], Any | Awaitable[Any]]
+MAX_FEED_NO_CHANGE_MULTIPLIER = 4
 
 
 @dataclass
@@ -278,10 +280,16 @@ class IngestScheduler:
             effective_interval_seconds = self._effective_interval_seconds(source, record)
             source_items.append(
                 {
-                    **source.to_dict(),
+                    **source.to_public_dict(),
                     "last_crawled_at": None if record is None else record.last_crawled_at,
                     "last_status": "never_run" if record is None else record.last_status,
                     "consecutive_failures": 0 if record is None else record.consecutive_failures,
+                    "consecutive_no_change": 0
+                    if record is None
+                    else record.consecutive_no_change,
+                    "tracked_item_count": 0
+                    if record is None
+                    else len(record.last_content_hashes),
                     "total_ingested_count": 0 if record is None else record.total_ingested_count,
                     "last_error": None if record is None else record.last_error,
                     "effective_interval_seconds": effective_interval_seconds,
@@ -412,14 +420,39 @@ class IngestScheduler:
             ingested_count = 0
             success_count = 0
             failure_messages: list[str] = []
+            current_feed_item_keys: list[str] = []
+            current_feed_item_published_at: dict[str, str] = {}
+            successful_feed_item_keys: list[str] = []
+            feed_discovered_count = 0
+            feed_filtered_count = 0
             rag = None
 
             try:
-                pages = await self.crawler_adapter.crawl_urls(
-                    source.urls,
-                    max_pages=source.max_pages,
-                )
+                pages, crawl_metadata = await self._collect_pages_for_source(source)
                 requested_count = len(pages)
+                current_feed_item_keys = list(
+                    crawl_metadata.get("feed_item_keys", [])
+                )
+                current_feed_item_published_at = {
+                    str(key): str(value).strip()
+                    for key, value in dict(
+                        crawl_metadata.get("feed_item_published_at", {})
+                    ).items()
+                    if str(key).strip() and str(value).strip()
+                }
+                feed_discovered_count = int(
+                    crawl_metadata.get("feed_discovered_count", 0)
+                )
+                feed_filtered_count = int(
+                    crawl_metadata.get("feed_filtered_count", 0)
+                )
+                failure_messages.extend(
+                    [
+                        str(item)
+                        for item in crawl_metadata.get("pre_crawl_errors", [])
+                        if str(item).strip()
+                    ]
+                )
                 for page in pages:
                     page_key = (page.final_url or page.url or "").strip() or page.url
                     if not page.success:
@@ -429,6 +462,8 @@ class IngestScheduler:
                         continue
 
                     success_count += 1
+                    if source.resolved_source_type() == "feed":
+                        successful_feed_item_keys.append(page_key)
                     content = (page.markdown or "").strip()
                     if not content:
                         continue
@@ -447,6 +482,24 @@ class IngestScheduler:
                     )
                     ingested_count += 1
 
+                recent_item_keys = previous.recent_item_keys
+                item_published_at = previous.item_published_at
+                if source.resolved_source_type() == "feed":
+                    recent_item_keys = self._merge_recent_item_keys(
+                        successful_feed_item_keys,
+                        previous.recent_item_keys,
+                    )
+                    item_published_at = self._merge_item_published_at(
+                        previous.item_published_at,
+                        current_feed_item_published_at,
+                    )
+                    hashes, recent_item_keys, item_published_at = self._apply_feed_retention(
+                        source=source,
+                        hashes=hashes,
+                        recent_item_keys=recent_item_keys,
+                        item_published_at=item_published_at,
+                    )
+
                 last_status = self._build_status(
                     requested_count=requested_count,
                     success_count=success_count,
@@ -457,8 +510,19 @@ class IngestScheduler:
                     source_id=source.source_id,
                     last_crawled_at=now_iso,
                     last_content_hashes=hashes,
+                    recent_item_keys=recent_item_keys,
+                    item_published_at=item_published_at,
                     last_status=last_status,
-                    consecutive_failures=0 if success_count > 0 else previous.consecutive_failures + 1,
+                    consecutive_failures=(
+                        previous.consecutive_failures + 1
+                        if last_status == "failed"
+                        else 0
+                    ),
+                    consecutive_no_change=(
+                        previous.consecutive_no_change + 1
+                        if last_status == "no_change"
+                        else 0
+                    ),
                     total_ingested_count=previous.total_ingested_count + ingested_count,
                     last_error="; ".join(failure_messages[:3]) or None,
                 )
@@ -469,9 +533,16 @@ class IngestScheduler:
                     "requested_count": requested_count,
                     "success_count": success_count,
                     "ingested_count": ingested_count,
-                    "summary": (
-                        f"Polled {requested_count} page(s), {success_count} succeeded, "
-                        f"{ingested_count} ingested"
+                    "feed_discovered_count": feed_discovered_count,
+                    "feed_filtered_count": feed_filtered_count,
+                    "tracked_item_count": len(hashes),
+                    "summary": self._build_poll_summary(
+                        source=source,
+                        requested_count=requested_count,
+                        success_count=success_count,
+                        ingested_count=ingested_count,
+                        feed_discovered_count=feed_discovered_count,
+                        feed_filtered_count=feed_filtered_count,
                     ),
                 }
             except Exception as exc:  # pragma: no cover
@@ -481,8 +552,11 @@ class IngestScheduler:
                     source_id=source.source_id,
                     last_crawled_at=now_iso,
                     last_content_hashes=hashes,
+                    recent_item_keys=previous.recent_item_keys,
+                    item_published_at=previous.item_published_at,
                     last_status="failed",
                     consecutive_failures=previous.consecutive_failures + 1,
+                    consecutive_no_change=0,
                     total_ingested_count=previous.total_ingested_count,
                     last_error=str(exc),
                 )
@@ -495,6 +569,9 @@ class IngestScheduler:
                     "requested_count": requested_count,
                     "success_count": success_count,
                     "ingested_count": ingested_count,
+                    "feed_discovered_count": feed_discovered_count,
+                    "feed_filtered_count": feed_filtered_count,
+                    "tracked_item_count": len(hashes),
                     "summary": str(exc),
                 }
             finally:
@@ -528,6 +605,8 @@ class IngestScheduler:
         failure_messages: list[str],
     ) -> str:
         if success_count == 0:
+            if requested_count == 0 and not failure_messages:
+                return "no_change"
             return "failed"
         if failure_messages:
             return "partial_success"
@@ -535,12 +614,447 @@ class IngestScheduler:
             return "no_change"
         return "success"
 
+    async def _collect_pages_for_source(
+        self,
+        source: MonitoredSource,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        if source.resolved_source_type() != "feed":
+            pages = await self.crawler_adapter.crawl_urls(
+                source.urls,
+                max_pages=source.max_pages,
+            )
+            return pages, {}
+        return await self._collect_feed_pages(source)
+
+    async def _collect_feed_pages(
+        self,
+        source: MonitoredSource,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        page_limit = max(1, source.max_pages)
+        discovery_limit = max(page_limit, page_limit * 5)
+        priority_active = source.feed_priority.is_active()
+        candidate_entries: list[DiscoveredUrl] = []
+        pre_crawl_errors: list[str] = []
+        feed_discovered_count = 0
+        feed_filtered_count = 0
+        feed_item_published_at: dict[str, str] = {}
+
+        for feed_url in source.urls:
+            if not priority_active and len(candidate_entries) >= page_limit:
+                break
+            try:
+                discovered = await self.crawler_adapter.discover_feed_urls(
+                    feed_url,
+                    top_k=discovery_limit,
+                )
+            except Exception as exc:
+                pre_crawl_errors.append(f"{feed_url}: {exc}")
+                continue
+
+            feed_discovered_count += len(discovered)
+            filtered = self._filter_feed_entries(source, discovered)
+            feed_filtered_count += max(0, len(discovered) - len(filtered))
+            candidate_entries.extend(filtered)
+
+        prioritized_entries = self._prioritize_feed_entries(source, candidate_entries)
+        target_urls: list[str] = []
+        seen_urls: set[str] = set()
+        for item in prioritized_entries:
+            normalized_url = (item.url or "").strip()
+            if not normalized_url or normalized_url in seen_urls:
+                continue
+            target_urls.append(normalized_url)
+            seen_urls.add(normalized_url)
+            if item.published_at:
+                feed_item_published_at[normalized_url] = item.published_at
+            if len(target_urls) >= page_limit:
+                break
+
+        pages = []
+        for url in target_urls[:page_limit]:
+            pages.append(await self.crawler_adapter.crawl_url(url))
+        limited_urls = target_urls[:page_limit]
+        return pages, {
+            "feed_item_keys": limited_urls,
+            "feed_item_published_at": {
+                key: value
+                for key, value in feed_item_published_at.items()
+                if key in limited_urls
+            },
+            "feed_discovered_count": feed_discovered_count,
+            "feed_filtered_count": feed_filtered_count,
+            "pre_crawl_errors": pre_crawl_errors,
+        }
+
+    @staticmethod
+    def _prioritize_feed_entries(
+        source: MonitoredSource,
+        entries: list[DiscoveredUrl],
+    ) -> list[DiscoveredUrl]:
+        if len(entries) <= 1:
+            return entries
+        resolved_mode = source.feed_priority.resolved_mode()
+        if resolved_mode == "feed_order":
+            return entries
+
+        indexed_entries = list(enumerate(entries))
+        if resolved_mode == "published_desc":
+            ranked = sorted(
+                indexed_entries,
+                key=lambda item: (
+                    IngestScheduler._published_sort_key(item[1].published_at),
+                    -item[0],
+                ),
+                reverse=True,
+            )
+            return [entry for _, entry in ranked]
+
+        ranked = sorted(
+            indexed_entries,
+            key=lambda item: IngestScheduler._feed_entry_priority_key(
+                item[1],
+                policy=source.feed_priority,
+                index=item[0],
+            ),
+            reverse=True,
+        )
+        return [entry for _, entry in ranked]
+
+    @staticmethod
+    def _filter_feed_entries(
+        source: MonitoredSource,
+        entries: list[DiscoveredUrl],
+    ) -> list[DiscoveredUrl]:
+        policy = source.feed_filter
+        if not policy.is_active():
+            return entries
+
+        filtered: list[DiscoveredUrl] = []
+        include_patterns = [item.lower() for item in policy.include_patterns]
+        exclude_patterns = [item.lower() for item in policy.exclude_patterns]
+        include_authors = [item.lower() for item in policy.include_authors]
+        exclude_authors = [item.lower() for item in policy.exclude_authors]
+        include_categories = [item.lower() for item in policy.include_categories]
+        exclude_categories = [item.lower() for item in policy.exclude_categories]
+        max_age_days = policy.max_age_days
+        for entry in entries:
+            haystack = " ".join(
+                part.strip()
+                for part in (entry.title or "", entry.url or "")
+                if part and part.strip()
+            ).lower()
+            author_haystack = " ".join(
+                (entry.author or "").strip().split()
+            ).lower()
+            categories = [
+                " ".join((item or "").strip().split()).lower()
+                for item in (entry.categories or [])
+                if (item or "").strip()
+            ]
+            domain = (urlparse(entry.url).hostname or "").strip().lower().strip(".")
+            if include_patterns and not any(
+                pattern in haystack for pattern in include_patterns
+            ):
+                continue
+            if exclude_patterns and any(
+                pattern in haystack for pattern in exclude_patterns
+            ):
+                continue
+            if policy.allowed_domains and not IngestScheduler._domain_matches(
+                domain,
+                policy.allowed_domains,
+            ):
+                continue
+            if policy.blocked_domains and IngestScheduler._domain_matches(
+                domain,
+                policy.blocked_domains,
+            ):
+                continue
+            if include_authors and not any(
+                pattern in author_haystack for pattern in include_authors
+            ):
+                continue
+            if exclude_authors and any(
+                pattern in author_haystack for pattern in exclude_authors
+            ):
+                continue
+            if include_categories and not IngestScheduler._categories_match(
+                categories,
+                include_categories,
+            ):
+                continue
+            if exclude_categories and IngestScheduler._categories_match(
+                categories,
+                exclude_categories,
+            ):
+                continue
+            if max_age_days > 0 and IngestScheduler._entry_is_older_than(
+                entry.published_at,
+                max_age_days=max_age_days,
+            ):
+                continue
+            filtered.append(entry)
+        return filtered
+
+    @staticmethod
+    def _domain_matches(domain: str, rules: list[str]) -> bool:
+        normalized_domain = (domain or "").strip().lower().strip(".")
+        if not normalized_domain:
+            return False
+        for rule in rules:
+            normalized_rule = (rule or "").strip().lower().strip(".")
+            if not normalized_rule:
+                continue
+            if (
+                normalized_domain == normalized_rule
+                or normalized_domain.endswith(f".{normalized_rule}")
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _categories_match(categories: list[str], patterns: list[str]) -> bool:
+        if not categories:
+            return False
+        return any(
+            pattern in category
+            for pattern in patterns
+            for category in categories
+        )
+
+    @staticmethod
+    def _pattern_match_count(haystack: str, patterns: list[str]) -> int:
+        normalized_haystack = (haystack or "").strip().lower()
+        if not normalized_haystack:
+            return 0
+        return sum(1 for pattern in patterns if pattern and pattern in normalized_haystack)
+
+    @staticmethod
+    def _domain_match_count(domain: str, rules: list[str]) -> int:
+        normalized_domain = (domain or "").strip().lower().strip(".")
+        if not normalized_domain:
+            return 0
+        return sum(
+            1
+            for rule in rules
+            if rule
+            and (
+                normalized_domain == rule
+                or normalized_domain.endswith(f".{rule}")
+            )
+        )
+
+    @staticmethod
+    def _categories_match_count(categories: list[str], patterns: list[str]) -> int:
+        if not categories:
+            return 0
+        return sum(
+            1
+            for pattern in patterns
+            if pattern and any(pattern in category for category in categories)
+        )
+
+    @staticmethod
+    def _feed_entry_priority_key(
+        entry: DiscoveredUrl,
+        *,
+        policy,
+        index: int,
+    ) -> tuple[int, int, int, int, float, int]:
+        haystack = " ".join(
+            part.strip()
+            for part in (entry.title or "", entry.url or "")
+            if part and part.strip()
+        ).lower()
+        author_haystack = " ".join((entry.author or "").strip().split()).lower()
+        categories = [
+            " ".join((item or "").strip().split()).lower()
+            for item in (entry.categories or [])
+            if (item or "").strip()
+        ]
+        domain = (urlparse(entry.url).hostname or "").strip().lower().strip(".")
+        return (
+            IngestScheduler._pattern_match_count(haystack, policy.priority_patterns),
+            IngestScheduler._domain_match_count(domain, policy.preferred_domains),
+            IngestScheduler._pattern_match_count(
+                author_haystack,
+                policy.preferred_authors,
+            ),
+            IngestScheduler._categories_match_count(
+                categories,
+                policy.preferred_categories,
+            ),
+            IngestScheduler._published_sort_key(entry.published_at),
+            -index,
+        )
+
+    @staticmethod
+    def _merge_recent_item_keys(
+        current_item_keys: list[str],
+        previous_item_keys: list[str],
+    ) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in [*current_item_keys, *previous_item_keys]:
+            normalized = (item or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            merged.append(normalized)
+            seen.add(normalized)
+        return merged
+
+    @staticmethod
+    def _merge_item_published_at(
+        previous_item_published_at: dict[str, str],
+        current_item_published_at: dict[str, str],
+    ) -> dict[str, str]:
+        merged = {
+            str(key): str(value).strip()
+            for key, value in previous_item_published_at.items()
+            if str(key).strip() and str(value).strip()
+        }
+        for key, value in current_item_published_at.items():
+            normalized_key = str(key).strip()
+            normalized_value = str(value).strip()
+            if not normalized_key or not normalized_value:
+                continue
+            merged[normalized_key] = normalized_value
+        return merged
+
+    @staticmethod
+    def _apply_feed_retention(
+        *,
+        source: MonitoredSource,
+        hashes: dict[str, str],
+        recent_item_keys: list[str],
+        item_published_at: dict[str, str],
+    ) -> tuple[dict[str, str], list[str], dict[str, str]]:
+        policy = source.feed_retention
+        if source.resolved_source_type() != "feed":
+            return hashes, recent_item_keys, item_published_at
+
+        ordering = IngestScheduler._order_feed_item_keys(
+            recent_item_keys,
+            hashes=hashes,
+            item_published_at=item_published_at,
+        )
+        if policy.max_age_days > 0:
+            ordering = [
+                key
+                for key in ordering
+                if not IngestScheduler._entry_is_older_than(
+                    item_published_at.get(key),
+                    max_age_days=policy.max_age_days,
+                )
+            ]
+        if policy.mode == "latest":
+            ordering = ordering[: policy.max_items]
+
+        retained_keys = ordering
+        retained_set = set(retained_keys)
+        retained_hashes = {
+            key: value for key, value in hashes.items() if key in retained_set
+        }
+        retained_item_published_at = {
+            key: value for key, value in item_published_at.items() if key in retained_set
+        }
+        return retained_hashes, retained_keys, retained_item_published_at
+
+    @staticmethod
+    def _order_feed_item_keys(
+        recent_item_keys: list[str],
+        *,
+        hashes: dict[str, str],
+        item_published_at: dict[str, str],
+    ) -> list[str]:
+        ordering_source = recent_item_keys or list(hashes.keys())
+        ordered_keys: list[str] = []
+        seen: set[str] = set()
+        for item in ordering_source:
+            normalized = (item or "").strip()
+            if not normalized or normalized in seen:
+                continue
+            ordered_keys.append(normalized)
+            seen.add(normalized)
+
+        index_map = {key: index for index, key in enumerate(ordered_keys)}
+        return sorted(
+            ordered_keys,
+            key=lambda key: (
+                IngestScheduler._published_sort_key(item_published_at.get(key)),
+                -index_map.get(key, 0),
+            ),
+            reverse=True,
+        )
+
+    @staticmethod
+    def _published_sort_key(value: str | None) -> float:
+        parsed = _parse_iso8601(value)
+        if parsed is None:
+            return float("-inf")
+        return parsed.timestamp()
+
+    @staticmethod
+    def _entry_is_older_than(
+        published_at: str | None,
+        *,
+        max_age_days: float,
+    ) -> bool:
+        if max_age_days <= 0:
+            return False
+        parsed = _parse_iso8601(published_at)
+        if parsed is None:
+            return False
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        return parsed < cutoff
+
+    @staticmethod
+    def _build_poll_summary(
+        *,
+        source: MonitoredSource,
+        requested_count: int,
+        success_count: int,
+        ingested_count: int,
+        feed_discovered_count: int,
+        feed_filtered_count: int,
+    ) -> str:
+        if source.resolved_source_type() != "feed":
+            return (
+                f"Polled {requested_count} page(s), {success_count} succeeded, "
+                f"{ingested_count} ingested"
+            )
+        return (
+            f"Discovered {feed_discovered_count} feed item(s), filtered {feed_filtered_count}, "
+            f"crawled {requested_count}, {success_count} succeeded, {ingested_count} ingested"
+        )
+
     @staticmethod
     def _effective_interval_seconds(
         source: MonitoredSource,
         record: CrawlStateRecord | None,
     ) -> int:
         base_interval = max(1, source.interval_seconds)
+        failure_interval = IngestScheduler._apply_failure_backoff(
+            base_interval=base_interval,
+            record=record,
+        )
+        if record is None or source.resolved_schedule_mode() != "adaptive_feed":
+            return failure_interval
+        if record.consecutive_no_change <= 0:
+            return failure_interval
+        no_change_multiplier = min(
+            MAX_FEED_NO_CHANGE_MULTIPLIER,
+            1 + record.consecutive_no_change,
+        )
+        adaptive_interval = base_interval * no_change_multiplier
+        return max(failure_interval, adaptive_interval)
+
+    @staticmethod
+    def _apply_failure_backoff(
+        *,
+        base_interval: int,
+        record: CrawlStateRecord | None,
+    ) -> int:
         if record is None or record.consecutive_failures < 3:
             return base_interval
         extra_failures = record.consecutive_failures - 2

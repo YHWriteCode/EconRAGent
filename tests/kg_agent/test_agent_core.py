@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import pytest
 
 from kg_agent.agent.agent_core import AgentCore
+from kg_agent.agent.path_explainer import PathExplanation
 from kg_agent.agent.route_judge import RouteDecision, ToolCallPlan
 from kg_agent.agent.tool_registry import ToolRegistry
 from kg_agent.config import (
@@ -44,6 +45,16 @@ class _TrackingCrossSessionStore:
 
     async def index_message(self, message):
         self.indexed_messages.append(message)
+
+
+@dataclass
+class _CapturingRouteJudge:
+    route: RouteDecision
+    seen_session_context: dict | None = None
+
+    async def plan(self, **kwargs):
+        self.seen_session_context = kwargs.get("session_context")
+        return self.route
 
 
 @pytest.mark.asyncio
@@ -143,11 +154,149 @@ async def test_agent_core_chat_stream_yields_meta_delta_done_and_persists_memory
         )
     ]
 
-    assert [item["type"] for item in events] == ["meta", "delta", "delta", "done"]
+    assert [item["type"] for item in events] == [
+        "meta",
+        "route",
+        "answer_start",
+        "delta",
+        "delta",
+        "done",
+    ]
     assert events[-1]["answer"] == "Hello world"
 
     history = await memory.get_recent_history("stream-session", turns=2)
     assert history[-1]["content"] == "Hello world"
+
+
+@pytest.mark.asyncio
+async def test_agent_core_chat_stream_emits_tool_and_path_events():
+    class _StreamingLLM:
+        def is_available(self):
+            return True
+
+        async def stream_text(self, **kwargs):
+            yield "Explained"
+            yield " answer"
+
+        async def complete_text(self, **kwargs):
+            return "Explained answer"
+
+    class _StubPathExplainer:
+        async def explain(self, **kwargs):
+            return PathExplanation(
+                enabled=True,
+                question_type="relation_explanation",
+                core_entities=["Policy", "BYD"],
+                paths=[],
+                final_explanation="Policy drives BYD through demand.",
+                uncertainty=None,
+            )
+
+    async def _hybrid_tool(**kwargs):
+        return ToolResult(
+            tool_name="kg_hybrid_search",
+            success=True,
+            data={
+                "data": {
+                    "chunks": [
+                        {
+                            "content": "Policy support increased EV demand and helped BYD.",
+                        }
+                    ]
+                }
+            },
+        )
+
+    async def _trace_tool(**kwargs):
+        return ToolResult(
+            tool_name="graph_relation_trace",
+            success=True,
+            data={
+                "paths": [
+                    {
+                        "path_text": "Policy -> EV demand -> BYD",
+                        "nodes": [{"id": "Policy"}, {"id": "BYD"}],
+                        "edges": [],
+                    }
+                ]
+            },
+        )
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="kg_hybrid_search",
+            description="Hybrid search",
+            input_schema={},
+            handler=_hybrid_tool,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="graph_relation_trace",
+            description="Relation trace",
+            input_schema={},
+            handler=_trace_tool,
+        )
+    )
+    route = RouteDecision(
+        need_tools=True,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=True,
+        strategy="kg_hybrid_first_then_graph_trace",
+        tool_sequence=[
+            ToolCallPlan(tool="kg_hybrid_search"),
+            ToolCallPlan(tool="graph_relation_trace"),
+        ],
+        reason="stream stages test",
+        max_iterations=2,
+    )
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False, enable_quant=False),
+        runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+    )
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=config,
+        tool_registry=registry,
+        route_judge=_StubRouteJudge(route=route),
+        path_explainer=_StubPathExplainer(),
+    )
+    agent.llm_client = _StreamingLLM()
+
+    events = [
+        event
+        async for event in agent.chat_stream(
+            query="Why does policy affect BYD?",
+            session_id="stream-tools",
+            use_memory=False,
+        )
+    ]
+
+    event_types = [item["type"] for item in events]
+    assert event_types == [
+        "meta",
+        "route",
+        "tool_start",
+        "tool_result",
+        "tool_start",
+        "tool_result",
+        "path_explanation_start",
+        "path_explanation",
+        "answer_start",
+        "delta",
+        "delta",
+        "done",
+    ]
+    assert events[2]["tool"] == "kg_hybrid_search"
+    assert events[3]["tool_call"]["tool"] == "kg_hybrid_search"
+    assert events[5]["tool_call"]["tool"] == "graph_relation_trace"
+    assert events[7]["path_explanation"]["final_explanation"] == (
+        "Policy drives BYD through demand."
+    )
+    assert events[-1]["answer"] == "Explained answer"
 
 
 @pytest.mark.asyncio
@@ -235,3 +384,84 @@ async def test_agent_core_chat_passes_workspace_to_rag_provider():
 
     assert response.metadata["workspace"] == "ws-dynamic"
     assert seen_workspaces == ["ws-dynamic"]
+
+
+@pytest.mark.asyncio
+async def test_agent_core_preview_route_uses_smart_memory_window():
+    memory = ConversationMemoryStore()
+    await memory.append_message(
+        "session-memory",
+        "user",
+        "Recall the supplier battery issue from last month.",
+    )
+    await memory.append_message(
+        "session-memory",
+        "assistant",
+        "Supplier Alpha slipped because logistics stalled.",
+    )
+    await memory.append_message("session-memory", "user", "Thanks")
+    await memory.append_message("session-memory", "assistant", "Acknowledged")
+    await memory.append_message("session-memory", "user", "We are now discussing lunch")
+    await memory.append_message("session-memory", "assistant", "Lunch plan is undecided.")
+
+    route = RouteDecision(
+        need_tools=False,
+        need_memory=True,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="memory_preview",
+        tool_sequence=[],
+        reason="capture session context",
+        max_iterations=1,
+    )
+    capturing_judge = _CapturingRouteJudge(route=route)
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=True, enable_quant=False),
+        runtime=AgentRuntimeConfig(
+            default_workspace="",
+            max_iterations=3,
+            memory_window_turns=2,
+            memory_min_recent_turns=1,
+            memory_max_context_tokens=80,
+        ),
+    )
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=config,
+        route_judge=capturing_judge,
+        conversation_memory=memory,
+    )
+
+    await agent.preview_route(
+        query="supplier logistics battery update",
+        session_id="session-memory",
+        use_memory=True,
+    )
+
+    history = capturing_judge.seen_session_context["history"]
+    contents = [item["content"] for item in history]
+    assert "Recall the supplier battery issue from last month." in contents
+    assert "Supplier Alpha slipped because logistics stalled." in contents
+    assert "We are now discussing lunch" in contents
+    assert "Lunch plan is undecided." in contents
+    assert "Acknowledged" not in contents
+
+
+def test_agent_core_builds_route_judge_with_configured_prompt_version():
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False, enable_quant=False),
+        runtime=AgentRuntimeConfig(
+            default_workspace="",
+            max_iterations=3,
+            route_judge_prompt_version="v2",
+        ),
+    )
+
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=config,
+    )
+
+    assert agent.route_judge.prompt_version == "v2"

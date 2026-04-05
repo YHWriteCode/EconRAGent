@@ -285,6 +285,64 @@ async def test_conversation_memory_search_returns_relevant_messages():
 
 
 @pytest.mark.asyncio
+async def test_conversation_memory_context_window_keeps_recent_turn_and_relevant_older_turn():
+    store = ConversationMemoryStore()
+    await store.append_message("s1", "user", "Please remember the supplier battery issue")
+    await store.append_message(
+        "s1",
+        "assistant",
+        "Supplier Alpha is delayed because logistics is blocked.",
+    )
+    await store.append_message("s1", "user", "Thanks")
+    await store.append_message("s1", "assistant", "Acknowledged")
+    await store.append_message("s1", "user", "Let's switch to weekend planning")
+    await store.append_message("s1", "assistant", "Weekend plan is still open.")
+
+    history = await store.get_context_window(
+        "s1",
+        query="supplier logistics battery update",
+        turns=2,
+        min_recent_turns=1,
+        max_tokens=80,
+    )
+
+    contents = [item["content"] for item in history]
+    assert "Please remember the supplier battery issue" in contents
+    assert "Supplier Alpha is delayed because logistics is blocked." in contents
+    assert "Let's switch to weekend planning" in contents
+    assert "Weekend plan is still open." in contents
+    assert "Acknowledged" not in contents
+
+
+@pytest.mark.asyncio
+async def test_conversation_memory_context_window_respects_token_budget():
+    store = ConversationMemoryStore()
+    await store.append_message(
+        "s2",
+        "user",
+        "supplier logistics battery schedule contract escalation timeline details",
+    )
+    await store.append_message(
+        "s2",
+        "assistant",
+        "supplier logistics battery schedule contract escalation timeline details",
+    )
+    await store.append_message("s2", "user", "Recent ping")
+    await store.append_message("s2", "assistant", "Recent pong")
+
+    history = await store.get_context_window(
+        "s2",
+        query="supplier logistics battery",
+        turns=2,
+        min_recent_turns=1,
+        max_tokens=4,
+    )
+
+    contents = [item["content"] for item in history]
+    assert contents == ["Recent ping", "Recent pong"]
+
+
+@pytest.mark.asyncio
 async def test_conversation_memory_sqlite_persists_messages(tmp_path: Path):
     db_path = tmp_path / "memory.sqlite3"
     store = ConversationMemoryStore(backend="sqlite", sqlite_path=str(db_path))

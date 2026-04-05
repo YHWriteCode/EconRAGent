@@ -218,6 +218,13 @@ def test_agent_chat_stream_endpoint_returns_sse():
 
         async def chat_stream(self, **kwargs):
             yield {"type": "meta", "metadata": {"streaming_supported": True}}
+            yield {"type": "route", "route": {"strategy": "factual_qa"}}
+            yield {"type": "tool_start", "tool": "kg_hybrid_search", "index": 1}
+            yield {
+                "type": "tool_result",
+                "tool_call": {"tool": "kg_hybrid_search", "success": True},
+            }
+            yield {"type": "answer_start"}
             yield {"type": "delta", "content": "hello"}
             yield {"type": "done", "answer": "hello"}
 
@@ -238,6 +245,8 @@ def test_agent_chat_stream_endpoint_returns_sse():
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
+    assert 'data: {"type": "route", "route": {"strategy": "factual_qa"}}' in body
+    assert 'data: {"type": "tool_start", "tool": "kg_hybrid_search", "index": 1}' in body
     assert 'data: {"type": "delta", "content": "hello"}' in body
     assert '"type": "done"' in body
 

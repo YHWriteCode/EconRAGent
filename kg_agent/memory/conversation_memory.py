@@ -111,6 +111,24 @@ class ConversationMemoryStore:
             for message in messages[-slice_size:]
         ]
 
+    async def get_context_window(
+        self,
+        session_id: str,
+        *,
+        query: str,
+        turns: int = 6,
+        min_recent_turns: int = 2,
+        max_tokens: int = 1200,
+    ) -> list[dict[str, str]]:
+        messages = await self._get_session_messages(session_id)
+        return self._select_context_window(
+            messages,
+            query=query,
+            turns=turns,
+            min_recent_turns=min_recent_turns,
+            max_tokens=max_tokens,
+        )
+
     async def get_recent_tool_calls(
         self,
         session_id: str,
@@ -268,6 +286,143 @@ class ConversationMemoryStore:
             }
             for score, message in scored[:limit]
         ]
+
+    @classmethod
+    def _select_context_window(
+        cls,
+        messages: list[MemoryMessage],
+        *,
+        query: str,
+        turns: int,
+        min_recent_turns: int,
+        max_tokens: int,
+    ) -> list[dict[str, str]]:
+        if not messages or turns <= 0:
+            return []
+
+        segments = cls._build_history_segments(messages)
+        if not segments:
+            return []
+
+        max_turns = max(1, turns)
+        recent_turns = min(len(segments), max(1, min(min_recent_turns, max_turns)))
+        anchor_segments = list(segments[-recent_turns:])
+        selected_by_index = {
+            segment["index"]: segment for segment in anchor_segments
+        }
+        current_tokens = sum(segment["token_count"] for segment in anchor_segments)
+        budget_enabled = max_tokens > 0
+
+        while budget_enabled and current_tokens > max_tokens and len(anchor_segments) > 1:
+            removed = anchor_segments.pop(0)
+            selected_by_index.pop(removed["index"], None)
+            current_tokens -= removed["token_count"]
+
+        remaining_slots = max(0, max_turns - len(selected_by_index))
+        candidate_segments = (
+            segments[:-recent_turns] if recent_turns < len(segments) else []
+        )
+        query_tokens = _tokenize(query)
+        ranked_candidates = []
+        for segment in candidate_segments:
+            overlap = len(query_tokens & segment["tokens"]) if query_tokens else 0
+            ranked_candidates.append(
+                {
+                    "index": segment["index"],
+                    "messages": segment["messages"],
+                    "token_count": segment["token_count"],
+                    "score": overlap,
+                }
+            )
+
+        if query_tokens:
+            ranked_candidates.sort(
+                key=lambda item: (item["score"], item["index"]),
+                reverse=True,
+            )
+        else:
+            ranked_candidates.sort(key=lambda item: item["index"], reverse=True)
+
+        for segment in ranked_candidates:
+            if remaining_slots <= 0:
+                break
+            if query_tokens and segment["score"] <= 0:
+                break
+            if (
+                budget_enabled
+                and current_tokens + segment["token_count"] > max_tokens
+                and selected_by_index
+            ):
+                continue
+            selected_by_index[segment["index"]] = segment
+            current_tokens += segment["token_count"]
+            remaining_slots -= 1
+
+        if remaining_slots > 0:
+            fallback_segments = sorted(
+                (
+                    segment
+                    for segment in ranked_candidates
+                    if segment["index"] not in selected_by_index
+                ),
+                key=lambda item: item["index"],
+                reverse=True,
+            )
+            for segment in fallback_segments:
+                if remaining_slots <= 0:
+                    break
+                if (
+                    budget_enabled
+                    and current_tokens + segment["token_count"] > max_tokens
+                    and selected_by_index
+                ):
+                    continue
+                selected_by_index[segment["index"]] = segment
+                current_tokens += segment["token_count"]
+                remaining_slots -= 1
+
+        history: list[dict[str, str]] = []
+        for segment_index in sorted(selected_by_index):
+            for message in selected_by_index[segment_index]["messages"]:
+                history.append({"role": message.role, "content": message.content})
+        return history
+
+    @classmethod
+    def _build_history_segments(
+        cls,
+        messages: list[MemoryMessage],
+    ) -> list[dict[str, Any]]:
+        segments: list[dict[str, Any]] = []
+        index = 0
+        segment_index = 0
+        while index < len(messages):
+            segment_messages = [messages[index]]
+            index += 1
+            if segment_messages[0].role == "user":
+                while index < len(messages) and messages[index].role != "user":
+                    segment_messages.append(messages[index])
+                    index += 1
+
+            segment_tokens: set[str] = set()
+            token_count = 0
+            for message in segment_messages:
+                segment_tokens.update(_tokenize(message.content))
+                token_count += cls._estimate_token_count(message.content)
+
+            segments.append(
+                {
+                    "index": segment_index,
+                    "messages": segment_messages,
+                    "tokens": segment_tokens,
+                    "token_count": max(1, token_count),
+                }
+            )
+            segment_index += 1
+        return segments
+
+    @staticmethod
+    def _estimate_token_count(text: str) -> int:
+        return max(1, len(TOKEN_PATTERN.findall(text or "")))
 
     async def _ensure_sqlite_initialized_locked(self) -> None:
         if self._sqlite_initialized:

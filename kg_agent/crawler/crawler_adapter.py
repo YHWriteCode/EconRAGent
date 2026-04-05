@@ -4,6 +4,8 @@ import asyncio
 import logging
 import os
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
@@ -46,6 +48,9 @@ class DiscoveredUrl:
     score: float | None = None
     match_count: int = 0
     article_like: bool = False
+    published_at: str | None = None
+    author: str | None = None
+    categories: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -297,6 +302,9 @@ class Crawl4AIAdapter:
                         title=(item.findtext("title") or url).strip(),
                         url=url,
                         source="rss",
+                        published_at=cls._extract_rss_item_published_at(item),
+                        author=cls._extract_rss_item_author(item),
+                        categories=cls._extract_rss_item_categories(item),
                     )
                 )
                 if len(entries) >= top_k:
@@ -318,6 +326,9 @@ class Crawl4AIAdapter:
                         title=title or url,
                         url=url,
                         source="atom",
+                        published_at=cls._extract_atom_entry_published_at(entry),
+                        author=cls._extract_atom_entry_author(entry),
+                        categories=cls._extract_atom_entry_categories(entry),
                     )
                 )
                 if len(entries) >= top_k:
@@ -350,6 +361,108 @@ class Crawl4AIAdapter:
                 continue
             return href if href.startswith(("http://", "https://")) else urljoin(base_url, href)
         return None
+
+    @classmethod
+    def _extract_rss_item_published_at(cls, item: ET.Element) -> str | None:
+        candidates = [
+            item.findtext("pubDate"),
+            item.findtext("{*}pubDate"),
+            item.findtext("{http://purl.org/dc/elements/1.1/}date"),
+            item.findtext("{*}date"),
+            item.findtext("published"),
+            item.findtext("{*}published"),
+            item.findtext("updated"),
+            item.findtext("{*}updated"),
+        ]
+        for candidate in candidates:
+            normalized = cls._normalize_datetime_text(candidate)
+            if normalized:
+                return normalized
+        return None
+
+    @classmethod
+    def _extract_atom_entry_published_at(cls, entry: ET.Element) -> str | None:
+        candidates = [
+            entry.findtext("{*}updated"),
+            entry.findtext("{*}published"),
+        ]
+        for candidate in candidates:
+            normalized = cls._normalize_datetime_text(candidate)
+            if normalized:
+                return normalized
+        return None
+
+    @staticmethod
+    def _normalize_datetime_text(value: str | None) -> str | None:
+        text = (value or "").strip()
+        if not text:
+            return None
+
+        try:
+            parsed = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            parsed = None
+        if parsed is None:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat()
+
+    @staticmethod
+    def _normalize_metadata_values(values: list[str | None]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            item = " ".join((value or "").strip().split())
+            if not item:
+                continue
+            lowered = item.lower()
+            if lowered in seen:
+                continue
+            normalized.append(item)
+            seen.add(lowered)
+        return normalized
+
+    @classmethod
+    def _extract_rss_item_author(cls, item: ET.Element) -> str | None:
+        candidates = [
+            item.findtext("author"),
+            item.findtext("{*}author"),
+            item.findtext("{http://purl.org/dc/elements/1.1/}creator"),
+            item.findtext("{*}creator"),
+        ]
+        values = cls._normalize_metadata_values(candidates)
+        return values[0] if values else None
+
+    @classmethod
+    def _extract_rss_item_categories(cls, item: ET.Element) -> list[str]:
+        values: list[str | None] = []
+        for node in item.findall("category"):
+            values.append(node.text)
+        for node in item.findall("{*}category"):
+            values.append(node.text or node.get("term"))
+        return cls._normalize_metadata_values(values)
+
+    @classmethod
+    def _extract_atom_entry_author(cls, entry: ET.Element) -> str | None:
+        candidates = [
+            entry.findtext("{*}author/{*}name"),
+            entry.findtext("{*}author/{*}email"),
+            entry.findtext("{*}author"),
+        ]
+        values = cls._normalize_metadata_values(candidates)
+        return values[0] if values else None
+
+    @classmethod
+    def _extract_atom_entry_categories(cls, entry: ET.Element) -> list[str]:
+        values: list[str | None] = []
+        for node in entry.findall("{*}category"):
+            values.append(node.get("term") or node.get("label") or node.text)
+        return cls._normalize_metadata_values(values)
 
     @staticmethod
     def _xml_local_name(tag: str) -> str:

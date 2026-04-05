@@ -91,6 +91,16 @@ class PreparedAgentRun:
     metadata: dict[str, Any]
 
 
+@dataclass
+class PlannedAgentRun:
+    context: AgentRunContext
+    rag: LightRAG
+    session_context: dict[str, Any]
+    user_profile: dict[str, Any] | None
+    route: RouteDecision
+    execution_limit: int
+
+
 RagProvider = Callable[[str | None], LightRAG | Awaitable[LightRAG]]
 
 
@@ -135,6 +145,7 @@ class AgentCore:
         self.route_judge = route_judge or RouteJudge(
             llm_client=self.utility_llm_client,
             default_max_iterations=self.config.runtime.max_iterations,
+            prompt_version=self.config.runtime.route_judge_prompt_version,
         )
         self.path_explainer = path_explainer or PathExplainer(
             llm_client=self.utility_llm_client
@@ -150,6 +161,7 @@ class AgentCore:
         use_memory: bool = True,
     ) -> RouteDecision:
         session_context = await self._build_session_context(
+            query=query,
             session_id=session_id,
             use_memory=use_memory,
             user_id=user_id,
@@ -229,7 +241,7 @@ class AgentCore:
         use_memory: bool = True,
         debug: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
-        prepared = await self._prepare_agent_run(
+        planned = await self._plan_agent_run(
             query=query,
             session_id=session_id,
             user_id=user_id,
@@ -241,17 +253,114 @@ class AgentCore:
             stream=True,
         )
 
-        metadata = dict(prepared.metadata)
-        metadata["streaming_supported"] = True
+        metadata = self._build_response_metadata(planned.context, planned.route)
         yield {
             "type": "meta",
-            "route": asdict(prepared.route),
-            "tool_calls": prepared.public_tool_calls,
-            "path_explanation": prepared.path_explanation_dict,
             "metadata": metadata,
         }
+        yield {"type": "route", "route": asdict(planned.route)}
+
+        raw_tool_calls: list[dict[str, Any]] = []
+        graph_paths: list[dict[str, Any]] = []
+        evidence_chunks: list[str] = []
+
+        for index, tool_plan in enumerate(
+            planned.route.tool_sequence[: planned.execution_limit],
+            start=1,
+        ):
+            yield {
+                "type": "tool_start",
+                "index": index,
+                "total": planned.execution_limit,
+                "tool": tool_plan.tool,
+                "optional": tool_plan.optional,
+            }
+            result = await self._execute_tool_plan(
+                context=planned.context,
+                rag=planned.rag,
+                session_context=planned.session_context,
+                user_profile=planned.user_profile,
+                tool_plan=tool_plan,
+                raw_tool_calls=raw_tool_calls,
+            )
+            recorded_call = self._record_tool_call(
+                result=result,
+                optional=tool_plan.optional,
+            )
+            raw_tool_calls.append(recorded_call)
+            graph_paths, evidence_chunks = self._accumulate_explanation_inputs(
+                result=result,
+                current_graph_paths=graph_paths,
+                current_evidence=evidence_chunks,
+            )
+            yield {
+                "type": "tool_result",
+                "index": index,
+                "tool_call": self._serialize_tool_call(
+                    recorded_call,
+                    debug=planned.context.debug,
+                ),
+            }
+            if self._should_stop_early(
+                route=planned.route,
+                tool_calls=raw_tool_calls,
+                remaining=planned.route.tool_sequence[index : planned.execution_limit],
+            ):
+                yield {
+                    "type": "tool_skip",
+                    "reason": "optional_tools_skipped_after_success",
+                }
+                break
+
+        dynamic_update = await self._maybe_handle_dynamic_graph_update(
+            context=planned.context,
+            route=planned.route,
+            rag=planned.rag,
+            session_context=planned.session_context,
+            user_profile=planned.user_profile,
+            raw_tool_calls=raw_tool_calls,
+        )
+        if dynamic_update.metadata:
+            metadata.update(dynamic_update.metadata)
+            yield {
+                "type": "status",
+                "metadata": dynamic_update.metadata,
+            }
+        if dynamic_update.raw_tool_calls:
+            for item in dynamic_update.raw_tool_calls:
+                raw_tool_calls.append(item)
+                yield {
+                    "type": "tool_result",
+                    "phase": "dynamic_update",
+                    "tool_call": self._serialize_tool_call(
+                        item,
+                        debug=planned.context.debug,
+                    ),
+                }
+
+        if planned.route.need_path_explanation:
+            yield {"type": "path_explanation_start"}
+        path_explanation_dict = await self._build_path_explanation_dict(
+            context=planned.context,
+            route=planned.route,
+            graph_paths=graph_paths,
+            evidence_chunks=evidence_chunks,
+        )
+        if path_explanation_dict is not None:
+            yield {
+                "type": "path_explanation",
+                "path_explanation": path_explanation_dict,
+            }
+
+        prepared = self._assemble_prepared_agent_run(
+            planned=planned,
+            raw_tool_calls=raw_tool_calls,
+            path_explanation_dict=path_explanation_dict,
+            metadata=metadata,
+        )
 
         chunks: list[str] = []
+        yield {"type": "answer_start"}
         annotation_prefix = self._build_answer_annotation_prefix(metadata)
         if annotation_prefix:
             chunks.append(annotation_prefix)
@@ -332,6 +441,88 @@ class AgentCore:
         debug: bool = False,
         stream: bool = False,
     ) -> PreparedAgentRun:
+        planned = await self._plan_agent_run(
+            query=query,
+            session_id=session_id,
+            user_id=user_id,
+            workspace=workspace,
+            domain_schema=domain_schema,
+            max_iterations=max_iterations,
+            use_memory=use_memory,
+            debug=debug,
+            stream=stream,
+        )
+        raw_tool_calls: list[dict[str, Any]] = []
+        graph_paths: list[dict[str, Any]] = []
+        evidence_chunks: list[str] = []
+
+        for index, tool_plan in enumerate(
+            planned.route.tool_sequence[: planned.execution_limit]
+        ):
+            result = await self._execute_tool_plan(
+                context=planned.context,
+                rag=planned.rag,
+                session_context=planned.session_context,
+                user_profile=planned.user_profile,
+                tool_plan=tool_plan,
+                raw_tool_calls=raw_tool_calls,
+            )
+            raw_tool_calls.append(
+                self._record_tool_call(result=result, optional=tool_plan.optional)
+            )
+            graph_paths, evidence_chunks = self._accumulate_explanation_inputs(
+                result=result,
+                current_graph_paths=graph_paths,
+                current_evidence=evidence_chunks,
+            )
+            if self._should_stop_early(
+                route=planned.route,
+                tool_calls=raw_tool_calls,
+                remaining=planned.route.tool_sequence[index + 1 : planned.execution_limit],
+            ):
+                break
+
+        dynamic_update = await self._maybe_handle_dynamic_graph_update(
+            context=planned.context,
+            route=planned.route,
+            rag=planned.rag,
+            session_context=planned.session_context,
+            user_profile=planned.user_profile,
+            raw_tool_calls=raw_tool_calls,
+        )
+        raw_tool_calls.extend(dynamic_update.raw_tool_calls)
+
+        path_explanation_dict = await self._build_path_explanation_dict(
+            context=planned.context,
+            route=planned.route,
+            graph_paths=graph_paths,
+            evidence_chunks=evidence_chunks,
+        )
+        metadata = self._build_response_metadata(
+            planned.context,
+            planned.route,
+            extra_metadata=dynamic_update.metadata,
+        )
+        return self._assemble_prepared_agent_run(
+            planned=planned,
+            raw_tool_calls=raw_tool_calls,
+            path_explanation_dict=path_explanation_dict,
+            metadata=metadata,
+        )
+
+    async def _plan_agent_run(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        user_id: str | None = None,
+        workspace: str | None = None,
+        domain_schema: str | dict[str, Any] | None = None,
+        max_iterations: int | None = None,
+        use_memory: bool = True,
+        debug: bool = False,
+        stream: bool = False,
+    ) -> PlannedAgentRun:
         context = AgentRunContext(
             query=query,
             session_id=session_id,
@@ -345,6 +536,7 @@ class AgentCore:
         )
         rag = await self._resolve_rag(context.workspace)
         session_context = await self._build_session_context(
+            query=context.query,
             session_id=context.session_id,
             use_memory=context.use_memory,
             user_id=context.user_id,
@@ -360,100 +552,35 @@ class AgentCore:
             ),
         )
 
-        raw_tool_calls: list[dict[str, Any]] = []
-        graph_paths: list[dict[str, Any]] = []
-        evidence_chunks: list[str] = []
         execution_limit = max(
             1,
             min(context.max_iterations or route.max_iterations, route.max_iterations),
         )
-
-        for index, tool_plan in enumerate(route.tool_sequence[:execution_limit]):
-            result = await self._execute_tool_plan(
-                context=context,
-                rag=rag,
-                session_context=session_context,
-                user_profile=user_profile,
-                tool_plan=tool_plan,
-                raw_tool_calls=raw_tool_calls,
-            )
-            raw_tool_calls.append(
-                self._record_tool_call(result=result, optional=tool_plan.optional)
-            )
-            graph_paths, evidence_chunks = self._accumulate_explanation_inputs(
-                result=result,
-                current_graph_paths=graph_paths,
-                current_evidence=evidence_chunks,
-            )
-            if self._should_stop_early(
-                route=route,
-                tool_calls=raw_tool_calls,
-                remaining=route.tool_sequence[index + 1 : execution_limit],
-            ):
-                break
-
-        dynamic_update = await self._maybe_handle_dynamic_graph_update(
+        return PlannedAgentRun(
             context=context,
-            route=route,
             rag=rag,
             session_context=session_context,
             user_profile=user_profile,
-            raw_tool_calls=raw_tool_calls,
-        )
-        raw_tool_calls.extend(dynamic_update.raw_tool_calls)
-
-        public_tool_calls = [
-            self._serialize_tool_call(item, debug=context.debug) for item in raw_tool_calls
-        ]
-        answer_tool_calls = [
-            self._serialize_tool_call(item, debug=False) for item in raw_tool_calls
-        ]
-
-        path_explanation_dict: dict[str, Any] | None = None
-        if route.need_path_explanation:
-            path_explanation = await self.path_explainer.explain(
-                query=context.query,
-                graph_paths=graph_paths,
-                evidence_chunks=evidence_chunks,
-                domain_schema=context.domain_schema
-                if isinstance(context.domain_schema, dict)
-                else {"profile_name": context.domain_schema},
-            )
-            path_explanation_dict = asdict(path_explanation)
-
-        metadata = {
-            "session_id": context.session_id,
-            "user_id": context.user_id,
-            "workspace": context.workspace,
-            "domain_schema": context.domain_schema,
-            "route_strategy": route.strategy,
-            "stream_requested": context.stream,
-            "streaming_supported": True,
-            **dynamic_update.metadata,
-        }
-        return PreparedAgentRun(
-            context=context,
-            session_context=session_context,
             route=route,
-            raw_tool_calls=raw_tool_calls,
-            public_tool_calls=public_tool_calls,
-            answer_tool_calls=answer_tool_calls,
-            path_explanation_dict=path_explanation_dict,
-            metadata=metadata,
+            execution_limit=execution_limit,
         )
 
     async def _build_session_context(
         self,
         *,
+        query: str,
         session_id: str,
         use_memory: bool,
         user_id: str | None = None,
     ) -> dict[str, Any]:
         if not use_memory or not self.config.tool_config.enable_memory:
             return {"history": [], "recent_tool_calls": []}
-        history = await self.conversation_memory.get_recent_history(
+        history = await self.conversation_memory.get_context_window(
             session_id,
-            self.config.runtime.memory_window_turns,
+            query=query,
+            turns=self.config.runtime.memory_window_turns,
+            min_recent_turns=self.config.runtime.memory_min_recent_turns,
+            max_tokens=self.config.runtime.memory_max_context_tokens,
         )
         recent_tool_calls = await self.conversation_memory.get_recent_tool_calls(
             session_id,
@@ -464,6 +591,70 @@ class AgentCore:
             "recent_tool_calls": recent_tool_calls,
             "cross_session_enabled": bool(user_id),
         }
+
+    async def _build_path_explanation_dict(
+        self,
+        *,
+        context: AgentRunContext,
+        route: RouteDecision,
+        graph_paths: list[dict[str, Any]],
+        evidence_chunks: list[str],
+    ) -> dict[str, Any] | None:
+        if not route.need_path_explanation:
+            return None
+        path_explanation = await self.path_explainer.explain(
+            query=context.query,
+            graph_paths=graph_paths,
+            evidence_chunks=evidence_chunks,
+            domain_schema=context.domain_schema
+            if isinstance(context.domain_schema, dict)
+            else {"profile_name": context.domain_schema},
+        )
+        return asdict(path_explanation)
+
+    @staticmethod
+    def _build_response_metadata(
+        context: AgentRunContext,
+        route: RouteDecision,
+        *,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "session_id": context.session_id,
+            "user_id": context.user_id,
+            "workspace": context.workspace,
+            "domain_schema": context.domain_schema,
+            "route_strategy": route.strategy,
+            "stream_requested": context.stream,
+            "streaming_supported": True,
+            **(extra_metadata or {}),
+        }
+
+    def _assemble_prepared_agent_run(
+        self,
+        *,
+        planned: PlannedAgentRun,
+        raw_tool_calls: list[dict[str, Any]],
+        path_explanation_dict: dict[str, Any] | None,
+        metadata: dict[str, Any],
+    ) -> PreparedAgentRun:
+        public_tool_calls = [
+            self._serialize_tool_call(item, debug=planned.context.debug)
+            for item in raw_tool_calls
+        ]
+        answer_tool_calls = [
+            self._serialize_tool_call(item, debug=False) for item in raw_tool_calls
+        ]
+        return PreparedAgentRun(
+            context=planned.context,
+            session_context=planned.session_context,
+            route=planned.route,
+            raw_tool_calls=raw_tool_calls,
+            public_tool_calls=public_tool_calls,
+            answer_tool_calls=answer_tool_calls,
+            path_explanation_dict=path_explanation_dict,
+            metadata=metadata,
+        )
 
     async def _persist_memory(
         self,
@@ -1062,6 +1253,8 @@ class AgentCore:
         remaining: list,
     ) -> bool:
         if route.need_path_explanation or not tool_calls:
+            return False
+        if not remaining:
             return False
         if not tool_calls[-1]["success"]:
             return False

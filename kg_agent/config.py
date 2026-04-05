@@ -390,7 +390,10 @@ class AgentRuntimeConfig:
     default_workspace: str = ""
     default_domain_schema: str = "general"
     max_iterations: int = 3
+    route_judge_prompt_version: str = "v1"
     memory_window_turns: int = 6
+    memory_min_recent_turns: int = 2
+    memory_max_context_tokens: int = 1200
     debug: bool = False
 
     @classmethod
@@ -403,7 +406,14 @@ class AgentRuntimeConfig:
                 "KG_AGENT_DEFAULT_DOMAIN_SCHEMA", "general"
             ),
             max_iterations=_env_int("KG_AGENT_MAX_ITERATIONS", 3),
+            route_judge_prompt_version=(
+                os.getenv("KG_AGENT_ROUTE_JUDGE_PROMPT_VERSION", "v1").strip() or "v1"
+            ),
             memory_window_turns=_env_int("KG_AGENT_MEMORY_WINDOW_TURNS", 6),
+            memory_min_recent_turns=_env_int("KG_AGENT_MEMORY_MIN_RECENT_TURNS", 2),
+            memory_max_context_tokens=_env_int(
+                "KG_AGENT_MEMORY_MAX_CONTEXT_TOKENS", 1200
+            ),
             debug=_env_bool("KG_AGENT_DEBUG", False),
         )
 
