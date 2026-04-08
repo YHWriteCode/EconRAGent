@@ -3,7 +3,15 @@ from __future__ import annotations
 from html import unescape
 import re
 from typing import Any
-from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import (
+    parse_qs,
+    parse_qsl,
+    quote_plus,
+    unquote,
+    urlencode,
+    urlparse,
+    urlunparse,
+)
 
 
 def extract_markdown_text(markdown_payload: Any) -> str:
@@ -187,25 +195,65 @@ def _decode_search_redirect(url: str) -> str:
     return url
 
 
-def _normalize_result_url(url: str) -> str:
-    parsed = urlparse(url.strip())
+def _is_tracking_query_key(key: str) -> bool:
+    normalized_key = (key or "").strip().lower()
+    return bool(normalized_key) and (
+        normalized_key.startswith("utm_") or normalized_key in TRACKING_QUERY_KEYS
+    )
+
+
+def canonicalize_url(url: str) -> str:
+    normalized_url = (url or "").strip()
+    if not normalized_url:
+        return ""
+
+    parsed = urlparse(normalized_url)
+    if not parsed.scheme or not parsed.netloc:
+        return normalized_url
+
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").strip().lower().strip(".")
+    if not hostname:
+        return normalized_url
+
+    netloc = hostname
+    if parsed.username:
+        credentials = parsed.username
+        if parsed.password:
+            credentials = f"{credentials}:{parsed.password}"
+        netloc = f"{credentials}@{netloc}"
+
+    default_port = (scheme == "http" and parsed.port == 80) or (
+        scheme == "https" and parsed.port == 443
+    )
+    if parsed.port and not default_port:
+        netloc = f"{netloc}:{parsed.port}"
+
+    normalized_path = re.sub(r"/{2,}", "/", parsed.path or "/")
+    if not normalized_path.startswith("/"):
+        normalized_path = f"/{normalized_path}"
+    if normalized_path != "/":
+        normalized_path = normalized_path.rstrip("/")
+
     filtered_query = [
         (key, value)
-        for key, value in parse_qs(parsed.query, keep_blank_values=True).items()
-        if key.lower() not in TRACKING_QUERY_KEYS
-        for value in value
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not _is_tracking_query_key(key)
     ]
-    normalized_path = parsed.path.rstrip("/") or "/"
     return urlunparse(
         (
-            parsed.scheme,
-            parsed.netloc.lower(),
+            scheme,
+            netloc,
             normalized_path,
-            "",
+            parsed.params,
             urlencode(filtered_query, doseq=True),
             "",
         )
     )
+
+
+def _normalize_result_url(url: str) -> str:
+    return canonicalize_url(url)
 
 
 def _tokenize(text: str) -> set[str]:

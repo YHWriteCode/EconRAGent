@@ -67,11 +67,11 @@ kg_agent/
 │
 ├── crawler/                       # Web crawling layer
 │   ├── __init__.py                # Exports Crawl4AIAdapter, CrawledPage, DiscoveredUrl, IngestScheduler, source/state types
-│   ├── crawler_adapter.py         # Crawl4AIAdapter: start/close/crawl_url/crawl_urls/discover_urls; feed parsing also extracts published_at from RSS/Atom entries
+│   ├── crawler_adapter.py         # Crawl4AIAdapter: start/close/crawl_url/crawl_urls/discover_urls; `crawl_urls()` batches article crawls through Crawl4AI `arun_many()` and feed parsing also extracts published_at from RSS/Atom entries
 │   ├── content_extractor.py       # Search-result extraction, URL scoring/ranking, Markdown normalization, DuckDuckGo redirect decoding
-│   ├── source_registry.py         # MonitoredSource (page/feed typing + feed filter/retention policy), SourceRegistry, Json/SQLite source persistence
-│   ├── crawl_state_store.py       # CrawlStateRecord (hashes + recent feed item history + item published_at map + failure/no-change streaks), CrawlStateStore, Json/SQLite state persistence
-│   └── scheduler.py               # IngestScheduler: recurring crawl + content-hash dedup + feed-aware adaptive scheduling/filtering/retention
+│   ├── source_registry.py         # MonitoredSource (page/feed typing + feed filter/retention/priority/dedup + content lifecycle + event-cluster policy), SourceRegistry, Json/SQLite source persistence
+│   ├── crawl_state_store.py       # CrawlStateRecord (hashes + recent feed item history + item published_at/content-fingerprint maps + active doc IDs/expiry metadata + per-item event-cluster maps/records + failure/no-change streaks), CrawlStateStore, Json/SQLite state persistence
+│   └── scheduler.py               # IngestScheduler: recurring crawl + content-hash dedup + feed-aware adaptive scheduling/filtering/priority/dedup/retention + short-term lifecycle + workspace-aware event clustering
 │
 └── api/                           # External API
     ├── __init__.py
@@ -143,7 +143,12 @@ These fields are injected uniformly by the framework; a tool handler's `args` ca
 - `MonitoredSource` now supports `source_type` (`auto` / `page` / `feed`) and `schedule_mode` (`auto` / `fixed` / `adaptive_feed`) so feed-like URLs can opt into different polling behavior without changing the generic scheduler API
 - Feed-aware source policies now live on `MonitoredSource`: `feed_filter` (title/url substring filters plus author/category/domain constraints) and `feed_retention` (`keep_all` or `latest` with `max_items`) are enforced by the scheduler rather than by the generic `web_search` tool path
 - `MonitoredSource.feed_priority` now controls feed item ranking before crawl: `mode="published_desc"` prefers newer entries, while `mode="priority_score"` ranks entries by configured title/url pattern hits plus preferred domain/author/category matches and then falls back to `published_at`
+- `MonitoredSource.feed_dedup` now controls feed content-level duplicate suppression: `mode="content_hash"` suppresses exact normalized-content repeats across different feed URLs, while `mode="content_signature"` suppresses near-duplicate updates by hashing the leading normalized content tokens
+- `MonitoredSource.content_lifecycle` now classifies crawler output as `long_term_knowledge` or `short_term_news` and controls whether updates append or replace the currently active document for each tracked item
+- Short-term feed sources can also enable event clustering through `content_lifecycle.event_cluster_mode`; `auto` resolves to heuristic clustering by default and upgrades to `heuristic_llm` when a Utility LLM client is available at runtime, and the scheduler can now also use workspace-global `chunks_vdb` candidates to reuse an existing news-event cluster across different feed sources in the same workspace
 - Feed-aware source policies also support publication-time windows: `feed_filter.max_age_days` skips stale entries before crawl, while `feed_retention.max_age_days` prunes old tracked feed items from scheduler state when entry timestamps are available
+- Feed discovery and scheduler state tracking now use canonical article URLs: fragments are dropped, default ports and repeated slashes are normalized, and tracking query params (`utm_*`, `ref`, `src`, etc.) are stripped before feed entry deduplication, no-change detection, and retained item bookkeeping
+- `CrawlStateRecord` now also tracks item-level active crawler doc IDs, doc expiry timestamps, `item_event_cluster_ids`, and `event_clusters` so short-term sources can supersede related feed articles and optionally delete stale documents without changing `lightrag_fork`
 - `sources_file=""` means in-memory source registry only; non-empty file paths must persist source CRUD changes to JSON
 
 ---
@@ -232,8 +237,8 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
 5. Path explanation (optional)
    └─ When route.need_path_explanation=True
        PathExplainer.explain(query, graph_paths, evidence_chunks)
-       ├─ Candidate path scoring (token overlap + evidence coverage)
-       ├─ Select best path + match evidence
+       ├─ Candidate path scoring (lightweight semantic token expansion + node/edge phrase coverage + evidence support + hop penalty)
+       ├─ Select best path + supporting evidence chunks
        ├─ LLM generates explanation (optional, with fallback)
        └─ On no results, returns enabled=False with empty structure
 
@@ -334,8 +339,8 @@ class PathExplainer:
 
 ### 7.3 Two-Phase Strategy
 
-1. **Candidate path scoring:** token overlap (query ∩ path) + evidence coverage (path ∩ chunks) + node count bonus
-2. **Evidence matching:** select text from evidence_chunks most relevant to the best path
+1. **Candidate path scoring:** lightweight semantic-expanded lexical scoring over query/path/evidence alignment, with node/edge phrase coverage, evidence support, and overlong-path penalties
+2. **Evidence matching:** select the highest-support evidence chunks for the best path
 3. **LLM explanation generation:** invoke LLM when available, otherwise fall back to template concatenation
 4. **No-result fallback:** returns `enabled=False` when paths or evidence are insufficient
 
@@ -419,7 +424,8 @@ web_search(query, urls, top_k)
   │    ├─ crawl_url(search_url)            # Crawl search results page
   │    └─ extract_search_results_from_markdown(markdown, query, top_k)
   │         ├─ _decode_search_redirect()   # DuckDuckGo /l/?uddg= redirect decoding
-  │         ├─ _normalize_result_url()     # Strip tracking params, normalize path
+  │         ├─ canonicalize_url() / _normalize_result_url()
+  │         │    Strip tracking params, remove fragments, normalize host/path
   │         ├─ _score_discovered_result()  # Token overlap + URL structure + domain signals
   │         ├─ _is_blocked_result_domain() # Filter social media, etc.
   │         ├─ _is_generic_listing_result()# Filter tag/category/archive pages
@@ -434,10 +440,21 @@ Recurring ingest uses the same crawler stack, but the scheduler layer now distin
 
 - `MonitoredSource.resolved_source_type()` auto-detects feed-like URLs when `source_type="auto"`
 - `MonitoredSource.resolved_schedule_mode()` resolves `auto` to `adaptive_feed` for feed sources and `fixed` for normal page sources
+- `MonitoredSource.content_lifecycle.resolved_content_class()` defaults crawler outputs to `short_term_news` for feed sources and `long_term_knowledge` for normal page sources unless explicitly overridden
+- `MonitoredSource.content_lifecycle.resolved_update_mode()` defaults short-term sources to `replace_latest` and long-term sources to `append`
+- `MonitoredSource.content_lifecycle.resolved_event_cluster_mode()` defaults short-term feed sources to heuristic event clustering and upgrades `auto` to `heuristic_llm` when the shared Utility LLM client is available
 - `IngestScheduler` tracks `consecutive_no_change` in crawl state and increases the effective poll interval for feed sources after repeated no-change polls; a successful new ingest resets that feed backoff
-- For feed sources, the scheduler now calls `discover_feed_urls()` first, applies `feed_filter.include_patterns` / `exclude_patterns`, optional author/category/domain constraints, and optional `feed_filter.max_age_days` against feed entry metadata, then applies `feed_priority` ranking across the discovered feed entries before crawling only the selected article URLs
+- For feed sources, the scheduler now calls `discover_feed_urls()` first, canonicalizes feed entry URLs, drops duplicate aliases, applies `feed_filter.include_patterns` / `exclude_patterns`, optional author/category/domain constraints, and optional `feed_filter.max_age_days` against feed entry metadata, then applies `feed_priority` ranking across the discovered feed entries before sending the selected article URLs back through `crawler_adapter.crawl_urls()` so Crawl4AI batch crawling stays centralized in the adapter
+- After crawl, feed pages also pass through `feed_dedup`: normalized content fingerprints are compared against retained feed items so mirrored URLs or low-increment update posts can be suppressed before `rag.ainsert()` writes another graph/vector document
 - `DiscoveredUrl.published_at` is populated from RSS `pubDate` / Atom `updated` or `published` when available; `DiscoveredUrl.author` and `DiscoveredUrl.categories` are also extracted from RSS/Atom feed entry metadata when present
-- `CrawlStateRecord.recent_item_keys` maintains feed item recency ordering, `item_published_at` stores per-item timestamps when known, and `feed_retention.mode="latest"` / `feed_retention.max_age_days` prune `last_content_hashes` down to the retained tracked feed entries
+- `CrawlStateRecord.recent_item_keys` maintains feed item recency ordering, `item_published_at` stores per-item timestamps when known, `item_content_fingerprints` stores per-item normalized content signatures, `item_active_doc_ids` tracks the currently active crawler-inserted document per item, `item_event_cluster_ids` maps canonical feed items into event clusters, `event_clusters` stores the cluster records owned by that source, and `doc_expires_at` tracks when superseded or short-lived documents should be considered expired
+- When event clustering is enabled for short-term feed sources, newly crawled articles first score against local cluster metadata and can also query the workspace-global `chunks_vdb` to find active short-term event clusters created by other feed sources in the same workspace; borderline candidates can optionally be adjudicated by the shared Utility LLM client already configured for `AgentCore`
+- When an expired/deleted short-term document was also referenced as the active doc of a cluster owned by another source, the scheduler now clears that cross-source active reference so retrieval filtering cannot accidentally resurrect stale news through the global cluster pointer
+- For short-term lifecycle sources, `IngestScheduler` now passes deterministic `ids=` into `rag.ainsert()` when the underlying RAG supports it, which lets the scheduler later call `rag.adelete_by_doc_id()` for optional expiry cleanup without touching `lightrag_fork`
+- Scheduler loop maintenance now also performs an expired-document sweep independent of normal crawl polling, so TTL-based cleanup is not blocked behind the source's next ingest interval
+- Removing a short-term lifecycle source now also attempts to delete all crawler-managed documents for that source immediately; if the active RAG backend cannot delete by doc ID, the scheduler keeps a tombstone-style state record so retrieval filtering still suppresses those orphaned short-term docs
+- `feed_retention.mode="latest"` / `feed_retention.max_age_days` still prune tracked feed items from scheduler state; when short-term lifecycle is enabled, items pruned out of the retained set can also mark their previously active crawler documents as expired
+- `CrawlerConfig` now also supports optional Crawl4AI `LLMExtractionStrategy`; when enabled, the adapter still keeps Crawl4AI's native markdown path by default, but `llm_extraction_prefer_content=true` can replace page markdown with the LLM-extracted payload before downstream tools or scheduler ingestion consume it
 
 **Key content_extractor constants:**
 
@@ -494,6 +511,8 @@ When the active `LightRAG` instance has a configured rerank model (`rerank_model
 - When `KG_AGENT_ENABLE_FRESHNESS_DECAY=true`, `retrieval_tools.py` passes freshness parameters into `QueryParam`
 - Lower-layer freshness-aware ranking now runs inside `lightrag_fork/operate.py`
 - `retrieval_tools.py` only keeps a compatibility fallback when lower-layer metadata does not mark `freshness_decay_applied`
+- When `AgentCore` is attached to a scheduler state store, retrieval tools now also reverse-map `chunk_id` / graph `source_id` back to `full_doc_id` via `rag.text_chunks` and suppress crawler-managed short-term results whose documents are expired or no longer the active version for that tracked item
+- Retrieval-side crawler lifecycle filtering rebuilds chunk references after filtering so the final answer prompt and debug tool payload only expose still-active evidence chunks
 
 ---
 
@@ -613,6 +632,17 @@ Optional lightweight utility model for internal routing/explanation work:
 | `KG_AGENT_WEB_CRAWLER_MAX_CONTENT_CHARS` | `4000` | Maximum extracted content length per page |
 | `KG_AGENT_WEB_CRAWLER_WORD_COUNT_THRESHOLD` | `20` | Minimum content threshold |
 | `KG_AGENT_WEB_CRAWLER_PAGE_TIMEOUT_MS` | `30000` | Per-page timeout |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_ENABLED` | `false` | Enable Crawl4AI `LLMExtractionStrategy` during crawl |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_PROVIDER` | inferred `openai/<model>` or empty | Crawl4AI/LiteLLM provider string passed to `LLMConfig` |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_API_TOKEN` | falls back to `LLM_BINDING_API_KEY` / `OPENAI_API_KEY` | API token for Crawl4AI LLM extraction |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_BASE_URL` | falls back to `LLM_BINDING_HOST` / `OPENAI_API_BASE` | Base URL for Crawl4AI LLM extraction |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_INSTRUCTION` | empty | Optional extraction instruction prompt |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_INPUT_FORMAT` | `markdown` | Extraction input format (`markdown`, `html`, `fit_markdown`, etc.) |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_TYPE` | `block` | Crawl4AI extraction type (`block` or `schema`) |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_SCHEMA_JSON` | empty | Optional JSON schema string for schema-mode extraction |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_FORCE_JSON_RESPONSE` | `false` | Force JSON responses from the extraction LLM |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_APPLY_CHUNKING` | `true` | Let Crawl4AI chunk extraction input before LLM calls |
+| `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_PREFER_CONTENT` | `false` | Replace downstream page markdown with `result.extracted_content` when available |
 
 ### 10.5 Scheduler Configuration (SchedulerConfig)
 
@@ -647,6 +677,15 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 - `feed_priority.preferred_domains`: optional host-based boost list; subdomains match parent domains
 - `feed_priority.preferred_authors`: optional case-insensitive substring boosts over parsed feed author metadata
 - `feed_priority.preferred_categories`: optional case-insensitive substring boosts over parsed feed category/tag metadata
+- `feed_dedup.mode`: `auto`, `off`, `content_hash`, or `content_signature`; `auto` currently resolves to `content_signature`
+- `feed_dedup.signature_token_limit`: token cap used by `content_signature`; only the leading normalized content tokens contribute to the duplicate fingerprint so tiny tail updates can still collapse
+- `content_lifecycle.content_class`: `auto`, `long_term_knowledge`, or `short_term_news`; `auto` resolves from `source_type`
+- `content_lifecycle.update_mode`: `auto`, `append`, or `replace_latest`; `auto` resolves to `replace_latest` for short-term content and `append` otherwise
+- `content_lifecycle.ttl_days`: optional expiration horizon for active short-term documents; when positive, the scheduler tracks document expiry timestamps even if no newer version has arrived yet
+- `content_lifecycle.delete_expired`: when `true`, the scheduler attempts `rag.adelete_by_doc_id()` for expired short-term crawler documents; when `false`, expiry is tracked in state only
+- `content_lifecycle.event_cluster_mode`: `auto`, `off`, `heuristic`, or `heuristic_llm`; `auto` resolves to `heuristic_llm` only when the shared Utility LLM client is available, otherwise `heuristic`
+- `content_lifecycle.event_cluster_window_days`: maximum publish-time gap considered when matching a new article into an existing event cluster; older clusters are ignored as unrelated followups
+- `content_lifecycle.event_cluster_min_similarity`: minimum heuristic similarity required before a new article is merged into an existing event cluster without LLM adjudication
 
 ### 10.6 Persistence Configuration (PersistenceConfig)
 
@@ -783,15 +822,15 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 ### 11.3 Scheduler and Source APIs
 
 - `GET /agent/scheduler/status`
-  - Returns scheduler configured/enabled/running flags, persistence file paths, loop counters, and per-source status including resolved source type / schedule mode / feed priority mode, `consecutive_no_change`, `tracked_item_count`, and `effective_interval_seconds`
+  - Returns scheduler configured/enabled/running flags, persistence file paths, loop counters, and per-source status including resolved source type / schedule mode / feed priority mode / feed dedup mode / content class / update mode, `consecutive_no_change`, `tracked_item_count`, `active_doc_count`, `expired_doc_count`, and `effective_interval_seconds`
 - `GET /agent/sources`
-  - Returns all monitored sources, including `source_type`, `schedule_mode`, `feed_filter`, `feed_retention`, `feed_priority`, `resolved_source_type`, `resolved_schedule_mode`, and `resolved_feed_priority_mode`
+  - Returns all monitored sources, including `source_type`, `schedule_mode`, `feed_filter`, `feed_retention`, `feed_priority`, `feed_dedup`, `content_lifecycle`, `resolved_source_type`, `resolved_schedule_mode`, `resolved_feed_priority_mode`, `resolved_feed_dedup_mode`, `resolved_content_class`, and `resolved_update_mode`
 - `POST /agent/sources`
-  - Upserts a `MonitoredSource`; request payload accepts `source_type`, `schedule_mode`, `feed_filter`, `feed_retention`, and `feed_priority`
+  - Upserts a `MonitoredSource`; request payload accepts `source_type`, `schedule_mode`, `feed_filter`, `feed_retention`, `feed_priority`, `feed_dedup`, and `content_lifecycle`
 - `DELETE /agent/sources/{source_id}`
   - Removes a source and its state record
 - `POST /agent/sources/{source_id}/trigger`
-  - Immediately polls a source and returns crawl/ingest counts
+  - Immediately polls a source and returns crawl/ingest counts, including `feed_deduplicated_count`, `superseded_count`, `expired_doc_count`, and `deleted_doc_count` when short-term lifecycle handling is active
 
 ### 11.4 GET /health
 
@@ -833,6 +872,13 @@ python -m kg_agent.api.app
 # Default port 9721, configurable via KG_AGENT_PORT environment variable
 # Default host 0.0.0.0, configurable via KG_AGENT_HOST environment variable
 ```
+
+Key chain-level regression tests in this repo:
+
+- `tests/kg_agent/test_feed_scheduler_chain.py` covers `feed -> scheduler -> crawl_urls -> markdown -> rag.ainsert`
+- `tests/kg_agent/test_web_ingest_chain.py` covers `web_search -> kg_ingest -> rag.ainsert`
+- `tests/kg_agent/test_query_agent_answer_chain.py` covers `query -> AgentCore -> kg_hybrid_search -> LLM final answer`
+- `tests/kg_agent/test_crawl4ai.py` is a raw-HTML Crawl4AI smoke test; it reuses the adapter's browser-channel selection logic and skips when neither a Playwright runtime nor a system Chrome/Edge browser is available
 
 **Environment variable requirements:** `.env` file in the project root, containing at minimum:
 
@@ -928,9 +974,13 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 - **quant_backtest** placeholder not implemented; needs integration with quantitative engine
 - **Scheduler** now supports optional loop leader election plus source-level coordination, but it still does not implement scheduler sharding or a richer distributed control plane
 - **Source persistence** now supports `json` and `sqlite`, but there is still no Redis/Mongo/Postgres-backed scheduler registry/state implementation
-- **RSS / Feed source support** now includes auto-detected feed typing, `adaptive_feed` scheduling, entry filtering, RSS/Atom `published_at` extraction, author/category/domain-aware filtering, and both latest-item and age-based retention, but discovery/management is still URL-centric and does not yet provide richer feed semantics such as feed-native ranking, source credibility scoring, or full feed graph provenance
+- **RSS / Feed source support** now includes auto-detected feed typing, `adaptive_feed` scheduling, entry filtering, RSS/Atom `published_at` extraction, author/category/domain-aware filtering, canonical URL tracking, content-level dedup, short-term vs long-term crawler lifecycle classification, optional expiry deletion, workspace-global event-cluster candidate recall through `chunks_vdb`, batch article crawling via the shared crawler adapter, and both latest-item and age-based retention, but discovery/management is still URL-centric and does not yet provide richer feed semantics such as source credibility scoring or full feed graph provenance
+- **Update-aware provenance / delta ingest** is still only partially implemented; the scheduler now tracks active crawler document IDs and can supersede or delete short-term documents, but it still cannot persist version-aware provenance histories or ingest only semantic deltas
+- **Similar-news consolidation** now supports cross-source candidate recall inside the same workspace by querying `chunks_vdb` for active short-term event docs and then merging into the nearest existing cluster with heuristic scoring plus optional Utility-LLM adjudication for borderline cases, but it is still not a fully materialized global event graph and does not maintain long-lived multi-version provenance inside each cluster
+- **Crawler lifecycle retrieval filtering** now suppresses expired or superseded short-term crawler documents even when `content_lifecycle.delete_expired=false`, but the filtering path still depends on `chunk_id` / graph `source_id` being available and reverse-resolvable through `rag.text_chunks`; if lower-layer result metadata is missing or inconsistent, filtering falls back to best effort
+- **Removed-source tombstones** are a pragmatic fallback for backends that cannot delete by doc ID; they preserve retrieval suppression for short-term docs after source removal, but they are not a full archival/provenance model and are reset if the same `source_id` is later re-added
 - **Freshness decay** now has lower-layer support through `QueryParam.enable_freshness_decay` and `lightrag_fork/operate.py`, while retrieval-layer fallback remains for compatibility
 - **Playwright browser detection** uses Playwright sync API to verify the exact chromium executable exists; on version mismatch the adapter falls back to system Edge/Chrome via `browser_channel`
 - **CrossSessionStore** now supports an optional Mongo + Qdrant vector backend with heuristic compression and dedup, but it still falls back to conversation-memory token overlap when the vector backend is disabled or unavailable
 - Cross-session consolidation and background aging are heuristic only; they use vector similarity plus lightweight lexical guards and snippet packing, not LLM summarization or a full long-horizon memory graph
-- Path explanation scoring algorithm is based on simple token overlap; semantic similarity can be integrated later
+- Path explanation now uses lightweight semantic-expanded lexical scoring; embedding-based semantic reranking is still not integrated

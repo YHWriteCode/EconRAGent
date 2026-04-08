@@ -119,6 +119,21 @@ class FeedPriorityConfigModel(BaseModel):
     preferred_categories: list[str] = Field(default_factory=list)
 
 
+class FeedDedupConfigModel(BaseModel):
+    mode: str = "auto"
+    signature_token_limit: int = Field(default=120, ge=8)
+
+
+class ContentLifecycleConfigModel(BaseModel):
+    content_class: str = "auto"
+    update_mode: str = "auto"
+    ttl_days: float = Field(default=0.0, ge=0.0)
+    delete_expired: bool = False
+    event_cluster_mode: str = "auto"
+    event_cluster_window_days: float = Field(default=3.0, ge=0.0)
+    event_cluster_min_similarity: float = Field(default=0.72, ge=0.0, le=1.0)
+
+
 class SourceRequest(BaseModel):
     source_id: str | None = None
     name: str = Field(min_length=1)
@@ -136,6 +151,12 @@ class SourceRequest(BaseModel):
     )
     feed_priority: FeedPriorityConfigModel = Field(
         default_factory=FeedPriorityConfigModel
+    )
+    feed_dedup: FeedDedupConfigModel = Field(
+        default_factory=FeedDedupConfigModel
+    )
+    content_lifecycle: ContentLifecycleConfigModel = Field(
+        default_factory=ContentLifecycleConfigModel
     )
 
     @field_validator("name", mode="after")
@@ -174,14 +195,26 @@ class SchedulerSourceStatus(BaseModel):
     feed_priority: FeedPriorityConfigModel = Field(
         default_factory=FeedPriorityConfigModel
     )
+    feed_dedup: FeedDedupConfigModel = Field(
+        default_factory=FeedDedupConfigModel
+    )
+    content_lifecycle: ContentLifecycleConfigModel = Field(
+        default_factory=ContentLifecycleConfigModel
+    )
     resolved_source_type: str
     resolved_schedule_mode: str
     resolved_feed_priority_mode: str
+    resolved_feed_dedup_mode: str
+    resolved_content_class: str
+    resolved_update_mode: str
+    resolved_event_cluster_mode: str
     last_crawled_at: str | None = None
     last_status: str
     consecutive_failures: int = 0
     consecutive_no_change: int = 0
     tracked_item_count: int = 0
+    active_doc_count: int = 0
+    expired_doc_count: int = 0
     total_ingested_count: int = 0
     last_error: str | None = None
     effective_interval_seconds: int
@@ -225,9 +258,19 @@ class SourceResponse(BaseModel):
     feed_priority: FeedPriorityConfigModel = Field(
         default_factory=FeedPriorityConfigModel
     )
+    feed_dedup: FeedDedupConfigModel = Field(
+        default_factory=FeedDedupConfigModel
+    )
+    content_lifecycle: ContentLifecycleConfigModel = Field(
+        default_factory=ContentLifecycleConfigModel
+    )
     resolved_source_type: str
     resolved_schedule_mode: str
     resolved_feed_priority_mode: str
+    resolved_feed_dedup_mode: str
+    resolved_content_class: str
+    resolved_update_mode: str
+    resolved_event_cluster_mode: str
 
 
 class SourceMutationResponse(BaseModel):
@@ -243,6 +286,10 @@ class SchedulerTriggerResponse(BaseModel):
     ingested_count: int | None = None
     feed_discovered_count: int | None = None
     feed_filtered_count: int | None = None
+    feed_deduplicated_count: int | None = None
+    superseded_count: int | None = None
+    expired_doc_count: int | None = None
+    deleted_doc_count: int | None = None
     tracked_item_count: int | None = None
     summary: str = ""
 
@@ -351,7 +398,13 @@ def create_agent_routes(agent_core, scheduler=None):
         if scheduler is None:
             raise HTTPException(status_code=503, detail="Scheduler is not configured")
         sources = await scheduler.list_sources()
-        return {"sources": [source.to_public_dict() for source in sources]}
+        utility_available = scheduler.utility_llm_available()
+        return {
+            "sources": [
+                source.to_public_dict(utility_available=utility_available)
+                for source in sources
+            ]
+        }
 
     @router.post("/agent/sources", response_model=SourceResponse)
     async def add_source(request: SourceRequest):
@@ -372,11 +425,15 @@ def create_agent_routes(agent_core, scheduler=None):
                 feed_filter=request.feed_filter.model_dump(),
                 feed_retention=request.feed_retention.model_dump(),
                 feed_priority=request.feed_priority.model_dump(),
+                feed_dedup=request.feed_dedup.model_dump(),
+                content_lifecycle=request.content_lifecycle.model_dump(),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         stored = await scheduler.add_source(source)
-        return stored.to_public_dict()
+        return stored.to_public_dict(
+            utility_available=scheduler.utility_llm_available()
+        )
 
     @router.delete("/agent/sources/{source_id}", response_model=SourceMutationResponse)
     async def delete_source(source_id: str):

@@ -646,9 +646,11 @@ def create_app(
             check_interval_seconds=config_obj.scheduler.check_interval_seconds,
             coordinator=build_scheduler_coordinator(config_obj.scheduler),
             coordination_ttl_seconds=config_obj.scheduler.coordination_ttl_seconds,
+            utility_llm_client=getattr(agent_core, "utility_llm_client", None),
             enable_leader_election=config_obj.scheduler.enable_leader_election,
             loop_lease_key=config_obj.scheduler.loop_lease_key,
         )
+        agent_core.crawl_state_store = scheduler.state_store
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

@@ -10,12 +10,64 @@ from pathlib import Path
 
 
 @dataclass
+class EventClusterRecord:
+    cluster_id: str
+    headline: str = ""
+    signature_text: str = ""
+    content_fingerprint: str = ""
+    published_at: str | None = None
+    updated_at: str | None = None
+    representative_item_key: str | None = None
+    active_doc_id: str | None = None
+    member_item_keys: list[str] = field(default_factory=list)
+    last_similarity: float = 0.0
+    adjudicated_by_llm: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(
+        cls,
+        cluster_id: str,
+        payload: dict[str, object] | None,
+    ) -> "EventClusterRecord":
+        data = payload if isinstance(payload, dict) else {}
+        raw_member_item_keys = (
+            data.get("member_item_keys")
+            if isinstance(data.get("member_item_keys"), list)
+            else []
+        )
+        return cls(
+            cluster_id=str(cluster_id or "").strip(),
+            headline=str(data.get("headline") or "").strip(),
+            signature_text=str(data.get("signature_text") or "").strip(),
+            content_fingerprint=str(data.get("content_fingerprint") or "").strip(),
+            published_at=str(data.get("published_at") or "").strip() or None,
+            updated_at=str(data.get("updated_at") or "").strip() or None,
+            representative_item_key=str(data.get("representative_item_key") or "").strip()
+            or None,
+            active_doc_id=str(data.get("active_doc_id") or "").strip() or None,
+            member_item_keys=[
+                str(item).strip() for item in raw_member_item_keys if str(item).strip()
+            ],
+            last_similarity=max(0.0, float(data.get("last_similarity") or 0.0)),
+            adjudicated_by_llm=bool(data.get("adjudicated_by_llm", False)),
+        )
+
+
+@dataclass
 class CrawlStateRecord:
     source_id: str
     last_crawled_at: str | None = None
     last_content_hashes: dict[str, str] = field(default_factory=dict)
     recent_item_keys: list[str] = field(default_factory=list)
     item_published_at: dict[str, str] = field(default_factory=dict)
+    item_content_fingerprints: dict[str, str] = field(default_factory=dict)
+    item_active_doc_ids: dict[str, str] = field(default_factory=dict)
+    item_event_cluster_ids: dict[str, str] = field(default_factory=dict)
+    event_clusters: dict[str, EventClusterRecord] = field(default_factory=dict)
+    doc_expires_at: dict[str, str] = field(default_factory=dict)
     last_status: str = "never_run"
     consecutive_failures: int = 0
     consecutive_no_change: int = 0
@@ -35,6 +87,26 @@ class CrawlStateRecord:
         item_published_at = (
             raw_item_published_at if isinstance(raw_item_published_at, dict) else {}
         )
+        raw_item_content_fingerprints = payload.get("item_content_fingerprints")
+        item_content_fingerprints = (
+            raw_item_content_fingerprints
+            if isinstance(raw_item_content_fingerprints, dict)
+            else {}
+        )
+        raw_item_active_doc_ids = payload.get("item_active_doc_ids")
+        item_active_doc_ids = (
+            raw_item_active_doc_ids if isinstance(raw_item_active_doc_ids, dict) else {}
+        )
+        raw_item_event_cluster_ids = payload.get("item_event_cluster_ids")
+        item_event_cluster_ids = (
+            raw_item_event_cluster_ids
+            if isinstance(raw_item_event_cluster_ids, dict)
+            else {}
+        )
+        raw_event_clusters = payload.get("event_clusters")
+        event_clusters = raw_event_clusters if isinstance(raw_event_clusters, dict) else {}
+        raw_doc_expires_at = payload.get("doc_expires_at")
+        doc_expires_at = raw_doc_expires_at if isinstance(raw_doc_expires_at, dict) else {}
         return cls(
             source_id=str(payload.get("source_id") or ""),
             last_crawled_at=str(payload.get("last_crawled_at") or "").strip() or None,
@@ -51,6 +123,31 @@ class CrawlStateRecord:
             item_published_at={
                 str(key): str(value).strip()
                 for key, value in item_published_at.items()
+                if key is not None and str(value).strip()
+            },
+            item_content_fingerprints={
+                str(key): str(value).strip()
+                for key, value in item_content_fingerprints.items()
+                if key is not None and str(value).strip()
+            },
+            item_active_doc_ids={
+                str(key): str(value).strip()
+                for key, value in item_active_doc_ids.items()
+                if key is not None and str(value).strip()
+            },
+            item_event_cluster_ids={
+                str(key): str(value).strip()
+                for key, value in item_event_cluster_ids.items()
+                if key is not None and str(value).strip()
+            },
+            event_clusters={
+                cluster_key: EventClusterRecord.from_dict(cluster_key, cluster_payload)
+                for cluster_key, cluster_payload in event_clusters.items()
+                if str(cluster_key).strip()
+            },
+            doc_expires_at={
+                str(key): str(value).strip()
+                for key, value in doc_expires_at.items()
                 if key is not None and str(value).strip()
             },
             last_status=str(payload.get("last_status") or "never_run"),
@@ -240,6 +337,11 @@ class SqliteCrawlStateStore(CrawlStateStore):
                     last_content_hashes_json TEXT NOT NULL,
                     recent_item_keys_json TEXT NOT NULL DEFAULT '[]',
                     item_published_at_json TEXT NOT NULL DEFAULT '{}',
+                    item_content_fingerprints_json TEXT NOT NULL DEFAULT '{}',
+                    item_active_doc_ids_json TEXT NOT NULL DEFAULT '{}',
+                    item_event_cluster_ids_json TEXT NOT NULL DEFAULT '{}',
+                    event_clusters_json TEXT NOT NULL DEFAULT '{}',
+                    doc_expires_at_json TEXT NOT NULL DEFAULT '{}',
                     last_status TEXT NOT NULL,
                     consecutive_failures INTEGER NOT NULL,
                     consecutive_no_change INTEGER NOT NULL DEFAULT 0,
@@ -269,6 +371,26 @@ class SqliteCrawlStateStore(CrawlStateStore):
             conn.execute(
                 "ALTER TABLE crawl_state_records ADD COLUMN item_published_at_json TEXT NOT NULL DEFAULT '{}'"
             )
+        if "item_content_fingerprints_json" not in columns:
+            conn.execute(
+                "ALTER TABLE crawl_state_records ADD COLUMN item_content_fingerprints_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "item_active_doc_ids_json" not in columns:
+            conn.execute(
+                "ALTER TABLE crawl_state_records ADD COLUMN item_active_doc_ids_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "item_event_cluster_ids_json" not in columns:
+            conn.execute(
+                "ALTER TABLE crawl_state_records ADD COLUMN item_event_cluster_ids_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "event_clusters_json" not in columns:
+            conn.execute(
+                "ALTER TABLE crawl_state_records ADD COLUMN event_clusters_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "doc_expires_at_json" not in columns:
+            conn.execute(
+                "ALTER TABLE crawl_state_records ADD COLUMN doc_expires_at_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def _list_records_sync(self) -> list[CrawlStateRecord]:
         with self._connect() as conn:
@@ -276,6 +398,9 @@ class SqliteCrawlStateStore(CrawlStateStore):
                 """
                 SELECT source_id, last_crawled_at, last_content_hashes_json,
                        recent_item_keys_json, item_published_at_json,
+                       item_content_fingerprints_json,
+                       item_active_doc_ids_json, item_event_cluster_ids_json,
+                       event_clusters_json, doc_expires_at_json,
                        last_status, consecutive_failures,
                        consecutive_no_change,
                        total_ingested_count, last_error
@@ -291,6 +416,9 @@ class SqliteCrawlStateStore(CrawlStateStore):
                 """
                 SELECT source_id, last_crawled_at, last_content_hashes_json,
                        recent_item_keys_json, item_published_at_json,
+                       item_content_fingerprints_json,
+                       item_active_doc_ids_json, item_event_cluster_ids_json,
+                       event_clusters_json, doc_expires_at_json,
                        last_status, consecutive_failures,
                        consecutive_no_change,
                        total_ingested_count, last_error
@@ -308,14 +436,22 @@ class SqliteCrawlStateStore(CrawlStateStore):
                 INSERT INTO crawl_state_records (
                     source_id, last_crawled_at, last_content_hashes_json,
                     recent_item_keys_json, item_published_at_json,
+                    item_content_fingerprints_json,
+                    item_active_doc_ids_json, item_event_cluster_ids_json,
+                    event_clusters_json, doc_expires_at_json,
                     last_status, consecutive_failures,
                     consecutive_no_change, total_ingested_count, last_error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
                     last_crawled_at = excluded.last_crawled_at,
                     last_content_hashes_json = excluded.last_content_hashes_json,
                     recent_item_keys_json = excluded.recent_item_keys_json,
                     item_published_at_json = excluded.item_published_at_json,
+                    item_content_fingerprints_json = excluded.item_content_fingerprints_json,
+                    item_active_doc_ids_json = excluded.item_active_doc_ids_json,
+                    item_event_cluster_ids_json = excluded.item_event_cluster_ids_json,
+                    event_clusters_json = excluded.event_clusters_json,
+                    doc_expires_at_json = excluded.doc_expires_at_json,
                     last_status = excluded.last_status,
                     consecutive_failures = excluded.consecutive_failures,
                     consecutive_no_change = excluded.consecutive_no_change,
@@ -328,6 +464,17 @@ class SqliteCrawlStateStore(CrawlStateStore):
                     json.dumps(record.last_content_hashes, ensure_ascii=False),
                     json.dumps(record.recent_item_keys, ensure_ascii=False),
                     json.dumps(record.item_published_at, ensure_ascii=False),
+                    json.dumps(record.item_content_fingerprints, ensure_ascii=False),
+                    json.dumps(record.item_active_doc_ids, ensure_ascii=False),
+                    json.dumps(record.item_event_cluster_ids, ensure_ascii=False),
+                    json.dumps(
+                        {
+                            key: value.to_dict()
+                            for key, value in record.event_clusters.items()
+                        },
+                        ensure_ascii=False,
+                    ),
+                    json.dumps(record.doc_expires_at, ensure_ascii=False),
                     record.last_status,
                     record.consecutive_failures,
                     record.consecutive_no_change,
@@ -353,6 +500,11 @@ class SqliteCrawlStateStore(CrawlStateStore):
         last_content_hashes_json: str,
         recent_item_keys_json: str,
         item_published_at_json: str,
+        item_content_fingerprints_json: str,
+        item_active_doc_ids_json: str,
+        item_event_cluster_ids_json: str,
+        event_clusters_json: str,
+        doc_expires_at_json: str,
         last_status: str,
         consecutive_failures: int,
         consecutive_no_change: int,
@@ -377,6 +529,38 @@ class SqliteCrawlStateStore(CrawlStateStore):
             item_published_at = {}
         if not isinstance(item_published_at, dict):
             item_published_at = {}
+        try:
+            item_content_fingerprints = json.loads(
+                item_content_fingerprints_json or "{}"
+            )
+        except json.JSONDecodeError:
+            item_content_fingerprints = {}
+        if not isinstance(item_content_fingerprints, dict):
+            item_content_fingerprints = {}
+        try:
+            item_active_doc_ids = json.loads(item_active_doc_ids_json or "{}")
+        except json.JSONDecodeError:
+            item_active_doc_ids = {}
+        if not isinstance(item_active_doc_ids, dict):
+            item_active_doc_ids = {}
+        try:
+            item_event_cluster_ids = json.loads(item_event_cluster_ids_json or "{}")
+        except json.JSONDecodeError:
+            item_event_cluster_ids = {}
+        if not isinstance(item_event_cluster_ids, dict):
+            item_event_cluster_ids = {}
+        try:
+            event_clusters = json.loads(event_clusters_json or "{}")
+        except json.JSONDecodeError:
+            event_clusters = {}
+        if not isinstance(event_clusters, dict):
+            event_clusters = {}
+        try:
+            doc_expires_at = json.loads(doc_expires_at_json or "{}")
+        except json.JSONDecodeError:
+            doc_expires_at = {}
+        if not isinstance(doc_expires_at, dict):
+            doc_expires_at = {}
         return CrawlStateRecord(
             source_id=source_id,
             last_crawled_at=(last_crawled_at or "").strip() or None,
@@ -393,6 +577,31 @@ class SqliteCrawlStateStore(CrawlStateStore):
             item_published_at={
                 str(key): str(value).strip()
                 for key, value in item_published_at.items()
+                if key is not None and str(value).strip()
+            },
+            item_content_fingerprints={
+                str(key): str(value).strip()
+                for key, value in item_content_fingerprints.items()
+                if key is not None and str(value).strip()
+            },
+            item_active_doc_ids={
+                str(key): str(value).strip()
+                for key, value in item_active_doc_ids.items()
+                if key is not None and str(value).strip()
+            },
+            item_event_cluster_ids={
+                str(key): str(value).strip()
+                for key, value in item_event_cluster_ids.items()
+                if key is not None and str(value).strip()
+            },
+            event_clusters={
+                cluster_key: EventClusterRecord.from_dict(cluster_key, cluster_payload)
+                for cluster_key, cluster_payload in event_clusters.items()
+                if str(cluster_key).strip()
+            },
+            doc_expires_at={
+                str(key): str(value).strip()
+                for key, value in doc_expires_at.items()
                 if key is not None and str(value).strip()
             },
             last_status=last_status,

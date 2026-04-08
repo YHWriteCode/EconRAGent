@@ -65,6 +65,12 @@ class DomainSchema:
         }
 
 
+def _normalize_schema_match_key(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return "".join(char for char in value.strip().lower() if char.isalnum())
+
+
 def _coerce_entity_type(item: Any) -> EntityTypeDefinition:
     if isinstance(item, EntityTypeDefinition):
         return item
@@ -123,6 +129,114 @@ def _merge_aliases(
     if override_aliases:
         merged.update(override_aliases)
     return merged
+
+
+def _definition_lookup_map(
+    definitions: Iterable[Mapping[str, Any]],
+    aliases: Mapping[str, str | list[str]] | None = None,
+) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    canonical_names: set[str] = set()
+
+    for item in definitions:
+        canonical_name = str(item.get("name") or "").strip()
+        if not canonical_name:
+            continue
+        canonical_names.add(canonical_name)
+        for candidate in (
+            canonical_name,
+            str(item.get("display_name") or "").strip(),
+            *[
+                str(alias).strip()
+                for alias in item.get("aliases", [])
+                if str(alias).strip()
+            ],
+        ):
+            key = _normalize_schema_match_key(candidate)
+            if key:
+                lookup[key] = canonical_name
+
+    for alias_key, alias_value in (aliases or {}).items():
+        normalized_key = _normalize_schema_match_key(alias_key)
+        if not normalized_key:
+            continue
+
+        if isinstance(alias_value, str):
+            canonical_name = alias_value.strip()
+            if canonical_name in canonical_names:
+                lookup[normalized_key] = canonical_name
+                continue
+            if alias_key in canonical_names and canonical_name:
+                lookup[_normalize_schema_match_key(canonical_name)] = alias_key
+        elif isinstance(alias_value, list) and alias_key in canonical_names:
+            canonical_name = alias_key
+            for candidate in alias_value:
+                candidate_key = _normalize_schema_match_key(candidate)
+                if candidate_key:
+                    lookup[candidate_key] = canonical_name
+
+    return lookup
+
+
+def _runtime_entity_type_lookup(domain_schema: Mapping[str, Any] | None) -> dict[str, str]:
+    if not isinstance(domain_schema, Mapping):
+        return {}
+    return _definition_lookup_map(
+        definitions=domain_schema.get("entity_types", []),
+        aliases=domain_schema.get("aliases"),
+    )
+
+
+def _runtime_relation_type_lookup(
+    domain_schema: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    if not isinstance(domain_schema, Mapping):
+        return {}
+    return _definition_lookup_map(
+        definitions=domain_schema.get("relation_types", []),
+        aliases=None,
+    )
+
+
+def normalize_extracted_entity_type(
+    entity_type: str,
+    domain_schema: Mapping[str, Any] | None,
+) -> str:
+    if not isinstance(entity_type, str):
+        return entity_type
+    if not isinstance(domain_schema, Mapping) or not domain_schema.get("enabled"):
+        return entity_type
+
+    lookup = _runtime_entity_type_lookup(domain_schema)
+    normalized = lookup.get(_normalize_schema_match_key(entity_type))
+    return normalized or entity_type
+
+
+def normalize_extracted_relation_keywords(
+    keywords: str,
+    domain_schema: Mapping[str, Any] | None,
+) -> str:
+    if not isinstance(keywords, str):
+        return keywords
+    if not isinstance(domain_schema, Mapping) or not domain_schema.get("enabled"):
+        return keywords
+
+    lookup = _runtime_relation_type_lookup(domain_schema)
+    normalized_tokens: list[str] = []
+    seen: set[str] = set()
+    raw_tokens = keywords.replace("，", ",").replace("；", ",").split(",")
+
+    for token in raw_tokens:
+        cleaned = token.strip()
+        if not cleaned:
+            continue
+        canonical = lookup.get(_normalize_schema_match_key(cleaned), cleaned)
+        if canonical in seen:
+            continue
+        normalized_tokens.append(canonical)
+        seen.add(canonical)
+
+    return ",".join(normalized_tokens)
 
 
 def get_builtin_schema_registry() -> dict[str, DomainSchema]:

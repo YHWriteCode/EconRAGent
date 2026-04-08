@@ -14,6 +14,7 @@ from kg_agent.agent.prompts import build_final_answer_prompt
 from kg_agent.agent.route_judge import RouteDecision, RouteJudge
 from kg_agent.agent.tool_registry import ToolRegistry
 from kg_agent.config import AgentLLMClient, FallbackLLMClient, KGAgentConfig
+from kg_agent.crawler.crawl_state_store import CrawlStateStore
 from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.memory.cross_session_store import CrossSessionStore
@@ -115,6 +116,7 @@ class AgentCore:
         route_judge: RouteJudge | None = None,
         path_explainer: PathExplainer | None = None,
         crawler_adapter: Crawl4AIAdapter | None = None,
+        crawl_state_store: CrawlStateStore | None = None,
         conversation_memory: ConversationMemoryStore | None = None,
         cross_session_store: CrossSessionStore | None = None,
         user_profile_store: UserProfileStore | None = None,
@@ -151,6 +153,7 @@ class AgentCore:
             llm_client=self.utility_llm_client
         )
         self.crawler_adapter = crawler_adapter
+        self.crawl_state_store = crawl_state_store
 
     async def preview_route(
         self,
@@ -1112,6 +1115,7 @@ class AgentCore:
             "memory_store": self.conversation_memory,
             "cross_session_store": self.cross_session_store,
             "crawler_adapter": self.crawler_adapter,
+            "crawl_state_store": self.crawl_state_store,
             "freshness_config": self.config.freshness,
         }
 

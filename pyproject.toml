@@ -79,6 +79,7 @@ api = [
     "httpx>=0.28.1",
     "jiter",
     "crawl4ai>=0.7.0,<0.9.0",
+    "chardet>=5.2.0,<6.0.0",
     "bcrypt>=4.0.0",
     "psutil",
     "PyJWT>=2.8.0,<3.0.0",

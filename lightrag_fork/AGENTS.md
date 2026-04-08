@@ -192,6 +192,7 @@ LockBackend (abstract)
 - Configured via `addon_params["domain_schema"]` entry point
 - `schema.py` handles normalization: external input → `DomainSchema` dataclass → runtime dict
 - `operate.py::extract_entities()` appends domain constraint block at the end of the prompt
+- `schema.py` also provides post-parse canonicalization helpers so extracted entity types and relation keywords can be normalized back onto schema-defined canonical names when the schema is enabled
 - Does not modify `prompt.py` static templates
 
 **Schema parameter passing chain (explicit, no global variables):**
@@ -266,7 +267,8 @@ User calls LightRAG.ainsert(documents)
   → operate.py: chunking_by_token_size()      # Text chunking
   → operate.py: extract_entities()             # LLM entity/relation extraction
       ├─ prompt.py: static prompt templates
-      └─ operate.py: _build_domain_schema_prompt_appendix()  # Optional schema append
+      ├─ operate.py: _build_domain_schema_prompt_appendix()  # Optional schema append
+      └─ schema.py: post-parse type/keyword canonicalization  # Optional schema normalization
   → operate.py: merge_nodes_and_edges()        # Graph merging (with keyed lock + temporal metadata updates)
   → kg/*_impl: write to Graph / Vector / KV / DocStatus
 ```
@@ -361,7 +363,7 @@ Before modifying code under `lightrag_fork/`, verify the following:
 | Add storage backend | Create `xxx_impl.py` under `kg/`, register in `kg/__init__.py` |
 | Add LLM adapter | Create new file under `llm/` |
 | Add domain schema | Create profile file under `schemas/`, export in `schemas/__init__.py` |
-| Modify extraction behavior | Prefer schema injection; avoid directly modifying `operate.py` main flow |
+| Modify extraction behavior | Prefer schema injection and schema-based post-parse normalization; avoid directly rewriting `operate.py` main flow |
 | Change entity/relation summary model selection | Prefer wiring `utility_llm_model_func` / `utility_llm_model_name` over hardcoding another summary path |
 | Modify query behavior | Handle by mode branch in `kg_query()` in `operate.py` |
 | Extend dynamic-graph freshness ranking | Prefer changes in `operate.py` ranking paths over inventing fake scores in upper layers |
@@ -398,7 +400,7 @@ Before modifying code under `lightrag_fork/`, verify the following:
 
 ## 10. Known Limitations and TODOs
 
-- **Schema only affects the extraction prompt guidance layer**; not yet integrated into graph storage structure, retrieval ranking, or query understanding
+- **Schema now affects prompt guidance plus post-parse canonicalization of extracted entity types / relation keywords**, but it is still not integrated into graph storage structure, retrieval ranking, or query understanding
 - **Relation type constraints are weak**; guided only via prompts, no post-processing normalization
 - **Redis distributed locks** still have window risks during master-slave failover/network partition scenarios
 - **`fallback_local`** is only suitable for development degradation; does not provide strong consistency

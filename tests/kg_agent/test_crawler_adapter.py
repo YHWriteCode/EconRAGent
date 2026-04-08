@@ -1,4 +1,5 @@
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +47,80 @@ def test_crawler_adapter_falls_back_to_edge_with_warning(monkeypatch, caplog):
 
     assert channel == "msedge"
     assert "Playwright browser runtime is unavailable" in caplog.text
+
+
+def test_crawler_adapter_builds_llm_extraction_strategy(monkeypatch):
+    captured = {}
+
+    class _FakeLLMConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeLLMExtractionStrategy:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeCrawlerRunConfig:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_crawl4ai = SimpleNamespace(
+        CacheMode=SimpleNamespace(BYPASS="BYPASS"),
+        LLMConfig=_FakeLLMConfig,
+        LLMExtractionStrategy=_FakeLLMExtractionStrategy,
+        CrawlerRunConfig=_FakeCrawlerRunConfig,
+    )
+    adapter = Crawl4AIAdapter(
+        config=CrawlerConfig(
+            llm_extraction_enabled=True,
+            llm_extraction_provider="openai/test-model",
+            llm_extraction_api_token="test-token",
+            llm_extraction_base_url="https://example.com/v1",
+            llm_extraction_instruction="Extract the key facts",
+            llm_extraction_input_format="markdown",
+            llm_extraction_type="block",
+            llm_extraction_force_json_response=True,
+            llm_extraction_apply_chunking=False,
+        )
+    )
+
+    monkeypatch.setattr(adapter, "_import_crawl4ai", lambda: fake_crawl4ai)
+
+    adapter._build_run_config()
+
+    strategy = captured["extraction_strategy"]
+    assert strategy.kwargs["instruction"] == "Extract the key facts"
+    assert strategy.kwargs["input_format"] == "markdown"
+    assert strategy.kwargs["extraction_type"] == "block"
+    assert strategy.kwargs["force_json_response"] is True
+    assert strategy.kwargs["apply_chunking"] is False
+    assert strategy.kwargs["llm_config"].kwargs == {
+        "provider": "openai/test-model",
+        "api_token": "test-token",
+        "base_url": "https://example.com/v1",
+    }
+
+
+def test_crawler_adapter_prefers_llm_extracted_content_when_configured():
+    page = Crawl4AIAdapter._normalize_result(
+        url="https://example.com/a",
+        result=SimpleNamespace(
+            success=True,
+            metadata={},
+            title="Example",
+            markdown="Original markdown body",
+            extracted_content='[{"title":"Structured title","content":"Structured summary"}]',
+            links=[],
+            redirected_url="https://example.com/a",
+        ),
+        max_content_chars=4000,
+        prefer_extracted_content=True,
+    )
+
+    assert page.success is True
+    assert page.markdown == "Structured title\n\nStructured summary"
+    assert page.metadata["content_source"] == "crawl4ai_llm_extraction"
+    assert page.metadata["llm_extraction_applied"] is True
 
 
 def test_extract_search_results_from_duckduckgo_markdown():

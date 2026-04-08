@@ -51,6 +51,10 @@ from lightrag_fork.base import (
     QueryContextResult,
 )
 from lightrag_fork.prompt import PROMPTS
+from lightrag_fork.schema import (
+    normalize_extracted_entity_type,
+    normalize_extracted_relation_keywords,
+)
 from lightrag_fork.constants import (
     GRAPH_FIELD_SEP,
     DEFAULT_MAX_ENTITY_TOKENS,
@@ -798,6 +802,7 @@ async def rebuild_knowledge_from_chunks(
                     chunk_id=chunk_id,
                     extraction_result=result[0],
                     timestamp=result[1],
+                    domain_schema=global_config["addon_params"].get("domain_schema"),
                 )
 
                 # Merge entities and relationships from this extraction result
@@ -1097,6 +1102,7 @@ async def _process_extraction_result(
     file_path: str = "unknown_source",
     tuple_delimiter: str = "<|#|>",
     completion_delimiter: str = "<|COMPLETE|>",
+    domain_schema: dict[str, Any] | None = None,
 ) -> tuple[dict, dict]:
     """Process a single extraction result (either initial or gleaning)
     Args:
@@ -1181,6 +1187,10 @@ async def _process_extraction_result(
             record_attributes, chunk_key, timestamp, file_path
         )
         if entity_data is not None:
+            entity_data["entity_type"] = normalize_extracted_entity_type(
+                entity_data["entity_type"],
+                domain_schema,
+            )
             truncated_name = _truncate_entity_identifier(
                 entity_data["entity_name"],
                 DEFAULT_ENTITY_NAME_MAX_LENGTH,
@@ -1196,6 +1206,10 @@ async def _process_extraction_result(
             record_attributes, chunk_key, timestamp, file_path
         )
         if relationship_data is not None:
+            relationship_data["keywords"] = normalize_extracted_relation_keywords(
+                relationship_data.get("keywords", ""),
+                domain_schema,
+            )
             truncated_source = _truncate_entity_identifier(
                 relationship_data["src_id"],
                 DEFAULT_ENTITY_NAME_MAX_LENGTH,
@@ -1220,6 +1234,7 @@ async def _rebuild_from_extraction_result(
     extraction_result: str,
     chunk_id: str,
     timestamp: int,
+    domain_schema: dict[str, Any] | None = None,
 ) -> tuple[dict, dict]:
     """Parse cached extraction result using the same logic as extract_entities
 
@@ -1248,6 +1263,7 @@ async def _rebuild_from_extraction_result(
         file_path,
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
+        domain_schema=domain_schema,
     )
 
 
@@ -1787,6 +1803,7 @@ async def _merge_nodes_then_upsert(
     entity_chunks_storage: BaseKVStorage | None = None,
 ):
     """Get existing nodes from knowledge graph use name,if exists, merge data, else create, then upsert."""
+    domain_schema = global_config["addon_params"].get("domain_schema")
     already_entity_types = []
     already_source_ids = []
     already_description = []
@@ -1816,6 +1833,10 @@ async def _merge_nodes_then_upsert(
             logger.warning(
                 f"Entity type read from DB contains comma, taking first non-empty token: '{original}' -> '{existing_entity_type}'"
             )
+        existing_entity_type = normalize_extracted_entity_type(
+            existing_entity_type,
+            domain_schema,
+        )
         already_entity_types.append(existing_entity_type)
 
         existing_source_id = already_node.get("source_id") or ""
@@ -2112,6 +2133,7 @@ async def _merge_edges_then_upsert(
     if src_id == tgt_id:
         return None
 
+    domain_schema = global_config["addon_params"].get("domain_schema")
     already_edge = None
     already_weights = []
     already_source_ids = []
@@ -2248,12 +2270,20 @@ async def _merge_edges_then_upsert(
     # Process already_keywords (which are comma-separated)
     for keyword_str in already_keywords:
         if keyword_str:  # Skip empty strings
-            all_keywords.update(k.strip() for k in keyword_str.split(",") if k.strip())
+            normalized = normalize_extracted_relation_keywords(
+                keyword_str,
+                domain_schema,
+            )
+            all_keywords.update(k.strip() for k in normalized.split(",") if k.strip())
     # Process new keywords from edges_data
     for edge in edges_data:
         if edge.get("keywords"):
+            normalized = normalize_extracted_relation_keywords(
+                edge["keywords"],
+                domain_schema,
+            )
             all_keywords.update(
-                k.strip() for k in edge["keywords"].split(",") if k.strip()
+                k.strip() for k in normalized.split(",") if k.strip()
             )
     # Join all unique keywords with commas
     keywords = ",".join(sorted(all_keywords))
@@ -3126,6 +3156,7 @@ async def extract_entities(
             file_path,
             tuple_delimiter=context_base["tuple_delimiter"],
             completion_delimiter=context_base["completion_delimiter"],
+            domain_schema=domain_schema,
         )
 
         # Process additional gleaning results only 1 time when entity_extract_max_gleaning is greater than zero.
@@ -3169,6 +3200,7 @@ async def extract_entities(
                     file_path,
                     tuple_delimiter=context_base["tuple_delimiter"],
                     completion_delimiter=context_base["completion_delimiter"],
+                    domain_schema=domain_schema,
                 )
 
                 # Merge results - compare description lengths to choose better version

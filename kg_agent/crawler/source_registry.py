@@ -15,6 +15,10 @@ SOURCE_TYPES = {"auto", "page", "feed"}
 SCHEDULE_MODES = {"auto", "fixed", "adaptive_feed"}
 FEED_RETENTION_MODES = {"keep_all", "latest"}
 FEED_PRIORITY_MODES = {"auto", "feed_order", "published_desc", "priority_score"}
+FEED_DEDUP_MODES = {"auto", "off", "content_hash", "content_signature"}
+CONTENT_CLASSES = {"auto", "long_term_knowledge", "short_term_news"}
+CONTENT_UPDATE_MODES = {"auto", "append", "replace_latest"}
+CONTENT_EVENT_CLUSTER_MODES = {"auto", "off", "heuristic", "heuristic_llm"}
 
 
 def _normalize_urls(urls: list[str]) -> list[str]:
@@ -284,6 +288,143 @@ class FeedPriorityPolicy:
 
 
 @dataclass
+class FeedDedupPolicy:
+    mode: str = "auto"
+    signature_token_limit: int = 120
+
+    def __post_init__(self) -> None:
+        self.mode = (self.mode or "auto").strip().lower() or "auto"
+        self.signature_token_limit = max(8, int(self.signature_token_limit or 120))
+        if self.mode not in FEED_DEDUP_MODES:
+            raise ValueError(
+                f"Unsupported feed dedup mode '{self.mode}'. Expected one of: {sorted(FEED_DEDUP_MODES)}"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object] | None) -> "FeedDedupPolicy":
+        if not isinstance(payload, dict):
+            return cls()
+        return cls(
+            mode=str(payload.get("mode") or "auto"),
+            signature_token_limit=int(payload.get("signature_token_limit") or 120),
+        )
+
+    def resolved_mode(self) -> str:
+        if self.mode != "auto":
+            return self.mode
+        return "content_signature"
+
+    def is_active(self) -> bool:
+        return self.resolved_mode() != "off"
+
+
+@dataclass
+class ContentLifecyclePolicy:
+    content_class: str = "auto"
+    update_mode: str = "auto"
+    ttl_days: float = 0.0
+    delete_expired: bool = False
+    event_cluster_mode: str = "auto"
+    event_cluster_window_days: float = 3.0
+    event_cluster_min_similarity: float = 0.72
+
+    def __post_init__(self) -> None:
+        self.content_class = (
+            (self.content_class or "auto").strip().lower() or "auto"
+        )
+        self.update_mode = (self.update_mode or "auto").strip().lower() or "auto"
+        self.ttl_days = max(0.0, float(self.ttl_days or 0.0))
+        self.delete_expired = bool(self.delete_expired)
+        self.event_cluster_mode = (
+            (self.event_cluster_mode or "auto").strip().lower() or "auto"
+        )
+        self.event_cluster_window_days = max(
+            0.0, float(self.event_cluster_window_days or 0.0)
+        )
+        self.event_cluster_min_similarity = min(
+            1.0,
+            max(0.0, float(self.event_cluster_min_similarity or 0.0)),
+        )
+        if self.content_class not in CONTENT_CLASSES:
+            raise ValueError(
+                f"Unsupported content_class '{self.content_class}'. Expected one of: {sorted(CONTENT_CLASSES)}"
+            )
+        if self.update_mode not in CONTENT_UPDATE_MODES:
+            raise ValueError(
+                f"Unsupported update_mode '{self.update_mode}'. Expected one of: {sorted(CONTENT_UPDATE_MODES)}"
+            )
+        if self.event_cluster_mode not in CONTENT_EVENT_CLUSTER_MODES:
+            raise ValueError(
+                f"Unsupported event_cluster_mode '{self.event_cluster_mode}'. Expected one of: {sorted(CONTENT_EVENT_CLUSTER_MODES)}"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, object] | None) -> "ContentLifecyclePolicy":
+        if not isinstance(payload, dict):
+            return cls()
+        return cls(
+            content_class=str(payload.get("content_class") or "auto"),
+            update_mode=str(payload.get("update_mode") or "auto"),
+            ttl_days=float(payload.get("ttl_days") or 0.0),
+            delete_expired=bool(payload.get("delete_expired", False)),
+            event_cluster_mode=str(payload.get("event_cluster_mode") or "auto"),
+            event_cluster_window_days=float(
+                payload.get("event_cluster_window_days", 3.0) or 3.0
+            ),
+            event_cluster_min_similarity=float(
+                payload.get("event_cluster_min_similarity") or 0.72
+            ),
+        )
+
+    def resolved_content_class(self, *, source_type: str) -> str:
+        if self.content_class != "auto":
+            return self.content_class
+        return "short_term_news" if source_type == "feed" else "long_term_knowledge"
+
+    def resolved_update_mode(self, *, source_type: str) -> str:
+        if self.update_mode != "auto":
+            return self.update_mode
+        if self.resolved_content_class(source_type=source_type) == "short_term_news":
+            return "replace_latest"
+        return "append"
+
+    def tracks_short_term_lifecycle(self, *, source_type: str) -> bool:
+        return self.resolved_content_class(source_type=source_type) == "short_term_news"
+
+    def resolved_event_cluster_mode(
+        self,
+        *,
+        source_type: str,
+        utility_available: bool = False,
+    ) -> str:
+        if not self.tracks_short_term_lifecycle(source_type=source_type):
+            return "off"
+        if self.event_cluster_mode != "auto":
+            return self.event_cluster_mode
+        return "heuristic_llm" if utility_available else "heuristic"
+
+    def event_clustering_enabled(
+        self,
+        *,
+        source_type: str,
+        utility_available: bool = False,
+    ) -> bool:
+        return (
+            self.resolved_event_cluster_mode(
+                source_type=source_type,
+                utility_available=utility_available,
+            )
+            != "off"
+        )
+
+
+@dataclass
 class MonitoredSource:
     source_id: str
     name: str
@@ -298,6 +439,10 @@ class MonitoredSource:
     feed_filter: FeedFilterPolicy = field(default_factory=FeedFilterPolicy)
     feed_retention: FeedRetentionPolicy = field(default_factory=FeedRetentionPolicy)
     feed_priority: FeedPriorityPolicy = field(default_factory=FeedPriorityPolicy)
+    feed_dedup: FeedDedupPolicy = field(default_factory=FeedDedupPolicy)
+    content_lifecycle: ContentLifecyclePolicy = field(
+        default_factory=ContentLifecyclePolicy
+    )
 
     def __post_init__(self) -> None:
         self.source_id = (self.source_id or "").strip()
@@ -316,6 +461,12 @@ class MonitoredSource:
             self.feed_retention = FeedRetentionPolicy.from_dict(self.feed_retention)
         if not isinstance(self.feed_priority, FeedPriorityPolicy):
             self.feed_priority = FeedPriorityPolicy.from_dict(self.feed_priority)
+        if not isinstance(self.feed_dedup, FeedDedupPolicy):
+            self.feed_dedup = FeedDedupPolicy.from_dict(self.feed_dedup)
+        if not isinstance(self.content_lifecycle, ContentLifecyclePolicy):
+            self.content_lifecycle = ContentLifecyclePolicy.from_dict(
+                self.content_lifecycle
+            )
 
         if not self.source_id:
             self.source_id = _generate_source_id(self.name, self.urls)
@@ -335,11 +486,24 @@ class MonitoredSource:
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
 
-    def to_public_dict(self) -> dict[str, object]:
+    def to_public_dict(self, *, utility_available: bool = False) -> dict[str, object]:
         payload = self.to_dict()
         payload["resolved_source_type"] = self.resolved_source_type()
         payload["resolved_schedule_mode"] = self.resolved_schedule_mode()
         payload["resolved_feed_priority_mode"] = self.feed_priority.resolved_mode()
+        payload["resolved_feed_dedup_mode"] = self.feed_dedup.resolved_mode()
+        payload["resolved_content_class"] = self.content_lifecycle.resolved_content_class(
+            source_type=self.resolved_source_type()
+        )
+        payload["resolved_update_mode"] = self.content_lifecycle.resolved_update_mode(
+            source_type=self.resolved_source_type()
+        )
+        payload["resolved_event_cluster_mode"] = (
+            self.content_lifecycle.resolved_event_cluster_mode(
+                source_type=self.resolved_source_type(),
+                utility_available=utility_available,
+            )
+        )
         return payload
 
     def resolved_source_type(self) -> str:
@@ -369,6 +533,10 @@ class MonitoredSource:
             feed_filter=FeedFilterPolicy.from_dict(payload.get("feed_filter")),
             feed_retention=FeedRetentionPolicy.from_dict(payload.get("feed_retention")),
             feed_priority=FeedPriorityPolicy.from_dict(payload.get("feed_priority")),
+            feed_dedup=FeedDedupPolicy.from_dict(payload.get("feed_dedup")),
+            content_lifecycle=ContentLifecyclePolicy.from_dict(
+                payload.get("content_lifecycle")
+            ),
         )
 
 
@@ -562,7 +730,9 @@ class SqliteSourceRegistry(SourceRegistry):
                     schedule_mode TEXT NOT NULL DEFAULT 'auto',
                     feed_filter_json TEXT NOT NULL DEFAULT '{}',
                     feed_retention_json TEXT NOT NULL DEFAULT '{}',
-                    feed_priority_json TEXT NOT NULL DEFAULT '{}'
+                    feed_priority_json TEXT NOT NULL DEFAULT '{}',
+                    feed_dedup_json TEXT NOT NULL DEFAULT '{}',
+                    content_lifecycle_json TEXT NOT NULL DEFAULT '{}'
                 )
                 """
             )
@@ -595,6 +765,14 @@ class SqliteSourceRegistry(SourceRegistry):
             conn.execute(
                 "ALTER TABLE monitored_sources ADD COLUMN feed_priority_json TEXT NOT NULL DEFAULT '{}'"
             )
+        if "feed_dedup_json" not in columns:
+            conn.execute(
+                "ALTER TABLE monitored_sources ADD COLUMN feed_dedup_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "content_lifecycle_json" not in columns:
+            conn.execute(
+                "ALTER TABLE monitored_sources ADD COLUMN content_lifecycle_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def _list_sources_sync(self) -> list[MonitoredSource]:
         with self._connect() as conn:
@@ -602,7 +780,8 @@ class SqliteSourceRegistry(SourceRegistry):
                 """
                 SELECT source_id, name, urls_json, category, interval_seconds,
                        max_pages, enabled, workspace, source_type, schedule_mode,
-                       feed_filter_json, feed_retention_json, feed_priority_json
+                       feed_filter_json, feed_retention_json, feed_priority_json,
+                       feed_dedup_json, content_lifecycle_json
                 FROM monitored_sources
                 ORDER BY source_id ASC
                 """
@@ -615,7 +794,8 @@ class SqliteSourceRegistry(SourceRegistry):
                 """
                 SELECT source_id, name, urls_json, category, interval_seconds,
                        max_pages, enabled, workspace, source_type, schedule_mode,
-                       feed_filter_json, feed_retention_json, feed_priority_json
+                       feed_filter_json, feed_retention_json, feed_priority_json,
+                       feed_dedup_json, content_lifecycle_json
                 FROM monitored_sources
                 WHERE source_id = ?
                 """,
@@ -630,8 +810,9 @@ class SqliteSourceRegistry(SourceRegistry):
                 INSERT INTO monitored_sources (
                     source_id, name, urls_json, category, interval_seconds,
                     max_pages, enabled, workspace, source_type, schedule_mode,
-                    feed_filter_json, feed_retention_json, feed_priority_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    feed_filter_json, feed_retention_json, feed_priority_json,
+                    feed_dedup_json, content_lifecycle_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
                     name = excluded.name,
                     urls_json = excluded.urls_json,
@@ -644,7 +825,9 @@ class SqliteSourceRegistry(SourceRegistry):
                     schedule_mode = excluded.schedule_mode,
                     feed_filter_json = excluded.feed_filter_json,
                     feed_retention_json = excluded.feed_retention_json,
-                    feed_priority_json = excluded.feed_priority_json
+                    feed_priority_json = excluded.feed_priority_json,
+                    feed_dedup_json = excluded.feed_dedup_json,
+                    content_lifecycle_json = excluded.content_lifecycle_json
                 """,
                 (
                     source.source_id,
@@ -660,6 +843,10 @@ class SqliteSourceRegistry(SourceRegistry):
                     json.dumps(source.feed_filter.to_dict(), ensure_ascii=False),
                     json.dumps(source.feed_retention.to_dict(), ensure_ascii=False),
                     json.dumps(source.feed_priority.to_dict(), ensure_ascii=False),
+                    json.dumps(source.feed_dedup.to_dict(), ensure_ascii=False),
+                    json.dumps(
+                        source.content_lifecycle.to_dict(), ensure_ascii=False
+                    ),
                 ),
             )
             conn.commit()
@@ -688,6 +875,8 @@ class SqliteSourceRegistry(SourceRegistry):
         feed_filter_json: str,
         feed_retention_json: str,
         feed_priority_json: str,
+        feed_dedup_json: str,
+        content_lifecycle_json: str,
     ) -> MonitoredSource:
         try:
             urls = json.loads(urls_json or "[]")
@@ -713,6 +902,18 @@ class SqliteSourceRegistry(SourceRegistry):
             feed_priority_payload = {}
         if not isinstance(feed_priority_payload, dict):
             feed_priority_payload = {}
+        try:
+            feed_dedup_payload = json.loads(feed_dedup_json or "{}")
+        except json.JSONDecodeError:
+            feed_dedup_payload = {}
+        if not isinstance(feed_dedup_payload, dict):
+            feed_dedup_payload = {}
+        try:
+            content_lifecycle_payload = json.loads(content_lifecycle_json or "{}")
+        except json.JSONDecodeError:
+            content_lifecycle_payload = {}
+        if not isinstance(content_lifecycle_payload, dict):
+            content_lifecycle_payload = {}
         return MonitoredSource(
             source_id=source_id,
             name=name,
@@ -727,6 +928,10 @@ class SqliteSourceRegistry(SourceRegistry):
             feed_filter=FeedFilterPolicy.from_dict(feed_filter_payload),
             feed_retention=FeedRetentionPolicy.from_dict(feed_retention_payload),
             feed_priority=FeedPriorityPolicy.from_dict(feed_priority_payload),
+            feed_dedup=FeedDedupPolicy.from_dict(feed_dedup_payload),
+            content_lifecycle=ContentLifecyclePolicy.from_dict(
+                content_lifecycle_payload
+            ),
         )
 
 

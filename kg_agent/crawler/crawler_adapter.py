@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import asdict, dataclass, field
@@ -15,6 +16,7 @@ from kg_agent.config import CrawlerConfig
 from kg_agent.crawler.content_extractor import (
     build_search_url,
     build_excerpt,
+    canonicalize_url,
     extract_search_results_from_markdown,
     extract_markdown_text,
     normalize_links,
@@ -99,20 +101,14 @@ class Crawl4AIAdapter:
         *,
         max_content_chars: int | None = None,
     ) -> CrawledPage:
-        crawl4ai = self._import_crawl4ai()
         await self.start()
-        run_config = crawl4ai.CrawlerRunConfig(
-            cache_mode=self._resolve_cache_mode(crawl4ai),
-            word_count_threshold=self.config.word_count_threshold,
-            page_timeout=self.config.page_timeout_ms,
-            verbose=False,
-            log_console=False,
-        )
+        run_config = self._build_run_config()
         result = await self._crawler.arun(url=url, config=run_config)
         return self._normalize_result(
             url=url,
             result=result,
             max_content_chars=max_content_chars or self.config.max_content_chars,
+            prefer_extracted_content=self.config.llm_extraction_prefer_content,
         )
 
     async def crawl_urls(
@@ -148,14 +144,71 @@ class Crawl4AIAdapter:
                 continue
             target_urls.append(url)
 
-        for url in target_urls[: max(0, page_limit - len(pages))]:
-            pages.append(
-                await self.crawl_url(
-                    url,
+        remaining_target_urls = target_urls[: max(0, page_limit - len(pages))]
+        if remaining_target_urls:
+            pages.extend(
+                await self._crawl_many_article_urls(
+                    remaining_target_urls,
                     max_content_chars=max_content_chars,
                 )
             )
         return pages[:page_limit]
+
+    async def _crawl_many_article_urls(
+        self,
+        urls: list[str],
+        *,
+        max_content_chars: int | None = None,
+    ) -> list[CrawledPage]:
+        if not urls:
+            return []
+        if type(self).crawl_url is not Crawl4AIAdapter.crawl_url:
+            pages: list[CrawledPage] = []
+            for url in urls:
+                pages.append(
+                    await self.crawl_url(
+                        url,
+                        max_content_chars=max_content_chars,
+                    )
+                )
+            return pages
+
+        await self.start()
+        run_config = self._build_run_config()
+        results = await self._crawler.arun_many(urls=urls, config=run_config)
+        if not isinstance(results, list):
+            results = [item async for item in results]
+
+        results_by_requested_url: dict[str, list[Any]] = {}
+        for result in results:
+            request_url = str(getattr(result, "url", "") or "").strip()
+            if not request_url:
+                continue
+            results_by_requested_url.setdefault(request_url, []).append(result)
+
+        pages: list[CrawledPage] = []
+        for request_url in urls:
+            bucket = results_by_requested_url.get(request_url, [])
+            if not bucket:
+                pages.append(
+                    CrawledPage(
+                        url=request_url,
+                        final_url=request_url,
+                        success=False,
+                        error="Batch crawl did not return a result for the requested URL",
+                    )
+                )
+                continue
+            result = bucket.pop(0)
+            pages.append(
+                self._normalize_result(
+                    url=request_url,
+                    result=result,
+                    max_content_chars=max_content_chars or self.config.max_content_chars,
+                    prefer_extracted_content=self.config.llm_extraction_prefer_content,
+                )
+            )
+        return pages
 
     async def discover_urls(
         self,
@@ -214,6 +267,68 @@ class Crawl4AIAdapter:
         if cache_mode is not None:
             return cache_mode
         return getattr(crawl4ai.CacheMode, "BYPASS")
+
+    def _build_run_config(self):
+        crawl4ai = self._import_crawl4ai()
+        extraction_strategy = self._build_extraction_strategy(crawl4ai)
+        return crawl4ai.CrawlerRunConfig(
+            cache_mode=self._resolve_cache_mode(crawl4ai),
+            word_count_threshold=self.config.word_count_threshold,
+            page_timeout=self.config.page_timeout_ms,
+            extraction_strategy=extraction_strategy,
+            verbose=False,
+            log_console=False,
+        )
+
+    def _build_extraction_strategy(self, crawl4ai: Any):
+        if not self.config.llm_extraction_enabled:
+            return None
+        provider = (self.config.llm_extraction_provider or "").strip()
+        if not provider:
+            raise RuntimeError(
+                "Crawl4AI LLM extraction is enabled but no provider is configured. "
+                "Set KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_PROVIDER "
+                "(for example openai/gpt-4o-mini or openai/<your-model>)."
+            )
+
+        llm_config = crawl4ai.LLMConfig(
+            provider=provider,
+            api_token=(self.config.llm_extraction_api_token or "").strip() or None,
+            base_url=(self.config.llm_extraction_base_url or "").strip() or None,
+        )
+        schema = self._load_extraction_schema()
+        extraction_type = (
+            self.config.llm_extraction_type.strip().lower() or "block"
+        )
+        input_format = (
+            self.config.llm_extraction_input_format.strip().lower() or "markdown"
+        )
+        return crawl4ai.LLMExtractionStrategy(
+            llm_config=llm_config,
+            instruction=(self.config.llm_extraction_instruction or "").strip() or None,
+            schema=schema,
+            extraction_type=extraction_type,
+            input_format=input_format,
+            force_json_response=self.config.llm_extraction_force_json_response,
+            apply_chunking=self.config.llm_extraction_apply_chunking,
+            verbose=False,
+        )
+
+    def _load_extraction_schema(self) -> dict[str, Any] | None:
+        schema_json = (self.config.llm_extraction_schema_json or "").strip()
+        if not schema_json:
+            return None
+        try:
+            payload = json.loads(schema_json)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_SCHEMA_JSON must be valid JSON"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_SCHEMA_JSON must decode to a JSON object"
+            )
+        return payload
 
     def _resolve_browser_channel(self) -> str:
         configured = (self.config.browser_channel or "").strip()
@@ -293,7 +408,7 @@ class Crawl4AIAdapter:
 
         if root_name == "rss":
             for item in root.findall(".//item"):
-                url = cls._extract_rss_item_url(item, base_url)
+                url = canonicalize_url(cls._extract_rss_item_url(item, base_url) or "")
                 if not url or url in seen:
                     continue
                 seen.add(url)
@@ -313,7 +428,7 @@ class Crawl4AIAdapter:
 
         if root_name == "feed":
             for entry in root.findall(".//{*}entry"):
-                url = cls._extract_atom_entry_url(entry, base_url)
+                url = canonicalize_url(cls._extract_atom_entry_url(entry, base_url) or "")
                 if not url or url in seen:
                     continue
                 seen.add(url)
@@ -529,6 +644,7 @@ class Crawl4AIAdapter:
         url: str,
         result: Any,
         max_content_chars: int,
+        prefer_extracted_content: bool = False,
     ) -> CrawledPage:
         success = bool(getattr(result, "success", False))
         metadata = getattr(result, "metadata", None)
@@ -537,12 +653,33 @@ class Crawl4AIAdapter:
 
         title = metadata.get("title") or getattr(result, "title", None)
         markdown = extract_markdown_text(getattr(result, "markdown", ""))
+        extracted_content = Crawl4AIAdapter._extract_llm_extracted_text(
+            getattr(result, "extracted_content", None)
+        )
+        if prefer_extracted_content and extracted_content:
+            markdown = extracted_content
+            metadata = {
+                **metadata,
+                "content_source": "crawl4ai_llm_extraction",
+                "llm_extraction_applied": True,
+            }
+        elif extracted_content:
+            metadata = {
+                **metadata,
+                "content_source": "crawl4ai_markdown",
+                "llm_extraction_applied": True,
+            }
         if max_content_chars > 0:
             markdown = markdown[:max_content_chars]
         markdown = sanitize_plain_text(markdown)
         excerpt = build_excerpt(markdown, max_chars=min(max_content_chars, 320))
 
-        final_url = getattr(result, "url", None) or metadata.get("url") or url
+        final_url = (
+            getattr(result, "redirected_url", None)
+            or getattr(result, "url", None)
+            or metadata.get("url")
+            or url
+        )
         links = normalize_links(getattr(result, "links", None))
         error = None if success else (
             getattr(result, "error_message", None)
@@ -561,3 +698,74 @@ class Crawl4AIAdapter:
             links=links,
             error=error,
         )
+
+    @classmethod
+    def _extract_llm_extracted_text(cls, extracted_content: Any) -> str:
+        text = str(extracted_content or "").strip()
+        if not text:
+            return ""
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return text
+        parts = cls._flatten_extracted_payload(payload)
+        if not parts:
+            return text
+        return "\n\n".join(parts)
+
+    @classmethod
+    def _flatten_extracted_payload(cls, payload: Any) -> list[str]:
+        if payload is None:
+            return []
+        if isinstance(payload, str):
+            normalized = payload.strip()
+            return [normalized] if normalized else []
+        if isinstance(payload, (int, float, bool)):
+            return [str(payload)]
+        if isinstance(payload, list):
+            parts: list[str] = []
+            for item in payload:
+                parts.extend(cls._flatten_extracted_payload(item))
+            return cls._deduplicate_text_parts(parts)
+        if isinstance(payload, dict):
+            parts: list[str] = []
+            for key in (
+                "title",
+                "heading",
+                "summary",
+                "content",
+                "text",
+                "body",
+                "description",
+            ):
+                if key in payload:
+                    parts.extend(cls._flatten_extracted_payload(payload[key]))
+            for key, value in payload.items():
+                if key in {
+                    "title",
+                    "heading",
+                    "summary",
+                    "content",
+                    "text",
+                    "body",
+                    "description",
+                }:
+                    continue
+                parts.extend(cls._flatten_extracted_payload(value))
+            return cls._deduplicate_text_parts(parts)
+        return []
+
+    @staticmethod
+    def _deduplicate_text_parts(parts: list[str]) -> list[str]:
+        normalized_parts: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            normalized = " ".join((part or "").split())
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            normalized_parts.append(normalized)
+        return normalized_parts

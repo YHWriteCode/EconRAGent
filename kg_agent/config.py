@@ -63,6 +63,23 @@ def _first_env_float(default: float, *names: str) -> float:
     return default
 
 
+def _default_crawler_llm_provider() -> str:
+    explicit_provider = _first_env_value(
+        "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_PROVIDER",
+    )
+    if explicit_provider:
+        return explicit_provider
+    model_name = _first_env_value(
+        "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_MODEL",
+        "KG_AGENT_MODEL_NAME",
+        "LLM_MODEL_NAME",
+        "LLM_MODEL",
+    )
+    if not model_name:
+        return ""
+    return f"openai/{model_name}"
+
+
 @dataclass
 class AgentModelConfig:
     provider: str = "openai_compatible"
@@ -172,6 +189,17 @@ class CrawlerConfig:
     max_content_chars: int = 4000
     word_count_threshold: int = 20
     page_timeout_ms: int = 30000
+    llm_extraction_enabled: bool = False
+    llm_extraction_provider: str = ""
+    llm_extraction_api_token: str = ""
+    llm_extraction_base_url: str = ""
+    llm_extraction_instruction: str = ""
+    llm_extraction_input_format: str = "markdown"
+    llm_extraction_type: str = "block"
+    llm_extraction_schema_json: str = ""
+    llm_extraction_force_json_response: bool = False
+    llm_extraction_apply_chunking: bool = True
+    llm_extraction_prefer_content: bool = False
 
     @classmethod
     def from_env(cls) -> "CrawlerConfig":
@@ -190,6 +218,43 @@ class CrawlerConfig:
             ),
             page_timeout_ms=_env_int(
                 "KG_AGENT_WEB_CRAWLER_PAGE_TIMEOUT_MS", 30000
+            ),
+            llm_extraction_enabled=_env_bool(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_ENABLED", False
+            ),
+            llm_extraction_provider=_default_crawler_llm_provider(),
+            llm_extraction_api_token=_first_env_value(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_API_TOKEN",
+                "LLM_BINDING_API_KEY",
+                "OPENAI_API_KEY",
+            ),
+            llm_extraction_base_url=_first_env_value(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_BASE_URL",
+                "LLM_BINDING_HOST",
+                "OPENAI_API_BASE",
+            ),
+            llm_extraction_instruction=os.getenv(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_INSTRUCTION", ""
+            ).strip(),
+            llm_extraction_input_format=os.getenv(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_INPUT_FORMAT", "markdown"
+            ).strip()
+            or "markdown",
+            llm_extraction_type=os.getenv(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_TYPE", "block"
+            ).strip()
+            or "block",
+            llm_extraction_schema_json=os.getenv(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_SCHEMA_JSON", ""
+            ).strip(),
+            llm_extraction_force_json_response=_env_bool(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_FORCE_JSON_RESPONSE", False
+            ),
+            llm_extraction_apply_chunking=_env_bool(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_APPLY_CHUNKING", True
+            ),
+            llm_extraction_prefer_content=_env_bool(
+                "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_PREFER_CONTENT", False
             ),
         )
 
