@@ -42,6 +42,51 @@ def test_disabled_domain_schema_preserves_original_values():
     assert normalize_extracted_relation_keywords("政策支持,扶持", schema) == "政策支持,扶持"
 
 
+def test_domain_schema_runtime_includes_explanation_profile_with_inheritance():
+    general_schema = resolve_domain_schema(
+        {"profile_name": "general", "enabled": False}
+    ).to_runtime_dict()
+    economy_schema = resolve_domain_schema(
+        {"profile_name": "economy", "enabled": True}
+    ).to_runtime_dict()
+
+    general_profile = general_schema["explanation_profile"]
+    economy_profile = economy_schema["explanation_profile"]
+
+    assert general_profile["profile_id"] == "general_explainer"
+    assert economy_profile["profile_id"] == "economy_explainer"
+    assert economy_profile["extends"] == "general_explainer"
+    assert "causal_explanation" in economy_profile["supported_intents"]
+    assert any(tag["tag_id"] == "policy" for tag in economy_profile["semantic_tags"])
+    assert any(tag["tag_id"] == "cause" for tag in economy_profile["semantic_tags"])
+    assert any(
+        rule["relation_type"] == "affects_metric"
+        for rule in economy_profile["relation_semantics"]
+    )
+    assert any(
+        policy["policy_id"] == "economy_causal_strict"
+        for policy in economy_profile["evidence_policies"]
+    )
+    assert any(
+        contract["contract_id"] == "economy_causal_contract"
+        for contract in economy_profile["output_contracts"]
+    )
+    assert any(
+        scenario["scenario_id"] == "economy_metric_driver_scenario_v1"
+        for scenario in economy_profile["scenario_overrides"]
+    )
+    assert any(
+        rule["node_type"] == "Policy"
+        for rule in economy_profile["node_role_rules"]
+    )
+    assert economy_profile["path_constraints"]["default_max_hops"] == 4
+    assert economy_profile["path_constraints"]["penalize_repeated_nodes"] is True
+    assert (
+        economy_profile["guardrails"]["extra_flags"]["disallow_metric_claim_without_support"]
+        is True
+    )
+
+
 @pytest.mark.asyncio
 async def test_extraction_result_applies_domain_schema_normalization():
     schema = resolve_domain_schema(

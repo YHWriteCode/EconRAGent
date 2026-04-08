@@ -47,7 +47,7 @@ kg_agent/
 │   ├── path_explainer.py          # Path explanation layer: PathExplainer.explain() → PathExplanation
 │   ├── tool_registry.py           # Tool registration protocol: ToolRegistry (register, find, execute)
 │   ├── builtin_tools.py           # Assembly layer: wraps functions from tools/ and registers them to ToolRegistry
-│   ├── prompts.py                 # All prompt templates (route judge version registry / path explainer / final answer)
+│   ├── prompts.py                 # All prompt templates (route judge version registry / path-explainer template registry / final answer)
 │   └── tool_schemas.py            # Tool parameter JSON Schema definitions
 │
 ├── tools/                         # General tool layer (one file per tool)
@@ -347,6 +347,12 @@ class PathExplainer:
 ### 7.4 Design Notes
 
 - Domain-agnostic module, not limited to economics (`domain_schema` is an optional parameter)
+- `domain_schema.explanation_profile` is now the preferred source for path-explainer intent triggers, semantic tags, relation semantics, node-role rules, path constraints, evidence policies, output contracts, guardrails, prompt-template hints, and optional `scenario_overrides`; legacy regex/tag constants remain only as backward-compatible fallback when no profile is present
+- For domain customization, prefer editing the profile section blocks in the lower-layer schema file (for example `lightrag_fork/schemas/general.py` and `lightrag_fork/schemas/economy.py`) rather than changing `path_explainer.py`; the upper-layer explainer is intended to stay generic and consume those fields declaratively
+- `prompts.py` now resolves path-explainer templates through a registry (`path_base_v1`, intent-level templates, economy-domain templates); `explanation_profile.prompt_bindings` only selects `template_id`, while actual prompt text and fallback logic stay in the upper-layer registry
+- When an `intent_binding.scenario_id` matches a declared `scenario_override`, Path Explainer resolves template/policy/contract/guardrail precedence as `scenario override -> intent binding -> profile intent/default fallback`
+- `question_type` is still the external compatibility label (`relation_explanation` / `path_trace`), but internally the explainer can now resolve a richer `intent_family` before mapping back to that legacy field
+- Path scoring now also consumes profile-declared `node_role_rules` and `path_constraints` to penalize overlong/repeated paths, reward role-aligned node sequences, and apply relation-direction/type consistency checks when the schema declares them
 - Does not modify the graph; only responsible for explanation
 - Does not blindly trust graph relationships; requires "graph connectivity + text support"
 - `AgentCore` wires Path Explainer through the same utility-model client used by Route Judge, with one-time fallback to the main agent model when no dedicated utility model is configured
@@ -983,4 +989,5 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 - **Playwright browser detection** uses Playwright sync API to verify the exact chromium executable exists; on version mismatch the adapter falls back to system Edge/Chrome via `browser_channel`
 - **CrossSessionStore** now supports an optional Mongo + Qdrant vector backend with heuristic compression and dedup, but it still falls back to conversation-memory token overlap when the vector backend is disabled or unavailable
 - Cross-session consolidation and background aging are heuristic only; they use vector similarity plus lightweight lexical guards and snippet packing, not LLM summarization or a full long-horizon memory graph
+- Path explanation now prefers schema-provided `explanation_profile` contracts when available and already consumes relation semantics, node-role rules, path constraints, evidence policies, output contracts, guardrails, prompt-template IDs, and first-class `scenario_overrides`, but only `general` and `economy` built-in profiles exist today and broader domain/scenario libraries are not yet materialized
 - Path explanation now uses lightweight semantic-expanded lexical scoring; embedding-based semantic reranking is still not integrated

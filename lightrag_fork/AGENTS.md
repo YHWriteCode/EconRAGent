@@ -193,6 +193,8 @@ LockBackend (abstract)
 - `schema.py` handles normalization: external input → `DomainSchema` dataclass → runtime dict
 - `operate.py::extract_entities()` appends domain constraint block at the end of the prompt
 - `schema.py` also provides post-parse canonicalization helpers so extracted entity types and relation keywords can be normalized back onto schema-defined canonical names when the schema is enabled
+- `schema.py` now also carries an optional `explanation_profile` block on each built-in schema so upper layers can reuse domain-aware intent/tag/relation/evidence/output/guardrail contracts, node-role/path-constraint structure, plus optional `scenario_overrides` without hardcoding them inside `kg_agent`; the lower layer only exposes `prompt_bindings/template_id` hints, while actual prompt text remains in the upper-layer registry
+- The built-in general/economy explanation profiles are now intentionally organized into editable section blocks in `schemas/general.py` and `schemas/economy.py` (`supported_intents`, `intent_bindings`, `semantic_tags`, `relation_semantics`, `node_role_rules`, `path_constraints`, `evidence_policies`, `output_contracts`, `scenario_overrides`, `prompt_bindings`) so domain customization can usually stay inside the profile file instead of modifying the upper-layer explainer
 - Does not modify `prompt.py` static templates
 
 **Schema parameter passing chain (explicit, no global variables):**
@@ -208,10 +210,10 @@ LightRAG(addon_params=...)
 
 **Built-in schema profiles:**
 
-| Profile | File | Mode | Entity Types |
-|---|---|---|---|
-| `general` | `schemas/general.py` | `enabled=False` | Person, Organization, Location... (original defaults) |
-| `economy` | `schemas/economy.py` | `enabled=True, mode=domain` | Company, Industry, Metric, Policy, Event, Asset, Institution, Country |
+| Profile | File | Mode | Entity Types | Explanation Profile |
+|---|---|---|---|---|
+| `general` | `schemas/general.py` | `enabled=False` | Person, Organization, Location... (original defaults) | `general_explainer` |
+| `economy` | `schemas/economy.py` | `enabled=True, mode=domain` | Company, Industry, Metric, Policy, Event, Asset, Institution, Country | `economy_explainer` |
 
 ### 4.3 Dynamic-Graph Temporal Metadata
 
@@ -400,7 +402,8 @@ Before modifying code under `lightrag_fork/`, verify the following:
 
 ## 10. Known Limitations and TODOs
 
-- **Schema now affects prompt guidance plus post-parse canonicalization of extracted entity types / relation keywords**, but it is still not integrated into graph storage structure, retrieval ranking, or query understanding
+- **Schema now affects prompt guidance plus post-parse canonicalization of extracted entity types / relation keywords**, and it can expose a formalized `explanation_profile` for upper-layer path explanation, but it is still not integrated into graph storage structure, retrieval ranking, or query understanding
+- **Built-in explanation profiles are still v1 contracts**; only `general` and `economy` are defined today, and their relation/evidence/output/guardrail/scenario plus node-role/path-constraint semantics are consumed by the upper-layer explainer rather than enforced inside the lower-layer retrieval/storage pipeline
 - **Relation type constraints are weak**; guided only via prompts, no post-processing normalization
 - **Redis distributed locks** still have window risks during master-slave failover/network partition scenarios
 - **`fallback_local`** is only suitable for development degradation; does not provide strong consistency
