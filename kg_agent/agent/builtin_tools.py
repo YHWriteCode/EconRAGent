@@ -11,14 +11,12 @@ from kg_agent.agent.tool_schemas import (
     KG_INGEST_SCHEMA,
     KG_NAIVE_SEARCH_SCHEMA,
     MEMORY_SEARCH_SCHEMA,
-    QUANT_BACKTEST_SCHEMA,
     WEB_SEARCH_SCHEMA,
 )
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.memory.cross_session_store import CrossSessionStore
 from kg_agent.tools.base import ToolDefinition, ToolResult
 from kg_agent.tools.graph_tools import graph_entity_lookup, graph_relation_trace
-from kg_agent.tools.quant_tools import quant_backtest
 from kg_agent.tools.kg_ingest import kg_ingest
 from kg_agent.tools.retrieval_tools import kg_hybrid_search, kg_naive_search
 from kg_agent.tools.rerank_utils import (
@@ -194,16 +192,6 @@ def build_default_tool_registry(
             handler=web_search,
             enabled=config.tool_config.enable_web_search,
             tags=["web"],
-        )
-    )
-    registry.register(
-        ToolDefinition(
-            name="quant_backtest",
-            description="Reserved tool entry for quant backtesting requests.",
-            input_schema=QUANT_BACKTEST_SCHEMA,
-            handler=quant_backtest,
-            enabled=config.tool_config.enable_quant,
-            tags=["quant"],
         )
     )
     registry.register(

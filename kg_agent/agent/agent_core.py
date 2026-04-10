@@ -9,6 +9,12 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 from lightrag_fork import LightRAG
 
 from kg_agent.agent.builtin_tools import build_default_tool_registry
+from kg_agent.agent.capability_registry import (
+    CapabilityDefinition,
+    CapabilityRegistry,
+    add_mcp_capabilities,
+    build_native_capability_registry,
+)
 from kg_agent.agent.path_explainer import PathExplainer
 from kg_agent.agent.prompts import build_final_answer_prompt
 from kg_agent.agent.route_judge import RouteDecision, RouteJudge
@@ -16,6 +22,7 @@ from kg_agent.agent.tool_registry import ToolRegistry
 from kg_agent.config import AgentLLMClient, FallbackLLMClient, KGAgentConfig
 from kg_agent.crawler.crawl_state_store import CrawlStateStore
 from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
+from kg_agent.mcp.adapter import MCPAdapter
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.memory.cross_session_store import CrossSessionStore
 from kg_agent.memory.user_profile import UserProfileStore
@@ -75,6 +82,20 @@ class AgentResponse:
 
 
 @dataclass
+class CapabilityInvocationResponse:
+    capability: dict[str, Any]
+    result: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "capability": self.capability,
+            "result": self.result,
+            "metadata": self.metadata,
+        }
+
+
+@dataclass
 class DynamicGraphUpdateResult:
     raw_tool_calls: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -113,6 +134,8 @@ class AgentCore:
         rag_provider: RagProvider | None = None,
         config: KGAgentConfig | None = None,
         tool_registry: ToolRegistry | None = None,
+        capability_registry: CapabilityRegistry | None = None,
+        mcp_adapter: MCPAdapter | None = None,
         route_judge: RouteJudge | None = None,
         path_explainer: PathExplainer | None = None,
         crawler_adapter: Crawl4AIAdapter | None = None,
@@ -144,6 +167,15 @@ class AgentCore:
         self.tool_registry = tool_registry or build_default_tool_registry(
             self.config, self.conversation_memory, self.cross_session_store
         )
+        self.mcp_adapter = mcp_adapter
+        self.capability_registry = capability_registry or build_native_capability_registry(
+            self.tool_registry
+        )
+        if self.mcp_adapter is not None:
+            add_mcp_capabilities(
+                self.capability_registry,
+                self.mcp_adapter.list_capability_configs(),
+            )
         self.route_judge = route_judge or RouteJudge(
             llm_client=self.utility_llm_client,
             default_max_iterations=self.config.runtime.max_iterations,
@@ -155,6 +187,23 @@ class AgentCore:
         self.crawler_adapter = crawler_adapter
         self.crawl_state_store = crawl_state_store
 
+    async def initialize_external_capabilities(self) -> list[dict[str, Any]]:
+        if self.mcp_adapter is None:
+            return []
+        discovered = await self.mcp_adapter.discover_capabilities(
+            reserved_names={
+                capability.name
+                for capability in self.capability_registry.list_capabilities()
+            },
+        )
+        if discovered:
+            add_mcp_capabilities(
+                self.capability_registry,
+                discovered,
+                skip_existing=True,
+            )
+        return [CapabilityDefinition.from_mcp_capability_config(item).to_public_dict() for item in discovered]
+
     async def preview_route(
         self,
         *,
@@ -163,13 +212,14 @@ class AgentCore:
         user_id: str | None = None,
         use_memory: bool = True,
     ) -> RouteDecision:
+        await self.initialize_external_capabilities()
         session_context = await self._build_session_context(
             query=query,
             session_id=session_id,
             use_memory=use_memory,
             user_id=user_id,
         )
-        available_tools = self._available_tool_names(
+        available_capabilities = self._available_capability_names(
             include_memory=use_memory,
             include_cross_session=bool(user_id),
         )
@@ -178,7 +228,7 @@ class AgentCore:
             query=query,
             session_context=session_context,
             user_profile=profile,
-            available_tools=available_tools,
+            available_capabilities=available_capabilities,
         )
 
     async def chat(
@@ -194,6 +244,7 @@ class AgentCore:
         debug: bool = False,
         stream: bool = False,
     ) -> AgentResponse:
+        await self.initialize_external_capabilities()
         prepared = await self._prepare_agent_run(
             query=query,
             session_id=session_id,
@@ -232,6 +283,56 @@ class AgentCore:
             streaming_supported=True,
         )
 
+    async def invoke_capability(
+        self,
+        *,
+        capability_name: str,
+        session_id: str,
+        query: str = "",
+        user_id: str | None = None,
+        workspace: str | None = None,
+        domain_schema: str | dict[str, Any] | None = None,
+        use_memory: bool = False,
+        args: dict[str, Any] | None = None,
+    ) -> CapabilityInvocationResponse:
+        await self.initialize_external_capabilities()
+        capability = self._require_enabled_capability(capability_name)
+        context = AgentRunContext(
+            query=query,
+            session_id=session_id,
+            user_id=user_id,
+            workspace=workspace or self.config.runtime.default_workspace or None,
+            domain_schema=domain_schema or self.config.runtime.default_domain_schema,
+            use_memory=use_memory,
+        )
+        rag = None
+        if capability.executor == "tool_registry":
+            rag = await self._resolve_rag(context.workspace)
+        session_context = await self._build_session_context(
+            query=context.query,
+            session_id=context.session_id,
+            use_memory=context.use_memory,
+            user_id=context.user_id,
+        )
+        user_profile = await self.user_profile_store.get_profile(user_id)
+        result = await self._execute_capability(
+            capability_name=capability_name,
+            context=context,
+            rag=rag,
+            session_context=session_context,
+            user_profile=user_profile,
+            capability_args=args,
+        )
+        recorded = self._record_tool_call(result=result, optional=False)
+        return CapabilityInvocationResponse(
+            capability=capability.to_public_dict(),
+            result=self._serialize_tool_call(recorded, debug=True),
+            metadata=self._build_capability_invocation_metadata(
+                context=context,
+                capability=capability,
+            ),
+        )
+
     async def chat_stream(
         self,
         *,
@@ -244,6 +345,7 @@ class AgentCore:
         use_memory: bool = True,
         debug: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
+        await self.initialize_external_capabilities()
         planned = await self._plan_agent_run(
             query=query,
             session_id=session_id,
@@ -549,7 +651,7 @@ class AgentCore:
             query=context.query,
             session_context=session_context,
             user_profile=user_profile,
-            available_tools=self._available_tool_names(
+            available_capabilities=self._available_capability_names(
                 include_memory=context.use_memory,
                 include_cross_session=bool(context.user_id),
             ),
@@ -947,30 +1049,70 @@ class AgentCore:
         raw_tool_calls: list[dict[str, Any]],
         query_override: str | None = None,
     ):
+        return await self._execute_capability(
+            capability_name=tool_plan.tool,
+            context=context,
+            rag=rag,
+            session_context=session_context,
+            user_profile=user_profile,
+            capability_args=getattr(tool_plan, "args", None),
+            raw_tool_calls=raw_tool_calls,
+            query_override=query_override,
+            input_bindings=getattr(tool_plan, "input_bindings", {}) or {},
+        )
+
+    async def _execute_capability(
+        self,
+        *,
+        capability_name: str,
+        context: AgentRunContext,
+        rag: LightRAG | None,
+        session_context: dict[str, Any],
+        user_profile: dict[str, Any] | None,
+        capability_args: dict[str, Any] | None,
+        raw_tool_calls: list[dict[str, Any]] | None = None,
+        query_override: str | None = None,
+        input_bindings: dict[str, dict[str, Any]] | None = None,
+    ):
         tool_kwargs = self._build_tool_execution_kwargs(
             context=context,
             rag=rag,
             session_context=session_context,
             user_profile=user_profile,
-            tool_args=getattr(tool_plan, "args", None),
+            tool_args=capability_args,
         )
         if query_override is not None:
             tool_kwargs["query"] = query_override
-        input_bindings = getattr(tool_plan, "input_bindings", {}) or {}
         if isinstance(input_bindings, dict):
             tool_kwargs.update(
                 self._resolve_tool_input_bindings(
                     input_bindings=input_bindings,
-                    raw_tool_calls=raw_tool_calls,
+                    raw_tool_calls=raw_tool_calls or [],
                 )
             )
-        return await self.tool_registry.execute(tool_plan.tool, **tool_kwargs)
+        capability = self.capability_registry.get(capability_name)
+        if capability is not None and capability.executor == "mcp":
+            if self.mcp_adapter is None:
+                raise RuntimeError(
+                    f"MCP adapter is not configured for capability '{capability_name}'"
+                )
+            return await self.mcp_adapter.invoke(capability_name, tool_kwargs)
+
+        target_name = (
+            capability.target_name
+            if capability is not None and isinstance(capability.target_name, str)
+            else capability_name
+        )
+        result = await self.tool_registry.execute(target_name, **tool_kwargs)
+        if result.tool_name != capability_name:
+            result.tool_name = capability_name
+        return result
 
     def _build_tool_execution_kwargs(
         self,
         *,
         context: AgentRunContext,
-        rag: LightRAG,
+        rag: LightRAG | None,
         session_context: dict[str, Any],
         user_profile: dict[str, Any] | None,
         tool_args: dict[str, Any] | None,
@@ -1100,13 +1242,12 @@ class AgentCore:
         self,
         *,
         context: AgentRunContext,
-        rag: LightRAG,
+        rag: LightRAG | None,
         session_context: dict[str, Any],
         user_profile: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        return {
+        base_kwargs = {
             "query": context.query,
-            "rag": rag,
             "session_id": context.session_id,
             "user_id": context.user_id,
             "session_context": session_context,
@@ -1118,6 +1259,9 @@ class AgentCore:
             "crawl_state_store": self.crawl_state_store,
             "freshness_config": self.config.freshness,
         }
+        if rag is not None:
+            base_kwargs["rag"] = rag
+        return base_kwargs
 
     @staticmethod
     def _record_tool_call(*, result, optional: bool) -> dict[str, Any]:
@@ -1264,31 +1408,80 @@ class AgentCore:
             return False
         return all(getattr(item, "optional", False) for item in remaining)
 
+    def _available_capability_names(
+        self,
+        *,
+        include_memory: bool,
+        include_cross_session: bool = False,
+    ) -> list[str]:
+        capabilities = []
+        for capability in self.capability_registry.list_capabilities():
+            if not capability.enabled:
+                continue
+            if capability.name == "memory_search" and not include_memory:
+                continue
+            if capability.name == "cross_session_search" and (
+                not include_memory or not include_cross_session
+            ):
+                continue
+            if (
+                capability.kind == "external_mcp"
+                and not bool(capability.metadata.get("planner_exposed", False))
+            ):
+                continue
+            capabilities.append(capability.name)
+        return capabilities
+
     def _available_tool_names(
         self,
         *,
         include_memory: bool,
         include_cross_session: bool = False,
     ) -> list[str]:
-        tools = []
-        for tool in self.tool_registry.list_tools():
-            if not tool.enabled:
-                continue
-            if tool.name == "memory_search" and not include_memory:
-                continue
-            if tool.name == "cross_session_search" and (
-                not include_memory or not include_cross_session
-            ):
-                continue
-            tools.append(tool.name)
-        return tools
+        return self._available_capability_names(
+            include_memory=include_memory,
+            include_cross_session=include_cross_session,
+        )
+
+    def list_capabilities(self) -> list[dict[str, Any]]:
+        return [
+            capability.to_public_dict()
+            for capability in self.capability_registry.list_capabilities()
+            if capability.enabled
+        ]
+
+    def get_capability(self, name: str) -> dict[str, Any] | None:
+        capability = self.capability_registry.get(name)
+        if capability is None or not capability.enabled:
+            return None
+        return capability.to_public_dict()
 
     def list_tools(self) -> list[dict[str, Any]]:
-        return [
-            tool.to_public_dict()
-            for tool in self.tool_registry.list_tools()
-            if tool.enabled
-        ]
+        return self.list_capabilities()
+
+    def _require_enabled_capability(self, capability_name: str):
+        capability = self.capability_registry.get(capability_name)
+        if capability is None:
+            raise LookupError(f"Capability is not registered: {capability_name}")
+        if not capability.enabled:
+            raise LookupError(f"Capability is disabled: {capability_name}")
+        return capability
+
+    @staticmethod
+    def _build_capability_invocation_metadata(
+        *,
+        context: AgentRunContext,
+        capability,
+    ) -> dict[str, Any]:
+        return {
+            "session_id": context.session_id,
+            "user_id": context.user_id,
+            "workspace": context.workspace,
+            "domain_schema": context.domain_schema,
+            "use_memory": context.use_memory,
+            "kind": capability.kind,
+            "executor": capability.executor,
+        }
 
     def _compact_tool_calls(
         self,

@@ -61,7 +61,7 @@ class _CapturingRouteJudge:
 async def test_agent_core_chat_ignores_duplicate_reserved_tool_args():
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=False, enable_quant=False),
+        tool_config=ToolConfig(enable_memory=False),
         runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
     )
     registry = ToolRegistry()
@@ -108,6 +108,59 @@ async def test_agent_core_chat_ignores_duplicate_reserved_tool_args():
 
 
 @pytest.mark.asyncio
+async def test_agent_core_invoke_capability_executes_native_capability_directly():
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False),
+        runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+    )
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="echo",
+            description="Echo test tool",
+            input_schema={},
+            handler=_echo_tool,
+        )
+    )
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=config,
+        tool_registry=registry,
+    )
+
+    response = await agent.invoke_capability(
+        capability_name="echo",
+        query="real-query",
+        session_id="capability-session",
+        use_memory=False,
+        args={"query": "shadow-query", "custom": "ok"},
+    )
+
+    assert response.capability["name"] == "echo"
+    assert response.result["tool"] == "echo"
+    assert response.result["success"] is True
+    assert response.result["data"]["query"] == "real-query"
+    assert response.result["data"]["custom"] == "ok"
+    assert response.metadata["executor"] == "tool_registry"
+    assert response.metadata["use_memory"] is False
+
+
+@pytest.mark.asyncio
+async def test_agent_core_invoke_capability_rejects_unknown_capability():
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(agent_model=AgentModelConfig(provider="disabled")),
+    )
+
+    with pytest.raises(LookupError, match="Capability is not registered: missing_skill"):
+        await agent.invoke_capability(
+            capability_name="missing_skill",
+            session_id="capability-session",
+        )
+
+
+@pytest.mark.asyncio
 async def test_agent_core_chat_stream_yields_meta_delta_done_and_persists_memory():
     class _StreamingLLM:
         def is_available(self):
@@ -132,7 +185,7 @@ async def test_agent_core_chat_stream_yields_meta_delta_done_and_persists_memory
     )
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=True, enable_quant=False),
+        tool_config=ToolConfig(enable_memory=True),
         runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
     )
     memory = ConversationMemoryStore()
@@ -254,7 +307,7 @@ async def test_agent_core_chat_stream_emits_tool_and_path_events():
     )
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=False, enable_quant=False),
+        tool_config=ToolConfig(enable_memory=False),
         runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
     )
     agent = AgentCore(
@@ -317,7 +370,7 @@ async def test_agent_core_persists_messages_into_cross_session_store():
     )
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=True, enable_quant=False),
+        tool_config=ToolConfig(enable_memory=True),
         runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
     )
     memory = ConversationMemoryStore()
@@ -349,7 +402,7 @@ async def test_agent_core_chat_passes_workspace_to_rag_provider():
     seen_workspaces: list[str] = []
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=False, enable_quant=False),
+        tool_config=ToolConfig(enable_memory=False),
         runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
     )
     route = RouteDecision(
@@ -417,7 +470,7 @@ async def test_agent_core_preview_route_uses_smart_memory_window():
     capturing_judge = _CapturingRouteJudge(route=route)
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=True, enable_quant=False),
+        tool_config=ToolConfig(enable_memory=True),
         runtime=AgentRuntimeConfig(
             default_workspace="",
             max_iterations=3,
@@ -451,7 +504,7 @@ async def test_agent_core_preview_route_uses_smart_memory_window():
 def test_agent_core_builds_route_judge_with_configured_prompt_version():
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=False, enable_quant=False),
+        tool_config=ToolConfig(enable_memory=False),
         runtime=AgentRuntimeConfig(
             default_workspace="",
             max_iterations=3,

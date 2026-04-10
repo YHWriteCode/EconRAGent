@@ -96,7 +96,6 @@ async def test_web_search_to_kg_ingest_chain_via_agent_core():
         agent_model=AgentModelConfig(provider="disabled"),
         tool_config=ToolConfig(
             enable_memory=False,
-            enable_quant=False,
             enable_web_search=True,
             enable_kg_ingest=True,
         ),

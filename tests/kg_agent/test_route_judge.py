@@ -16,7 +16,7 @@ async def test_route_judge_relation_explanation_prefers_hybrid_and_graph_trace()
         query="比亚迪受新能源汽车政策影响体现在哪些方面？",
         session_context={"history": []},
         user_profile={},
-        available_tools=["kg_hybrid_search", "graph_relation_trace"],
+        available_capabilities=["kg_hybrid_search", "graph_relation_trace"],
     )
 
     assert route.need_tools is True
@@ -35,7 +35,7 @@ async def test_route_judge_followup_prefers_memory_first():
         query="继续刚才关于比亚迪的话题",
         session_context={"history": [{"role": "user", "content": "比亚迪是什么公司"}]},
         user_profile={},
-        available_tools=["memory_search", "kg_hybrid_search"],
+        available_capabilities=["memory_search", "kg_hybrid_search"],
     )
 
     assert route.need_memory is True
@@ -50,7 +50,7 @@ async def test_route_judge_followup_can_use_cross_session_memory():
         query="continue the previous supplier topic",
         session_context={"history": []},
         user_profile={},
-        available_tools=["cross_session_search", "kg_hybrid_search"],
+        available_capabilities=["cross_session_search", "kg_hybrid_search"],
     )
 
     assert route.need_memory is True
@@ -58,18 +58,19 @@ async def test_route_judge_followup_can_use_cross_session_memory():
 
 
 @pytest.mark.asyncio
-async def test_route_judge_quant_request_uses_quant_tool():
+async def test_route_judge_quant_request_is_marked_as_external_specialized_capability():
     judge = RouteJudge(default_max_iterations=3)
 
     route = await judge.plan(
         query="帮我回测一个双均线策略，并给出夏普比率",
         session_context={"history": []},
         user_profile={},
-        available_tools=["quant_backtest"],
+        available_capabilities=["kg_hybrid_search", "web_search"],
     )
 
-    assert route.strategy == "quant_request"
-    assert route.tool_sequence[0].tool == "quant_backtest"
+    assert route.strategy == "specialized_external_capability"
+    assert route.need_tools is False
+    assert route.tool_sequence == []
 
 
 @pytest.mark.asyncio
@@ -80,7 +81,7 @@ async def test_route_judge_direct_url_prefers_web_crawl():
         query="请帮我分析这个网页 https://example.com/news/byd-policy 的内容",
         session_context={"history": []},
         user_profile={},
-        available_tools=["web_search", "kg_hybrid_search"],
+        available_capabilities=["web_search", "kg_hybrid_search"],
     )
 
     assert route.strategy == "direct_url_crawl"
@@ -130,7 +131,7 @@ async def test_route_judge_llm_refinement_uses_selected_prompt_version():
         query="比亚迪受新能源汽车政策影响体现在哪些方面？",
         session_context={"history": []},
         user_profile={"industry": "auto"},
-        available_tools=["kg_hybrid_search", "graph_relation_trace"],
+        available_capabilities=["kg_hybrid_search", "graph_relation_trace"],
     )
 
     assert route.strategy == "kg_hybrid_first_then_graph_trace"
@@ -152,10 +153,11 @@ def test_route_judge_prompt_version_registry_and_fallback():
     system_prompt, user_prompt = build_route_judge_prompt(
         query="supplier update",
         session_context={"history": []},
-        available_tools=["kg_hybrid_search"],
+        available_capabilities=["kg_hybrid_search"],
         current_plan={"strategy": "factual_qa"},
         prompt_version="missing-version",
     )
 
     assert "route judge" in system_prompt.lower()
     assert f"Prompt version: {DEFAULT_ROUTE_JUDGE_PROMPT_VERSION}" in user_prompt
+    assert "Available capabilities:" in user_prompt

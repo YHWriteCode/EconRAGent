@@ -4,8 +4,8 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import AsyncIterator
 from typing import Any
+from typing import AsyncIterator
 
 from dotenv import load_dotenv
 
@@ -61,6 +61,20 @@ def _first_env_float(default: float, *names: str) -> float:
         except ValueError:
             continue
     return default
+
+
+def _env_json(name: str, default: Any) -> Any:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip()
+    if not normalized:
+        return default
+    try:
+        return json.loads(normalized)
+    except json.JSONDecodeError:
+        logger.warning("Invalid JSON in %s; falling back to default.", name)
+        return default
 
 
 def _default_crawler_llm_provider() -> str:
@@ -163,7 +177,6 @@ class AgentModelConfig:
 class ToolConfig:
     enable_web_search: bool = False
     enable_memory: bool = True
-    enable_quant: bool = True
     enable_kg_ingest: bool = True
 
     @classmethod
@@ -171,9 +184,115 @@ class ToolConfig:
         return cls(
             enable_web_search=_env_bool("KG_AGENT_ENABLE_WEB_SEARCH", False),
             enable_memory=_env_bool("KG_AGENT_ENABLE_MEMORY", True),
-            enable_quant=_env_bool("KG_AGENT_ENABLE_QUANT", True),
             enable_kg_ingest=_env_bool("KG_AGENT_ENABLE_KG_INGEST", True),
         )
+
+
+@dataclass
+class MCPServerConfig:
+    name: str
+    transport: str = "stdio"
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+    startup_timeout_s: float = 15.0
+    tool_timeout_s: float = 60.0
+    discover_tools: bool = False
+
+    @classmethod
+    def from_mapping(cls, payload: dict[str, Any]) -> "MCPServerConfig | None":
+        name = str(payload.get("name", "")).strip()
+        command = str(payload.get("command", "")).strip()
+        if not name or not command:
+            return None
+        args = payload.get("args", [])
+        env = payload.get("env", {})
+        normalized_env = (
+            {
+                str(key): str(value)
+                for key, value in env.items()
+            }
+            if isinstance(env, dict)
+            else {}
+        )
+        return cls(
+            name=name,
+            transport=str(payload.get("transport", "stdio")).strip() or "stdio",
+            command=command,
+            args=[str(item) for item in args if isinstance(item, (str, int, float))],
+            env=normalized_env,
+            startup_timeout_s=float(payload.get("startup_timeout_s", 15.0)),
+            tool_timeout_s=float(payload.get("tool_timeout_s", 60.0)),
+            discover_tools=bool(payload.get("discover_tools", False)),
+        )
+
+
+@dataclass
+class MCPCapabilityConfig:
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    server: str
+    remote_name: str = ""
+    enabled: bool = True
+    planner_exposed: bool = False
+    tags: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_mapping(cls, payload: dict[str, Any]) -> "MCPCapabilityConfig | None":
+        name = str(payload.get("name", "")).strip()
+        description = str(payload.get("description", "")).strip()
+        server = str(payload.get("server", "")).strip()
+        input_schema = payload.get("input_schema", {})
+        if not name or not description or not server or not isinstance(input_schema, dict):
+            return None
+        tags = payload.get("tags", [])
+        return cls(
+            name=name,
+            description=description,
+            input_schema=input_schema,
+            server=server,
+            remote_name=str(payload.get("remote_name", "")).strip(),
+            enabled=bool(payload.get("enabled", True)),
+            planner_exposed=bool(payload.get("planner_exposed", False)),
+            tags=[str(item) for item in tags if isinstance(item, str)],
+        )
+
+
+@dataclass
+class MCPConfig:
+    servers: list[MCPServerConfig] = field(default_factory=list)
+    capabilities: list[MCPCapabilityConfig] = field(default_factory=list)
+
+    def discovery_enabled(self) -> bool:
+        return any(server.discover_tools for server in self.servers)
+
+    def is_configured(self) -> bool:
+        return bool(self.servers) and bool(
+            self.capabilities or self.discovery_enabled()
+        )
+
+    @classmethod
+    def from_env(cls) -> "MCPConfig":
+        raw_servers = _env_json("KG_AGENT_MCP_SERVERS_JSON", [])
+        raw_capabilities = _env_json("KG_AGENT_MCP_CAPABILITIES_JSON", [])
+        servers = []
+        capabilities = []
+        if isinstance(raw_servers, list):
+            for item in raw_servers:
+                if not isinstance(item, dict):
+                    continue
+                parsed = MCPServerConfig.from_mapping(item)
+                if parsed is not None:
+                    servers.append(parsed)
+        if isinstance(raw_capabilities, list):
+            for item in raw_capabilities:
+                if not isinstance(item, dict):
+                    continue
+                parsed = MCPCapabilityConfig.from_mapping(item)
+                if parsed is not None:
+                    capabilities.append(parsed)
+        return cls(servers=servers, capabilities=capabilities)
 
 
 @dataclass
@@ -488,6 +607,7 @@ class KGAgentConfig:
     agent_model: AgentModelConfig = field(default_factory=AgentModelConfig)
     utility_model: AgentModelConfig = field(default_factory=AgentModelConfig)
     tool_config: ToolConfig = field(default_factory=ToolConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
     crawler: CrawlerConfig = field(default_factory=CrawlerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     freshness: FreshnessConfig = field(default_factory=FreshnessConfig)
@@ -503,6 +623,7 @@ class KGAgentConfig:
             agent_model=AgentModelConfig.from_env(),
             utility_model=AgentModelConfig.from_utility_env(),
             tool_config=ToolConfig.from_env(),
+            mcp=MCPConfig.from_env(),
             crawler=CrawlerConfig.from_env(),
             scheduler=SchedulerConfig.from_env(),
             freshness=FreshnessConfig.from_env(),

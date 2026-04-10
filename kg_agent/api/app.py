@@ -29,6 +29,7 @@ from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
 from kg_agent.crawler.crawl_state_store import build_crawl_state_store
 from kg_agent.crawler.scheduler import IngestScheduler, build_scheduler_coordinator
 from kg_agent.crawler.source_registry import build_source_registry
+from kg_agent.mcp.adapter import MCPAdapter
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.memory.cross_session_store import CrossSessionStore
 from kg_agent.memory.user_profile import UserProfileStore
@@ -530,6 +531,7 @@ def build_agent_core_from_env(
     crawler_adapter: Crawl4AIAdapter | None = None,
 ) -> AgentCore:
     config = KGAgentConfig.from_env()
+    mcp_adapter = build_mcp_adapter_from_env(config=config)
     conversation_memory = ConversationMemoryStore(
         backend=config.persistence.memory_backend,
         sqlite_path=config.persistence.memory_sqlite_path,
@@ -548,6 +550,7 @@ def build_agent_core_from_env(
         return AgentCore(
             rag_provider=rag_provider,
             config=config,
+            mcp_adapter=mcp_adapter,
             crawler_adapter=crawler_adapter,
             conversation_memory=conversation_memory,
             cross_session_store=cross_session_store,
@@ -556,6 +559,7 @@ def build_agent_core_from_env(
     return AgentCore(
         rag=rag or build_rag_from_env(),
         config=config,
+        mcp_adapter=mcp_adapter,
         crawler_adapter=crawler_adapter,
         conversation_memory=conversation_memory,
         cross_session_store=cross_session_store,
@@ -572,6 +576,13 @@ def build_crawler_adapter_from_env(
     return Crawl4AIAdapter(config=config_obj.crawler)
 
 
+def build_mcp_adapter_from_env(*, config: KGAgentConfig | None = None) -> MCPAdapter | None:
+    config_obj = config or KGAgentConfig.from_env()
+    if not config_obj.mcp.is_configured():
+        return None
+    return MCPAdapter(config=config_obj.mcp)
+
+
 def create_app(
     *,
     rag: LightRAG | None = None,
@@ -583,10 +594,12 @@ def create_app(
     rag_provider = None
     config_obj = config or KGAgentConfig.from_env()
     crawler_adapter = None
+    mcp_adapter = None
     scheduler = None
 
     if agent_core is None:
         crawler_adapter = build_crawler_adapter_from_env(config=config_obj)
+        mcp_adapter = build_mcp_adapter_from_env(config=config_obj)
         conversation_memory = ConversationMemoryStore(
             backend=config_obj.persistence.memory_backend,
             sqlite_path=config_obj.persistence.memory_sqlite_path,
@@ -607,6 +620,7 @@ def create_app(
             agent_core = AgentCore(
                 rag_provider=rag_provider.get,
                 config=config_obj,
+                mcp_adapter=mcp_adapter,
                 crawler_adapter=crawler_adapter,
                 conversation_memory=conversation_memory,
                 cross_session_store=cross_session_store,
@@ -616,6 +630,7 @@ def create_app(
             agent_core = AgentCore(
                 rag=rag_instance,
                 config=config_obj,
+                mcp_adapter=mcp_adapter,
                 crawler_adapter=crawler_adapter,
                 conversation_memory=conversation_memory,
                 cross_session_store=cross_session_store,
@@ -625,8 +640,10 @@ def create_app(
         rag_instance = getattr(agent_core, "_rag", None)
         rag_provider = getattr(agent_core, "_rag_provider", None)
         crawler_adapter = getattr(agent_core, "crawler_adapter", None)
+        mcp_adapter = getattr(agent_core, "mcp_adapter", None)
     else:
         crawler_adapter = getattr(agent_core, "crawler_adapter", None)
+        mcp_adapter = getattr(agent_core, "mcp_adapter", None)
 
     if crawler_adapter is not None and agent_core is not None:
         scheduler = IngestScheduler(
@@ -658,6 +675,13 @@ def create_app(
             if scheduler is not None:
                 await scheduler.start()
             if agent_core is not None:
+                initialize_external = getattr(
+                    agent_core, "initialize_external_capabilities", None
+                )
+                if callable(initialize_external):
+                    result = initialize_external()
+                    if asyncio.iscoroutine(result):
+                        await result
                 cross_session_store = getattr(agent_core, "cross_session_store", None)
                 start_maintenance = getattr(
                     cross_session_store, "start_background_maintenance", None
@@ -672,6 +696,8 @@ def create_app(
                 await scheduler.stop()
             if crawler_adapter is not None:
                 await crawler_adapter.close()
+            if mcp_adapter is not None:
+                await mcp_adapter.close()
             if agent_core is not None:
                 for store_name in (
                     "cross_session_store",
@@ -699,6 +725,7 @@ def create_app(
     app.state.rag = rag_instance
     app.state.rag_provider = rag_provider
     app.state.crawler_adapter = crawler_adapter
+    app.state.mcp_adapter = mcp_adapter
     app.state.agent_core = agent_core
     app.state.scheduler = scheduler
     app.include_router(create_agent_routes(agent_core, scheduler=scheduler))
@@ -713,6 +740,17 @@ def create_app(
             active_workspaces = rag_provider.list_active_workspaces()
         elif rag_provider is not None:
             active_workspaces = rag_provider.list_active_workspaces()
+        mcp_capability_count = 0
+        if agent_core is not None:
+            capability_registry = getattr(agent_core, "capability_registry", None)
+            list_capabilities = getattr(capability_registry, "list_capabilities", None)
+            if callable(list_capabilities):
+                mcp_capability_count = sum(
+                    1
+                    for capability in list_capabilities()
+                    if getattr(capability, "kind", "") == "external_mcp"
+                    and bool(getattr(capability, "enabled", False))
+                )
         return {
             "status": "ok",
             "service": "kg_agent",
@@ -729,6 +767,8 @@ def create_app(
                 and scheduler._task is not None
                 and not scheduler._task.done()
             ),
+            "mcp_configured": bool(mcp_adapter is not None),
+            "mcp_capability_count": mcp_capability_count,
             "cross_session_maintenance_enabled": bool(
                 getattr(
                     getattr(agent_core, "cross_session_store", None),

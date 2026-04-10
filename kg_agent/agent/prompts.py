@@ -40,7 +40,7 @@ _ROUTE_JUDGE_PROMPT_TEMPLATES: dict[str, RouteJudgePromptTemplate] = {
             "Return strict JSON only."
         ),
         planner_guidance=(
-            "Refine the current rule-based plan when needed, but do not invent tools outside available_tools."
+            "Refine the current rule-based plan when needed, but do not invent capabilities outside available_capabilities."
         ),
     ),
     "v2": RouteJudgePromptTemplate(
@@ -57,7 +57,7 @@ _ROUTE_JUDGE_PROMPT_TEMPLATES: dict[str, RouteJudgePromptTemplate] = {
             "2. Use memory tools only for contextual follow-ups.\n"
             "3. Use web_search for direct URLs, realtime/freshness needs, or correction-driven refresh.\n"
             "4. Preserve tool order unless there is a concrete reason to reorder it.\n"
-            "5. Never invent tools outside available_tools."
+            "5. Never invent capabilities outside available_capabilities."
         ),
     ),
 }
@@ -245,10 +245,16 @@ def build_route_judge_prompt(
     *,
     query: str,
     session_context: dict[str, Any] | None,
-    available_tools: list[str],
     current_plan: dict[str, Any],
+    available_capabilities: list[str] | None = None,
+    available_tools: list[str] | None = None,
     prompt_version: str | None = None,
 ) -> tuple[str, str]:
+    resolved_capabilities = (
+        available_capabilities
+        if available_capabilities is not None
+        else (available_tools or [])
+    )
     resolved_version = resolve_route_judge_prompt_version(prompt_version)
     template = _ROUTE_JUDGE_PROMPT_TEMPLATES[resolved_version]
     system_prompt = template.system_prompt
@@ -259,8 +265,8 @@ def build_route_judge_prompt(
         f"{query}\n\n"
         "Recent session context:\n"
         f"{json.dumps(session_context or {}, ensure_ascii=False, indent=2)}\n\n"
-        "Available tools:\n"
-        f"{json.dumps(available_tools, ensure_ascii=False)}\n\n"
+        "Available capabilities:\n"
+        f"{json.dumps(resolved_capabilities, ensure_ascii=False)}\n\n"
         "Current rule-based plan:\n"
         f"{json.dumps(current_plan, ensure_ascii=False, indent=2)}\n\n"
         f"{template.planner_guidance}\n\n"

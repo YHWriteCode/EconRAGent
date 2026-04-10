@@ -162,7 +162,7 @@ def _build_registry() -> ToolRegistry:
 async def test_query_to_agent_to_kgdb_to_llm_answer_chain():
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=False, enable_quant=False),
+        tool_config=ToolConfig(enable_memory=False),
         runtime=AgentRuntimeConfig(default_workspace="", max_iterations=1),
     )
     route = RouteDecision(
@@ -205,7 +205,7 @@ async def test_query_to_agent_to_kgdb_to_llm_answer_chain():
 async def test_query_chain_filters_expired_short_term_crawler_content(tmp_path):
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=False, enable_quant=False),
+        tool_config=ToolConfig(enable_memory=False),
         runtime=AgentRuntimeConfig(default_workspace="", max_iterations=1),
     )
     route = RouteDecision(

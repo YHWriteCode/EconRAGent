@@ -1,15 +1,32 @@
 import pytest
+import json
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pathlib import Path
+import sys
 
+from kg_agent.agent.agent_core import AgentCore
 from kg_agent.api.app import (
     EnvLightRAGProvider,
     _normalize_ollama_host,
     _build_optional_utility_llm_from_env,
+    build_mcp_adapter_from_env,
     build_rag_from_env,
     create_app,
 )
 from kg_agent.api.agent_routes import create_agent_routes
+from kg_agent.config import (
+    AgentModelConfig,
+    AgentRuntimeConfig,
+    KGAgentConfig,
+    MCPConfig,
+    MCPServerConfig,
+    ToolConfig,
+)
+
+
+class _FakeRAG:
+    workspace = ""
 
 
 def test_build_rag_from_env_returns_lightrag_instance(tmp_path, monkeypatch):
@@ -127,6 +144,49 @@ def test_create_app_bootstraps_rag_from_env(tmp_path, monkeypatch):
     assert any(route.path == "/agent/chat" for route in app.router.routes)
 
 
+def test_build_mcp_adapter_from_env_returns_adapter(monkeypatch):
+    monkeypatch.setenv(
+        "KG_AGENT_MCP_SERVERS_JSON",
+        '[{"name":"quant-skill","command":"python","args":["server.py"]}]',
+    )
+    monkeypatch.setenv(
+        "KG_AGENT_MCP_CAPABILITIES_JSON",
+        (
+            '[{"name":"quant_backtest_skill","description":"Run a backtest.",'
+            '"server":"quant-skill","input_schema":{"type":"object"}}]'
+        ),
+    )
+
+    adapter = build_mcp_adapter_from_env()
+
+    assert adapter is not None
+    assert adapter.has_capabilities() is True
+
+
+def test_build_mcp_adapter_from_env_returns_adapter_for_discovery_only(monkeypatch):
+    fixture_path = Path(__file__).resolve().parent / "fixtures" / "fake_mcp_server.py"
+    monkeypatch.setenv(
+        "KG_AGENT_MCP_SERVERS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "quant-skill",
+                    "command": sys.executable,
+                    "args": [str(fixture_path)],
+                    "discover_tools": True,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setenv("KG_AGENT_MCP_CAPABILITIES_JSON", "[]")
+
+    adapter = build_mcp_adapter_from_env()
+
+    assert adapter is not None
+    assert adapter.discovery_enabled() is True
+    assert adapter.has_capabilities() is True
+
+
 def test_health_reports_default_workspace_and_active_workspace_count(
     tmp_path, monkeypatch
 ):
@@ -157,6 +217,43 @@ def test_health_reports_default_workspace_and_active_workspace_count(
     assert payload["active_workspace_count"] == 0
     assert payload["active_workspaces"] == []
     assert payload["dynamic_workspace_enabled"] is True
+    assert payload["mcp_configured"] is False
+    assert payload["mcp_capability_count"] == 0
+
+
+def test_health_reports_discovered_mcp_capability_count():
+    fixture_path = Path(__file__).resolve().parent / "fixtures" / "fake_mcp_server.py"
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False),
+        mcp=MCPConfig(
+            servers=[
+                MCPServerConfig(
+                    name="quant-skill",
+                    command=sys.executable,
+                    args=[str(fixture_path)],
+                    discover_tools=True,
+                    startup_timeout_s=5.0,
+                    tool_timeout_s=5.0,
+                )
+            ]
+        ),
+        runtime=AgentRuntimeConfig(default_workspace="", max_iterations=1),
+    )
+    agent_core = AgentCore(
+        rag=_FakeRAG(),
+        config=config,
+        mcp_adapter=build_mcp_adapter_from_env(config=config),
+    )
+    app = create_app(agent_core=agent_core, config=config)
+
+    with TestClient(app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mcp_configured"] is True
+    assert payload["mcp_capability_count"] == 2
 
 
 def test_normalize_ollama_host_strips_openai_style_suffix():

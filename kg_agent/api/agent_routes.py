@@ -42,10 +42,43 @@ class ToolInfo(BaseModel):
     input_schema: dict[str, Any]
     enabled: bool
     tags: list[str]
+    kind: str = "native"
+    executor: str = "tool_registry"
 
 
 class ToolsResponse(BaseModel):
     tools: list[ToolInfo]
+
+
+class CapabilityInvokeRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    query: str = ""
+    user_id: str | None = None
+    workspace: str | None = None
+    domain_schema: str | dict[str, Any] | None = None
+    use_memory: bool = False
+    args: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("query", mode="after")
+    @classmethod
+    def strip_optional_query(cls, value: str) -> str:
+        return value.strip()
+
+
+class CapabilityInvokeResult(BaseModel):
+    tool: str
+    success: bool
+    optional: bool = False
+    summary: str | None = None
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    data: Any = None
+
+
+class CapabilityInvokeResponse(BaseModel):
+    capability: ToolInfo
+    result: CapabilityInvokeResult
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class RoutePreviewRequest(BaseModel):
@@ -360,6 +393,28 @@ def create_agent_routes(agent_core, scheduler=None):
     @router.get("/agent/tools", response_model=ToolsResponse)
     async def list_agent_tools():
         return {"tools": agent_core.list_tools()}
+
+    @router.post(
+        "/agent/capabilities/{capability_name}/invoke",
+        response_model=CapabilityInvokeResponse,
+    )
+    async def invoke_capability(capability_name: str, request: CapabilityInvokeRequest):
+        try:
+            response = await agent_core.invoke_capability(
+                capability_name=capability_name,
+                session_id=request.session_id,
+                query=request.query,
+                user_id=request.user_id,
+                workspace=request.workspace,
+                domain_schema=request.domain_schema,
+                use_memory=request.use_memory,
+                args=request.args,
+            )
+            return response.to_dict()
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post("/agent/route_preview", response_model=RoutePreviewResponse)
     async def route_preview(request: RoutePreviewRequest):

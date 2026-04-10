@@ -74,16 +74,6 @@ WEB_SEARCH_SCHEMA = {
     "required": ["query"],
 }
 
-QUANT_BACKTEST_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "query": {"type": "string"},
-        "symbol": {"type": "string"},
-        "strategy_name": {"type": "string"},
-    },
-    "required": ["query"],
-}
-
 KG_INGEST_SCHEMA = {
     "type": "object",
     "properties": {

@@ -56,7 +56,7 @@ RELATION_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
-QUANT_PATTERN = re.compile(
+SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN = re.compile(
     r"("
     r"\u6536\u76ca\u7387|"
     r"\u56de\u6d4b|"
@@ -163,18 +163,23 @@ class RouteJudge:
         query: str,
         session_context: dict[str, Any] | None,
         user_profile: dict[str, Any] | None,
-        available_tools: list[str],
+        available_capabilities: list[str] | None = None,
+        available_tools: list[str] | None = None,
     ) -> RouteDecision:
+        resolved_capabilities = self._resolve_available_capabilities(
+            available_capabilities=available_capabilities,
+            available_tools=available_tools,
+        )
         base_decision = self._rule_based_fallback(
             query=query,
             session_context=session_context,
-            available_tools=available_tools,
+            available_tools=resolved_capabilities,
         )
         refined = await self._maybe_refine_with_llm(
             query=query,
             session_context=session_context,
             user_profile=user_profile,
-            available_tools=available_tools,
+            available_tools=resolved_capabilities,
             base_decision=base_decision,
         )
         return refined or base_decision
@@ -203,7 +208,9 @@ class RouteJudge:
             has_history or has_cross_session_tool
         )
         needs_realtime = bool(REALTIME_PATTERN.search(normalized_query))
-        is_quant = bool(QUANT_PATTERN.search(normalized_query))
+        needs_specialized_external_capability = bool(
+            SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN.search(normalized_query)
+        )
         is_relation = bool(RELATION_PATTERN.search(normalized_query))
         is_entity = bool(ENTITY_PATTERN.search(normalized_query))
         is_ingest = bool(INGEST_PATTERN.search(normalized_query))
@@ -219,7 +226,14 @@ class RouteJudge:
         reason = "The query can be handled without external tools."
 
         if is_simple and not any(
-            [is_quant, needs_realtime, is_relation, is_entity, is_ingest, is_correction]
+            [
+                needs_specialized_external_capability,
+                needs_realtime,
+                is_relation,
+                is_entity,
+                is_ingest,
+                is_correction,
+            ]
         ):
             return RouteDecision(
                 need_tools=False,
@@ -229,6 +243,21 @@ class RouteJudge:
                 strategy=strategy,
                 tool_sequence=[],
                 reason=reason,
+                max_iterations=1,
+            )
+
+        if needs_specialized_external_capability:
+            return RouteDecision(
+                need_tools=False,
+                need_memory=False,
+                need_web_search=False,
+                need_path_explanation=False,
+                strategy="specialized_external_capability",
+                tool_sequence=[],
+                reason=(
+                    "This request needs a specialized external capability rather than "
+                    "the built-in knowledge-graph or web tools."
+                ),
                 max_iterations=1,
             )
 
@@ -305,12 +334,6 @@ class RouteJudge:
             )
             reason = (
                 "The query includes direct URLs, so the crawler should fetch those pages first."
-            )
-        elif is_quant and "quant_backtest" in available_tools:
-            strategy = "quant_request"
-            sequence.append(ToolCallPlan(tool="quant_backtest"))
-            reason = (
-                "The query mentions trading or backtest metrics, so the quant tool should be used."
             )
         elif needs_realtime:
             strategy, realtime_sequence, need_path_explanation, reason = (
@@ -438,7 +461,10 @@ class RouteJudge:
     ) -> RouteDecision | None:
         if self.llm_client is None or not self.llm_client.is_available():
             return None
-        if base_decision.strategy in {"simple_answer_no_tool", "quant_request"}:
+        if base_decision.strategy in {
+            "simple_answer_no_tool",
+            "specialized_external_capability",
+        }:
             return None
 
         system_prompt, user_prompt = build_route_judge_prompt(
@@ -509,6 +535,19 @@ class RouteJudge:
             normalized.append(item)
             seen.add(item.tool)
         return normalized
+
+    @staticmethod
+    def _resolve_available_capabilities(
+        *,
+        available_capabilities: list[str] | None,
+        available_tools: list[str] | None,
+    ) -> list[str]:
+        raw = (
+            available_capabilities
+            if available_capabilities is not None
+            else (available_tools or [])
+        )
+        return [str(item) for item in raw if isinstance(item, str) and item.strip()]
 
     @staticmethod
     def _last_turn_used_kg_tools(recent_tool_calls: Any) -> bool:

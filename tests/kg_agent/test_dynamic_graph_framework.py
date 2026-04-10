@@ -56,7 +56,7 @@ async def test_route_judge_realtime_prefers_freshness_aware_search():
         query="latest tesla deliveries today",
         session_context={"history": [], "recent_tool_calls": []},
         user_profile={},
-        available_tools=["web_search", "kg_hybrid_search"],
+        available_capabilities=["web_search", "kg_hybrid_search"],
     )
 
     assert route.strategy == "freshness_aware_search"
@@ -83,7 +83,7 @@ async def test_route_judge_correction_requires_recent_kg_tools():
             ],
         },
         user_profile={},
-        available_tools=["web_search", "kg_hybrid_search"],
+        available_capabilities=["web_search", "kg_hybrid_search"],
     )
 
     assert route.strategy == "correction_and_refresh"
@@ -216,7 +216,7 @@ async def test_agent_core_auto_ingest_persists_compact_tool_calls_and_injects_re
     memory = ConversationMemoryStore()
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=True, enable_quant=False, enable_kg_ingest=True),
+        tool_config=ToolConfig(enable_memory=True, enable_kg_ingest=True),
         freshness=FreshnessConfig(enable_auto_ingest=True, threshold_seconds=60),
         runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
     )
@@ -287,7 +287,7 @@ async def test_agent_core_auto_ingest_persists_compact_tool_calls_and_injects_re
 async def test_agent_core_correction_refresh_sets_metadata_and_annotation():
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=True, enable_quant=False, enable_kg_ingest=True),
+        tool_config=ToolConfig(enable_memory=True, enable_kg_ingest=True),
         freshness=FreshnessConfig(enable_auto_ingest=False, threshold_seconds=60),
         runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
     )
@@ -330,7 +330,7 @@ async def test_agent_core_correction_refresh_sets_metadata_and_annotation():
 async def test_agent_core_fresh_graph_skips_auto_ingest():
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),
-        tool_config=ToolConfig(enable_memory=False, enable_quant=False, enable_kg_ingest=True),
+        tool_config=ToolConfig(enable_memory=False, enable_kg_ingest=True),
         freshness=FreshnessConfig(enable_auto_ingest=True, threshold_seconds=60),
         runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
     )
@@ -432,7 +432,7 @@ async def test_agent_core_executes_generic_tool_input_bindings():
         rag=_FakeRAG(),
         config=KGAgentConfig(
             agent_model=AgentModelConfig(provider="disabled"),
-            tool_config=ToolConfig(enable_memory=False, enable_quant=False),
+            tool_config=ToolConfig(enable_memory=False),
             freshness=FreshnessConfig(enable_auto_ingest=False),
             runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
         ),
@@ -499,7 +499,7 @@ async def test_agent_core_can_pipe_web_search_output_into_kg_ingest():
         rag=_FakeRAG(),
         config=KGAgentConfig(
             agent_model=AgentModelConfig(provider="disabled"),
-            tool_config=ToolConfig(enable_memory=False, enable_quant=False, enable_kg_ingest=True),
+            tool_config=ToolConfig(enable_memory=False, enable_kg_ingest=True),
             freshness=FreshnessConfig(enable_auto_ingest=False),
             runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
         ),

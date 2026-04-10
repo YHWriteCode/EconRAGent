@@ -14,7 +14,8 @@
 - Agent main loop (reasoning → routing → tool invocation → summary response)
 - Route Judge: decides "how to query, what to query, how many steps"
 - Path Explainer: organizes graph paths + text evidence into readable explanations
-- Tool registration and execution (retrieval, graph, memory, web search, quantitative analysis, etc.)
+- Tool registration and execution for the built-in core capability set (retrieval, graph, memory, web search, ingestion)
+- Static MCP-backed external capability execution through the capability layer
 - Conversation memory (dynamic attention window + cross-session + user profile)
 - External API service
 
@@ -23,6 +24,7 @@
 - Document chunking, entity extraction, graph merging, vector writes → handled by `lightrag_fork/`
 - Storage backend management (Neo4j / Qdrant / MongoDB, etc.) → handled by `lightrag_fork/kg/`
 - LLM low-level adaptation (model call abstraction) → provided by `lightrag_fork/llm/`, wrapped by `AgentLLMClient` in this layer
+- Domain-specific external capabilities (for example quant/backtest engines) should not be embedded as placeholder built-in tools; they belong in external MCP/skill-style integrations through the capability layer
 
 **Dependency Direction (strictly one-way):**
 
@@ -43,6 +45,7 @@ kg_agent/
 ├── agent/                         # Agent core (reasoning + decision + execution)
 │   ├── __init__.py
 │   ├── agent_core.py              # Main Agent loop: AgentCore.chat() entry point
+│   ├── capability_registry.py     # CapabilityDefinition/CapabilityRegistry: planner-visible capability layer
 │   ├── route_judge.py             # Route Judge: RouteJudge.plan() → RouteDecision
 │   ├── path_explainer.py          # Path explanation layer: PathExplainer.explain() → PathExplanation
 │   ├── tool_registry.py           # Tool registration protocol: ToolRegistry (register, find, execute)
@@ -50,14 +53,17 @@ kg_agent/
 │   ├── prompts.py                 # All prompt templates (route judge version registry / path-explainer template registry / final answer)
 │   └── tool_schemas.py            # Tool parameter JSON Schema definitions
 │
+├── mcp/                           # External capability transport layer
+│   ├── __init__.py
+│   └── adapter.py                 # MCPAdapter: stdio-based external capability execution
+│
 ├── tools/                         # General tool layer (one file per tool)
 │   ├── __init__.py
 │   ├── base.py                    # ToolDefinition + ToolResult data structures
 │   ├── retrieval_tools.py         # kg_hybrid_search, kg_naive_search
 │   ├── graph_tools.py             # graph_entity_lookup, graph_relation_trace
 │   ├── kg_ingest.py               # kg_ingest: insert any text/markdown into KG via rag.ainsert()
-│   ├── web_search.py              # web_search: URL crawling + search-engine URL discovery via Crawl4AI
-│   └── quant_tools.py             # quant_backtest (placeholder, quant as tool rather than standalone module)
+│   └── web_search.py              # web_search: URL crawling + search-engine URL discovery via Crawl4AI
 │
 ├── memory/                        # Memory system
 │   ├── __init__.py
@@ -102,11 +108,15 @@ kg_agent/
 - LLM calls go through `AgentLLMClient` (wrapping OpenAI AsyncClient)
 - `AgentCore` can attach a dedicated lightweight utility model for internal routing/explanation work; when it is not configured, Route Judge and Path Explainer warn once and fall back to the main agent model
 
-### 3.4 Tools Are Managed Through ToolRegistry
+### 3.4 Capabilities Are Exposed Through CapabilityRegistry; Native Execution Uses ToolRegistry
 
 - All tools must be registered via `ToolRegistry.register()` before use
+- Planner-visible built-in capabilities are registered via `CapabilityRegistry`
+- `AgentCore` currently builds the native capability registry by mirroring the enabled/disabled built-in tool set
+- Configured MCP capabilities are also registered in `CapabilityRegistry` with `kind="external_mcp"` and `executor="mcp"`
 - Do not hardcode tool invocations in `agent_core.py`
-- Quantitative analysis is a tool type (`quant_tools.py`), no longer maintaining a separate top-level directory
+- `ToolRegistry` is for the core built-in capability set only
+- Do not add domain-specific placeholder tools to the core registry; specialized external modules should be exposed through the MCP adapter instead
 
 ### 3.5 Path Explanation Allows Fallback
 
@@ -211,19 +221,27 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
 1. Load context
    ├─ Session history (ConversationMemoryStore.get_context_window: recent-turn anchor + query-aware older-turn backfill within token budget)
    ├─ User profile (UserProfileStore.get_profile)
-   └─ Available tool list (enabled tools from ToolRegistry)
+   └─ Available capability list (enabled capabilities from CapabilityRegistry; native capabilities are planner-visible by default, configured MCP capabilities are hidden from auto-routing unless `planner_exposed=true`)
 
 2. Invoke Route Judge
-   └─ RouteJudge.plan(query, session_context, user_profile, available_tools)
+   └─ RouteJudge.plan(query, session_context, user_profile, available_capabilities)
        ├─ Rule engine priority (regex matching for 7 scenario types)
        └─ Optional LLM refinement (when llm_client is available, LLM can adjust rule results)
        → Returns RouteDecision (structured routing plan)
 
 3. Execute tools sequentially per tool_sequence
-   └─ ToolRegistry.execute(tool_name, **kwargs)
+   └─ Executor dispatch
+       ├─ native capability → ToolRegistry.execute(tool_name, **kwargs)
+       └─ `external_mcp` capability → MCPAdapter.invoke(capability_name, json_safe_kwargs)
        ├─ Collect tool results
        ├─ Accumulate graph_paths and evidence_chunks (for path explanation)
        └─ Support early termination (optional tools skipped when preceding tools succeed)
+
+3b. Explicit capability invocation (API / direct execution path)
+   └─ AgentCore.invoke_capability(capability_name, session_id, query, args, ...)
+       ├─ Bypasses RouteJudge and `tool_sequence`
+       ├─ Reuses the same capability registry, memory-context loading, and executor dispatch
+       └─ Returns one serialized capability result payload directly to the caller
 
 4. Dynamic-graph bridge (conditional)
    └─ For selected strategies only:
@@ -261,7 +279,7 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
 
 ```python
 class RouteJudge:
-    async def plan(query, session_context, user_profile, available_tools) -> RouteDecision
+    async def plan(query, session_context, user_profile, available_capabilities) -> RouteDecision
 ```
 
 ### 6.2 RouteDecision Structure
@@ -291,10 +309,10 @@ The rule engine covers explicit patterns plus the default factual fallback:
 | Real-time info | `REALTIME_PATTERN` | `freshness_aware_search` | web_search → kg_hybrid_search |
 | User correction | `CORRECTION_PATTERN` + recent KG tools | `correction_and_refresh` | web_search |
 | Direct URL query | `URL_PATTERN` | `direct_url_crawl` | web_search |
-| Quant analysis | `QUANT_PATTERN` | `quant_request` | quant_backtest |
+| Specialized external analysis (currently quant/backtest-like prompts) | `SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN` | `specialized_external_capability` | Empty |
 | Default factual QA | Fallback | `factual_qa` | kg_hybrid_search |
 
-LLM refinement: When `llm_client` is available and the scenario is not simple/quant, the rule result is passed to the LLM for secondary adjustment (still constrained by `available_tools`; it will not invent nonexistent tools).
+LLM refinement: When `llm_client` is available and the scenario is not a simple greeting or an explicitly external-specialized request, the rule result is passed to the LLM for secondary adjustment (still constrained by `available_capabilities`; it will not invent nonexistent capabilities).
 
 Route Judge prompt management now supports versioned templates through `agent/prompts.py`:
 
@@ -359,7 +377,7 @@ class PathExplainer:
 
 ---
 
-## 8. Tool System
+## 8. Tool System And Capability Layer
 
 ### 8.1 Tool Protocol
 
@@ -396,12 +414,28 @@ agent/builtin_tools.py  build_default_tool_registry()
     ├─ Construct ToolDefinition
     └─ registry.register(tool_definition)
     ↓
-agent/agent_core.py  AgentCore.__init__() holds ToolRegistry
+agent/capability_registry.py  build_native_capability_registry(tool_registry)
+    └─ Mirror native ToolDefinition objects into planner-visible CapabilityDefinition entries
     ↓
-Runtime → ToolRegistry.execute(name, **kwargs)
+config.py  MCPConfig.from_env()
+    ├─ `KG_AGENT_MCP_SERVERS_JSON`
+    └─ `KG_AGENT_MCP_CAPABILITIES_JSON`
+    ↓
+agent/agent_core.py  AgentCore.initialize_external_capabilities()
+    ├─ `MCPAdapter.discover_capabilities()` optionally calls MCP `tools/list`
+    ├─ Static MCP declarations override discovered tools with the same `(server, remote_name)`
+    └─ Newly discovered external capabilities are registered into CapabilityRegistry
+    ↓
+agent/agent_core.py  AgentCore.__init__() holds ToolRegistry + CapabilityRegistry
+    ↓
+Planner / API discovery → CapabilityRegistry.list_capabilities()
+    ↓
+Runtime execution
+    ├─ native → ToolRegistry.execute(name, **kwargs)
+    └─ external_mcp → MCPAdapter.invoke(name, json_safe_kwargs)
 ```
 
-### 8.3 Current Tool Inventory
+### 8.3 Current Native Capability Inventory
 
 | Tool Name | File | Tags | Status | Enabled by Default |
 |---|---|---|---|---|
@@ -413,10 +447,36 @@ Runtime → ToolRegistry.execute(name, **kwargs)
 | `cross_session_search` | `agent/builtin_tools.py` | memory, cross-session | Implemented | **Yes** when memory is enabled and a user-scoped cross-session store is available |
 | `web_search` | `tools/web_search.py` | web | Implemented: direct URL crawling + DuckDuckGo search-engine URL discovery via Crawl4AI; supports `search_query` override | **No** (`KG_AGENT_ENABLE_WEB_SEARCH` defaults to false) |
 | `kg_ingest` | `tools/kg_ingest.py` | knowledge-graph, ingestion | Implemented: accepts text/markdown from any source and calls `rag.ainsert()`; `source` accepts `str \| list[str] \| None` | **Yes** (controlled by `KG_AGENT_ENABLE_KG_INGEST`) |
-| `quant_backtest` | `tools/quant_tools.py` | quant | Placeholder | **Yes** (controlled by `KG_AGENT_ENABLE_QUANT`) |
 
 > **Note:** "Tool registered" does not mean "enabled by default". `GET /agent/tools` only returns tools with `enabled=True`.
-> At default startup, 8 tools are available when `user_id` is present (`web_search` is disabled by default; `cross_session_search` is user-scoped).
+> `GET /agent/tools` now exposes built-in capability metadata derived from the core native registry, including `kind="native"` and `executor="tool_registry"`.
+> When MCP capabilities are configured, `GET /agent/tools` also returns `kind="external_mcp"` / `executor="mcp"` entries, including dynamically discovered MCP tools after app startup or the first async agent call.
+> At default startup, 7 tools are available when `user_id` is present (`web_search` is disabled by default; `cross_session_search` is user-scoped).
+
+### 8.4 MCP External Capability Layer
+
+- `MCPAdapter` currently supports **stdio** transport only
+- MCP capabilities can be provided in two ways:
+  - statically declared through config (`KG_AGENT_MCP_CAPABILITIES_JSON`)
+  - optionally discovered from MCP `tools/list` when a server entry sets `discover_tools=true`
+- MCP capabilities can now be invoked explicitly through `AgentCore.invoke_capability(...)` and `POST /agent/capabilities/{capability_name}/invoke`, without constructing a synthetic `ToolCallPlan`
+- Dynamic discovery is additive and compatible with static declarations:
+  - static declarations keep custom public names, `planner_exposed`, tags, and remote-name overrides
+  - if a discovered remote tool matches a static declaration on the same `(server, remote_name)`, the static declaration wins and no duplicate capability is registered
+  - newly discovered capabilities default to `planner_exposed=false`
+- Each configured capability maps:
+  - planner/API-visible `CapabilityDefinition.name`
+  - target MCP server name
+  - optional remote tool name override (`remote_name`)
+  - `planner_exposed` flag controlling whether the Route Judge can see it by default
+- External capability execution sanitizes arguments down to JSON-safe values before sending them across MCP, so in-process objects such as `rag`, stores, adapters, and locks are not leaked into the transport payload
+- The current execution result shape stores:
+  - `data.summary`
+  - `data.structured_content`
+  - `data.content`
+  - `data.raw`
+  - `metadata.executor="mcp"`
+  - `metadata.server=<server_name>`
 
 ### 8.5 Crawler Layer Architecture
 
@@ -602,16 +662,22 @@ Optional lightweight utility model for internal routing/explanation work:
 | `UTILITY_LLM_BINDING_API_KEY` | empty | Cross-layer fallback utility model API key |
 | `UTILITY_LLM_TIMEOUT` | `60.0` | Cross-layer fallback utility model timeout |
 
-### 10.2 Tool Switches (ToolConfig)
+### 10.2 MCP Configuration (MCPConfig)
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `KG_AGENT_MCP_SERVERS_JSON` | `[]` | JSON array of stdio MCP server definitions (`name`, `command`, optional `args`, `env`, `startup_timeout_s`, `tool_timeout_s`, optional `discover_tools`) |
+| `KG_AGENT_MCP_CAPABILITIES_JSON` | `[]` | JSON array of static MCP capability declarations (`name`, `description`, `server`, `input_schema`, optional `remote_name`, `planner_exposed`, `tags`, `enabled`) |
+
+### 10.3 Tool Switches (ToolConfig)
 
 | Environment Variable | Default | Description |
 |---|---|---|
 | `KG_AGENT_ENABLE_WEB_SEARCH` | `false` | Enable web search |
 | `KG_AGENT_ENABLE_MEMORY` | `true` | Enable conversation memory |
-| `KG_AGENT_ENABLE_QUANT` | `true` | Enable quantitative tools |
 | `KG_AGENT_ENABLE_KG_INGEST` | `true` | Enable KG ingestion tool |
 
-### 10.3 Runtime Configuration (AgentRuntimeConfig)
+### 10.4 Runtime Configuration (AgentRuntimeConfig)
 
 | Environment Variable | Default | Description |
 |---|---|---|
@@ -624,7 +690,7 @@ Optional lightweight utility model for internal routing/explanation work:
 | `KG_AGENT_MEMORY_MAX_CONTEXT_TOKENS` | `1200` | Soft token budget used when selecting conversation history for routing/final answer prompts |
 | `KG_AGENT_DEBUG` | `false` | Debug mode |
 
-### 10.4 Crawler Configuration (CrawlerConfig)
+### 10.5 Crawler Configuration (CrawlerConfig)
 
 | Environment Variable | Default | Description |
 |---|---|---|
@@ -650,7 +716,7 @@ Optional lightweight utility model for internal routing/explanation work:
 | `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_APPLY_CHUNKING` | `true` | Let Crawl4AI chunk extraction input before LLM calls |
 | `KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_PREFER_CONTENT` | `false` | Replace downstream page markdown with `result.extracted_content` when available |
 
-### 10.5 Scheduler Configuration (SchedulerConfig)
+### 10.6 Scheduler Configuration (SchedulerConfig)
 
 | Environment Variable | Default | Description |
 |---|---|---|
@@ -693,7 +759,7 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 - `content_lifecycle.event_cluster_window_days`: maximum publish-time gap considered when matching a new article into an existing event cluster; older clusters are ignored as unrelated followups
 - `content_lifecycle.event_cluster_min_similarity`: minimum heuristic similarity required before a new article is merged into an existing event cluster without LLM adjudication
 
-### 10.6 Persistence Configuration (PersistenceConfig)
+### 10.7 Persistence Configuration (PersistenceConfig)
 
 | Environment Variable | Default | Description |
 |---|---|---|
@@ -723,7 +789,7 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 | `KG_AGENT_CROSS_SESSION_AGING_KEEP_MIN_OCCURRENCES` | `2` | Minimum support required to protect an old memory from aging-based deletion |
 | `KG_AGENT_CROSS_SESSION_AGING_MAX_SNIPPETS` | `3` | Maximum snippets retained when rebuilding an aged memory summary |
 
-### 10.7 Freshness Configuration (FreshnessConfig)
+### 10.8 Freshness Configuration (FreshnessConfig)
 
 | Environment Variable | Default | Description |
 |---|---|---|
@@ -732,7 +798,7 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 | `KG_AGENT_STALENESS_DECAY_DAYS` | `7.0` | Half-life parameter for freshness-aware KG retrieval decay |
 | `KG_AGENT_ENABLE_FRESHNESS_DECAY` | `false` | Enable freshness-aware KG retrieval decay |
 
-### 10.8 Rerank Configuration
+### 10.9 Rerank Configuration
 
 `build_rag_from_env()` now forwards the standard LightRAG rerank environment variables into the agent-managed `LightRAG` instance, and tool-level query flows (`memory_search`, `cross_session_search`, `web_search`) reuse that same rerank configuration through `rag.rerank_model_func` / `rag.min_rerank_score`.
 
@@ -755,8 +821,9 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 | Method | Path | Defined In | Description |
 |---|---|---|---|
 | POST | `/agent/chat` | `agent_routes.py` | Main conversation entry point |
+| POST | `/agent/capabilities/{capability_name}/invoke` | `agent_routes.py` | Explicitly invoke one native or external capability without going through RouteJudge |
 | POST | `/agent/ingest` | `agent_routes.py` | Insert content into KG (web page, PDF, manual text, etc.) |
-| GET | `/agent/tools` | `agent_routes.py` | View currently enabled tools |
+| GET | `/agent/tools` | `agent_routes.py` | View currently enabled capabilities, including configured and dynamically discovered external MCP capabilities |
 | POST | `/agent/route_preview` | `agent_routes.py` | Return routing plan only (for debugging) |
 | GET | `/agent/scheduler/status` | `agent_routes.py` | View scheduler runtime/source status |
 | GET | `/agent/sources` | `agent_routes.py` | List monitored crawl sources |
@@ -805,7 +872,36 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 - `delta` — incremental answer text chunk
 - `done` — terminal payload with final answer, route, tool calls, path explanation, and metadata
 
-### 11.2 POST /agent/ingest
+### 11.2 POST /agent/capabilities/{capability_name}/invoke
+
+**Request Body (CapabilityInvokeRequest):**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | `str` | Yes | Session ID used for optional context loading |
+| `query` | `str` | No | Free-form request text; defaults to empty string for purely structured capability calls |
+| `user_id` | `str` | No | User ID |
+| `workspace` | `str` | No | Workspace |
+| `domain_schema` | `str \| dict` | No | Domain schema |
+| `use_memory` | `bool` | No | Whether to load conversation memory into the execution context (default false) |
+| `args` | `dict` | No | Structured capability arguments merged into the execution kwargs after reserved core fields are protected |
+
+**Response Body (CapabilityInvokeResponse):**
+
+| Field | Type | Description |
+|---|---|---|
+| `capability` | `dict` | Public capability metadata (`name`, `description`, `input_schema`, `kind`, `executor`, etc.) |
+| `result` | `dict` | Serialized single capability execution record (`tool`, `success`, `summary`, `error`, `metadata`, `data`) |
+| `metadata` | `dict` | Invocation metadata such as `session_id`, `workspace`, `use_memory`, `kind`, and `executor` |
+
+**Behavior notes:**
+
+- This endpoint bypasses RouteJudge planning and executes exactly one capability
+- It works for both native capabilities and configured `external_mcp` capabilities
+- Unlike `/agent/chat`, the returned capability result always includes the full execution payload rather than the pruned non-debug tool view
+- Memory can be loaded for context, but explicit invocation does not persist a new user/assistant turn into conversation memory
+
+### 11.3 POST /agent/ingest
 
 **Request Body (IngestRequest):**
 
@@ -825,7 +921,7 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 | `source` | `str \| null` | Echoed provenance label |
 | `message` | `str` | Human-readable status message |
 
-### 11.3 Scheduler and Source APIs
+### 11.4 Scheduler and Source APIs
 
 - `GET /agent/scheduler/status`
   - Returns scheduler configured/enabled/running flags, persistence file paths, loop counters, and per-source status including resolved source type / schedule mode / feed priority mode / feed dedup mode / content class / update mode, `consecutive_no_change`, `tracked_item_count`, `active_doc_count`, `expired_doc_count`, and `effective_interval_seconds`
@@ -838,7 +934,7 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 - `POST /agent/sources/{source_id}/trigger`
   - Immediately polls a source and returns crawl/ingest counts, including `feed_deduplicated_count`, `superseded_count`, `expired_doc_count`, and `deleted_doc_count` when short-term lifecycle handling is active
 
-### 11.4 GET /health
+### 11.5 GET /health
 
 **Response Body:**
 
@@ -855,6 +951,8 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 | `scheduler_configured` | `bool` | Whether scheduler was attached to the app |
 | `scheduler_enabled` | `bool` | Whether scheduler is enabled by config |
 | `scheduler_running` | `bool` | Whether scheduler background task is currently running |
+| `mcp_configured` | `bool` | Whether an MCP adapter was attached to the app |
+| `mcp_capability_count` | `int` | Number of enabled external MCP capabilities currently registered in the app, including dynamically discovered ones |
 
 ---
 
@@ -915,8 +1013,9 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 
 - [ ] Does it introduce write modifications to `lightrag_fork/`? (Forbidden)
 - [ ] Is the new tool registered via `ToolRegistry.register()`?
+- [ ] If the feature is planner-visible, is it also represented in `CapabilityRegistry` with the correct `kind` / `executor` metadata?
 - [ ] Does the new tool handler follow the `async def tool(*, rag, query, ..., **_) -> ToolResult` signature?
-- [ ] Do new Route Judge rules only reference tool names from `available_tools`?
+- [ ] Do new Route Judge rules only reference names present in `available_capabilities`?
 - [ ] Do new environment variables have sensible defaults?
 - [ ] Does it depend on LangChain or other heavy frameworks? (Forbidden)
 - [ ] Does path explanation retain a fallback path?
@@ -925,11 +1024,11 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 
 | Scenario | Recommended Approach |
 |---|---|
-| Add a new tool | Create file in `tools/` → add schema in `tool_schemas.py` → register in `builtin_tools.py` |
+| Add a new native capability | Create file in `tools/` → add schema in `tool_schemas.py` → register in `builtin_tools.py` → ensure it appears in the mirrored native `CapabilityRegistry` |
 | Modify routing strategy | Add regex pattern in `route_judge.py` or adjust LLM prompt |
 | Improve path explanation | Adjust scoring/evidence selection logic in `path_explainer.py` |
 | Extend search-engine discovery | Add engine support in `content_extractor.build_search_url()` and adapter |
-| Integrate quant service | Replace placeholder implementation in `tools/quant_tools.py` |
+| Integrate domain-specific external capability | Add MCP server + capability config, wire any needed transport support in `mcp/adapter.py`, and keep `planner_exposed=false` unless explicit auto-routing is intended |
 | Persist conversation memory | Use `sqlite` or `mongo` backend in `memory/conversation_memory.py`, or add a new backend following the same pattern |
 | Cross-session memory | Extend `memory/cross_session_store.py` backends or ranking logic |
 | Persist user profiles | Use `sqlite` or `mongo` backend in `memory/user_profile.py`, or add a new backend following the same pattern |
@@ -951,6 +1050,8 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 | `AgentCore` | `agent/agent_core.py` | Main Agent: `.chat()` conversation entry point |
 | `AgentRunContext` | `agent/agent_core.py` | Single conversation run context |
 | `AgentResponse` | `agent/agent_core.py` | Conversation return structure |
+| `CapabilityDefinition` | `agent/capability_registry.py` | Planner/API-visible capability metadata |
+| `CapabilityRegistry` | `agent/capability_registry.py` | Registry for built-in and future external capabilities |
 | `RouteJudge` | `agent/route_judge.py` | Route Judge: `.plan()` returns RouteDecision |
 | `RouteDecision` | `agent/route_judge.py` | Structured routing plan |
 | `ToolCallPlan` | `agent/route_judge.py` | Single-step tool invocation plan |
@@ -961,7 +1062,10 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 | `ToolDefinition` | `tools/base.py` | Tool definition data structure |
 | `ToolResult` | `tools/base.py` | Tool execution result |
 | `kg_ingest()` | `tools/kg_ingest.py` | Generic KG ingestion tool |
+| `build_native_capability_registry()` | `agent/capability_registry.py` | Mirror native tools into the capability layer |
+| `add_mcp_capabilities()` | `agent/capability_registry.py` | Register static or dynamically discovered external MCP capabilities into the capability layer |
 | `build_default_tool_registry()` | `agent/builtin_tools.py` | Build default tool set |
+| `MCPAdapter` | `mcp/adapter.py` | stdio MCP execution backend for external capabilities |
 | `KGAgentConfig` | `config.py` | Unified configuration entry point |
 | `AgentLLMClient` | `config.py` | OpenAI-compatible LLM client |
 | `FallbackLLMClient` | `config.py` | Utility-model-first client wrapper with one-time fallback warning |
@@ -977,7 +1081,8 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 
 ## 15. Known Limitations and TODOs
 
-- **quant_backtest** placeholder not implemented; needs integration with quantitative engine
+- **MCP integration is currently stdio-only**; optional dynamic `tools/list` discovery now exists, but there is still no SSE/HTTP transport or richer MCP server capability negotiation yet
+- **Configured `external_mcp` capabilities are hidden from auto-routing by default**; they execute correctly when explicitly invoked, but the Route Judge does not auto-plan them unless `planner_exposed=true`
 - **Scheduler** now supports optional loop leader election plus source-level coordination, but it still does not implement scheduler sharding or a richer distributed control plane
 - **Source persistence** now supports `json` and `sqlite`, but there is still no Redis/Mongo/Postgres-backed scheduler registry/state implementation
 - **RSS / Feed source support** now includes auto-detected feed typing, `adaptive_feed` scheduling, entry filtering, RSS/Atom `published_at` extraction, author/category/domain-aware filtering, canonical URL tracking, content-level dedup, short-term vs long-term crawler lifecycle classification, optional expiry deletion, workspace-global event-cluster candidate recall through `chunks_vdb`, batch article crawling via the shared crawler adapter, and both latest-item and age-based retention, but discovery/management is still URL-centric and does not yet provide richer feed semantics such as source credibility scoring or full feed graph provenance
