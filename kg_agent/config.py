@@ -296,6 +296,50 @@ class MCPConfig:
 
 
 @dataclass
+class SkillRuntimeConfig:
+    server: str = ""
+    run_tool_name: str = "run_skill_task"
+    read_tool_name: str = "read_skill"
+    read_file_tool_name: str = "read_skill_file"
+    logs_tool_name: str = "get_run_logs"
+    artifacts_tool_name: str = "get_run_artifacts"
+
+    def is_configured(self) -> bool:
+        return bool(self.server.strip())
+
+    @classmethod
+    def from_env(cls) -> "SkillRuntimeConfig":
+        return cls(
+            server=os.getenv("KG_AGENT_SKILL_RUNTIME_SERVER", "").strip(),
+            run_tool_name=os.getenv(
+                "KG_AGENT_SKILL_RUNTIME_RUN_TOOL",
+                "run_skill_task",
+            ).strip()
+            or "run_skill_task",
+            read_tool_name=os.getenv(
+                "KG_AGENT_SKILL_RUNTIME_READ_TOOL",
+                "read_skill",
+            ).strip()
+            or "read_skill",
+            read_file_tool_name=os.getenv(
+                "KG_AGENT_SKILL_RUNTIME_READ_FILE_TOOL",
+                "read_skill_file",
+            ).strip()
+            or "read_skill_file",
+            logs_tool_name=os.getenv(
+                "KG_AGENT_SKILL_RUNTIME_LOGS_TOOL",
+                "get_run_logs",
+            ).strip()
+            or "get_run_logs",
+            artifacts_tool_name=os.getenv(
+                "KG_AGENT_SKILL_RUNTIME_ARTIFACTS_TOOL",
+                "get_run_artifacts",
+            ).strip()
+            or "get_run_artifacts",
+        )
+
+
+@dataclass
 class CrawlerConfig:
     provider: str = "crawl4ai"
     browser_type: str = "chromium"
@@ -610,6 +654,7 @@ class KGAgentConfig:
     utility_model: AgentModelConfig = field(default_factory=AgentModelConfig)
     tool_config: ToolConfig = field(default_factory=ToolConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    skill_runtime: SkillRuntimeConfig = field(default_factory=SkillRuntimeConfig)
     crawler: CrawlerConfig = field(default_factory=CrawlerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     freshness: FreshnessConfig = field(default_factory=FreshnessConfig)
@@ -626,6 +671,7 @@ class KGAgentConfig:
             utility_model=AgentModelConfig.from_utility_env(),
             tool_config=ToolConfig.from_env(),
             mcp=MCPConfig.from_env(),
+            skill_runtime=SkillRuntimeConfig.from_env(),
             crawler=CrawlerConfig.from_env(),
             scheduler=SchedulerConfig.from_env(),
             freshness=FreshnessConfig.from_env(),

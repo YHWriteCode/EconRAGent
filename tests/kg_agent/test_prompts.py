@@ -87,3 +87,4 @@ def test_build_route_judge_prompt_includes_skills_and_skill_plan_contract():
     assert "route judge" in system_prompt.lower()
     assert "Available skills:" in user_prompt
     assert '"skill_plan": {"skill_name": str, "goal": str, "reason": str, "constraints": dict} | null' in user_prompt
+    assert "include structured constraints when they are explicit in the user query" in user_prompt

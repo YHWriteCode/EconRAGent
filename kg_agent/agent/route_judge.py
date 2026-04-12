@@ -131,6 +131,28 @@ CORRECTION_PHRASE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 URL_PATTERN = re.compile(r"https?://[^\s)>\"']+", re.IGNORECASE)
+FILE_PATH_PATTERN = re.compile(
+    r'(?:"(?P<dq>[^"\r\n]+\.(?:xlsx|xlsm|xls|csv|tsv))"|'
+    r"'(?P<sq>[^'\r\n]+\.(?:xlsx|xlsm|xls|csv|tsv))'|"
+    r"(?P<bare>(?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|/)?[^\s\"'<>|]+\.(?:xlsx|xlsm|xls|csv|tsv)))",
+    re.IGNORECASE,
+)
+FORMULA_RECALC_PATTERN = re.compile(
+    r"("
+    r"recalc|recalculate|recalculation|"
+    r"formula error|formula errors|"
+    r"#ref!|#div/0!|#value!|#name\?|"
+    r"\u91cd\u7b97|\u91cd\u65b0\u8ba1\u7b97|\u516c\u5f0f\u91cd\u7b97|\u516c\u5f0f\u9519\u8bef"
+    r")",
+    re.IGNORECASE,
+)
+PRESERVE_FORMULA_PATTERN = re.compile(
+    r"("
+    r"keep formulas intact|preserve formulas|retain formulas|"
+    r"\u4fdd\u7559\u516c\u5f0f|\u4e0d\u8981\u7834\u574f\u516c\u5f0f"
+    r")",
+    re.IGNORECASE,
+)
 KG_RETRIEVAL_TOOLS = {
     "kg_hybrid_search",
     "kg_naive_search",
@@ -325,12 +347,17 @@ class RouteJudge:
             requests_skill_workflow=requests_skill_workflow,
             needs_specialized_external_capability=needs_specialized_external_capability,
         ):
+            skill_constraints = self._build_skill_constraints(
+                query=normalized_query,
+                matched_skill=matched_skill,
+            )
             skill_plan = SkillPlan(
                 skill_name=matched_skill["name"],
                 goal=self._build_skill_goal(normalized_query, matched_skill),
                 reason=(
                     f"Matched local skill '{matched_skill['name']}' from the skill catalog."
                 ),
+                constraints=skill_constraints,
             )
             return RouteDecision(
                 need_tools=bool(sequence),
@@ -617,6 +644,19 @@ class RouteJudge:
             payload.get("skill_plan"),
             available_skills=skill_catalog,
         )
+        if (
+            skill_plan is not None
+            and base_decision.skill_plan is not None
+            and skill_plan.skill_name == base_decision.skill_plan.skill_name
+            and not skill_plan.constraints
+            and base_decision.skill_plan.constraints
+        ):
+            skill_plan = SkillPlan(
+                skill_name=skill_plan.skill_name,
+                goal=skill_plan.goal,
+                reason=skill_plan.reason,
+                constraints=dict(base_decision.skill_plan.constraints),
+            )
         if not tool_sequence and base_decision.need_tools:
             if skill_plan is None or base_decision.skill_plan is None:
                 return None
@@ -998,6 +1038,45 @@ class RouteJudge:
         if skill_name:
             return f"Use skill '{skill_name}' to fulfill the user request: {query}".strip()
         return query.strip()
+
+    @classmethod
+    def _build_skill_constraints(
+        cls,
+        *,
+        query: str,
+        matched_skill: dict[str, Any],
+    ) -> dict[str, Any]:
+        constraints: dict[str, Any] = {}
+        file_paths = cls._extract_file_paths(query)
+        if len(file_paths) == 1:
+            constraints["input_path"] = file_paths[0]
+        elif file_paths:
+            constraints["input_paths"] = file_paths
+
+        skill_name = str(matched_skill.get("name", "")).strip().lower()
+        if skill_name == "xlsx":
+            if FORMULA_RECALC_PATTERN.search(query or ""):
+                constraints["operation"] = "recalc"
+            if PRESERVE_FORMULA_PATTERN.search(query or ""):
+                constraints["preserve_formulas"] = True
+        return constraints
+
+    @staticmethod
+    def _extract_file_paths(query: str) -> list[str]:
+        matches: list[str] = []
+        seen: set[str] = set()
+        for match in FILE_PATH_PATTERN.finditer(query or ""):
+            candidate = (
+                match.group("dq")
+                or match.group("sq")
+                or match.group("bare")
+                or ""
+            ).strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            matches.append(candidate)
+        return matches
 
     @staticmethod
     def _parse_skill_plan_payload(

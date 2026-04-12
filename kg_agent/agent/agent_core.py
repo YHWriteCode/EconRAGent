@@ -26,7 +26,12 @@ from kg_agent.mcp.adapter import MCPAdapter
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.memory.cross_session_store import CrossSessionStore
 from kg_agent.memory.user_profile import UserProfileStore
-from kg_agent.skills import SkillExecutor, SkillLoader, SkillRegistry
+from kg_agent.skills import (
+    MCPBasedSkillRuntimeClient,
+    SkillExecutor,
+    SkillLoader,
+    SkillRegistry,
+)
 
 
 CORRECTION_PHRASE_PATTERN = re.compile(
@@ -91,6 +96,20 @@ class CapabilityInvocationResponse:
     def to_dict(self) -> dict[str, Any]:
         return {
             "capability": self.capability,
+            "result": self.result,
+            "metadata": self.metadata,
+        }
+
+
+@dataclass
+class SkillInvocationResponse:
+    skill: dict[str, Any]
+    result: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "skill": self.skill,
             "result": self.result,
             "metadata": self.metadata,
         }
@@ -163,6 +182,7 @@ class AgentCore:
             fallback=self.llm_client,
             label="kg_agent internal utility work",
         )
+        self.mcp_adapter = mcp_adapter
         self.conversation_memory = conversation_memory or ConversationMemoryStore()
         self.cross_session_store = cross_session_store or CrossSessionStore(
             conversation_memory=self.conversation_memory
@@ -172,14 +192,24 @@ class AgentCore:
             self.config.runtime.skills_dir
         )
         self.skill_loader = skill_loader or SkillLoader(self.skill_registry)
+        runtime_client = None
+        if (
+            skill_executor is None
+            and self.mcp_adapter is not None
+            and self.config.skill_runtime.is_configured()
+        ):
+            runtime_client = MCPBasedSkillRuntimeClient(
+                adapter=self.mcp_adapter,
+                config=self.config.skill_runtime,
+            )
         self.skill_executor = skill_executor or SkillExecutor(
             registry=self.skill_registry,
             loader=self.skill_loader,
+            runtime_client=runtime_client,
         )
         self.tool_registry = tool_registry or build_default_tool_registry(
             self.config, self.conversation_memory, self.cross_session_store
         )
-        self.mcp_adapter = mcp_adapter
         self.capability_registry = capability_registry or build_native_capability_registry(
             self.tool_registry
         )
@@ -350,6 +380,53 @@ class AgentCore:
                 capability=capability,
             ),
         )
+
+    async def invoke_skill(
+        self,
+        *,
+        skill_name: str,
+        session_id: str,
+        goal: str,
+        query: str = "",
+        user_id: str | None = None,
+        workspace: str | None = None,
+        constraints: dict[str, Any] | None = None,
+    ) -> SkillInvocationResponse:
+        self.skill_registry.refresh()
+        skill = self.skill_registry.get(skill_name)
+        if skill is None:
+            raise LookupError(f"Skill is not registered: {skill_name}")
+        context = AgentRunContext(
+            query=(query or goal).strip(),
+            session_id=session_id,
+            user_id=user_id,
+            workspace=workspace or self.config.runtime.default_workspace or None,
+            domain_schema=self.config.runtime.default_domain_schema,
+            use_memory=False,
+        )
+        result = await self.skill_executor.execute(
+            skill_name=skill_name,
+            goal=goal,
+            user_query=context.query,
+            workspace=context.workspace,
+            constraints=constraints or {},
+        )
+        recorded = self._record_tool_call(result=result, optional=False)
+        return SkillInvocationResponse(
+            skill=skill.to_catalog_dict(),
+            result=self._serialize_tool_call(recorded, debug=True),
+            metadata=self._build_skill_invocation_metadata(
+                context=context,
+                skill=skill.to_catalog_dict(),
+                result=recorded,
+            ),
+        )
+
+    async def get_skill_run_logs(self, *, run_id: str) -> dict[str, Any]:
+        return await self.skill_executor.get_run_logs(run_id=run_id)
+
+    async def get_skill_run_artifacts(self, *, run_id: str) -> dict[str, Any]:
+        return await self.skill_executor.get_run_artifacts(run_id=run_id)
 
     async def chat_stream(
         self,
@@ -1644,6 +1721,30 @@ class AgentCore:
     def list_skills(self) -> list[dict[str, Any]]:
         return self._available_skill_catalog()
 
+    def get_skill(self, name: str) -> dict[str, Any] | None:
+        self.skill_registry.refresh()
+        skill = self.skill_registry.get(name)
+        if skill is None:
+            return None
+        return skill.to_catalog_dict()
+
+    def read_skill(self, name: str) -> dict[str, Any]:
+        self.skill_registry.refresh()
+        return self.skill_loader.load_skill(name).to_dict()
+
+    def read_skill_file(self, name: str, relative_path: str) -> dict[str, Any]:
+        self.skill_registry.refresh()
+        skill = self.skill_registry.get(name)
+        if skill is None:
+            raise LookupError(f"Skill is not registered: {name}")
+        normalized_path = relative_path.replace("\\", "/").strip("/")
+        return {
+            "skill": skill.to_catalog_dict(),
+            "path": normalized_path,
+            "kind": self.skill_loader.classify_path(normalized_path),
+            "content": self.skill_loader.read_skill_file(name, normalized_path),
+        }
+
     def get_capability(self, name: str) -> dict[str, Any] | None:
         capability = self.capability_registry.get(name)
         if capability is None or not capability.enabled:
@@ -1676,6 +1777,28 @@ class AgentCore:
             "kind": capability.kind,
             "executor": capability.executor,
         }
+
+    @staticmethod
+    def _build_skill_invocation_metadata(
+        *,
+        context: AgentRunContext,
+        skill: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = {
+            "session_id": context.session_id,
+            "user_id": context.user_id,
+            "workspace": context.workspace,
+            "kind": "skill",
+            "executor": "skill",
+            "skill_name": skill.get("name"),
+        }
+        result_data = result.get("data")
+        if isinstance(result_data, dict):
+            runtime = result_data.get("runtime")
+            if isinstance(runtime, dict) and runtime:
+                metadata["runtime"] = runtime
+        return metadata
 
     def _compact_tool_calls(
         self,

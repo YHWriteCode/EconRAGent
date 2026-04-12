@@ -154,6 +154,46 @@ class MCPAdapter:
             metadata={"executor": "mcp", "server": capability.server},
         )
 
+    async def invoke_remote_tool(
+        self,
+        *,
+        server_name: str,
+        remote_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolResult:
+        try:
+            session = await self._get_session(server_name)
+            result = await self._call_tool(
+                session=session,
+                remote_name=remote_name,
+                arguments=self._sanitize_arguments(arguments),
+            )
+        except Exception as exc:
+            return ToolResult(
+                tool_name=remote_name,
+                success=False,
+                error=str(exc),
+                metadata={"executor": "mcp", "server": server_name},
+            )
+
+        structured_content = result.get("structuredContent")
+        content = result.get("content")
+        is_error = bool(result.get("isError"))
+        summary = self._summarize_result(content=content, structured_content=structured_content)
+        data = {
+            "summary": summary,
+            "structured_content": structured_content,
+            "content": content,
+            "raw": result,
+        }
+        return ToolResult(
+            tool_name=remote_name,
+            success=not is_error,
+            data=data,
+            error=summary if is_error else None,
+            metadata={"executor": "mcp", "server": server_name},
+        )
+
     async def close(self) -> None:
         for session in list(self._sessions.values()):
             process = session.process

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -13,7 +14,7 @@ from kg_agent.config import (
     ToolConfig,
 )
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
-from kg_agent.skills import SkillPlan
+from kg_agent.skills import SkillLoader, SkillPlan, SkillRegistry
 from kg_agent.tools.base import ToolDefinition, ToolResult
 
 
@@ -562,6 +563,46 @@ async def test_agent_core_dispatches_skill_plan_to_skill_executor():
     assert skill_executor.calls[0]["skill_name"] == "example-skill"
     assert skill_executor.calls[0]["goal"] == "Use example-skill to create a report"
     assert skill_executor.calls[0]["workspace"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_core_invoke_skill_executes_local_skill_directly(tmp_path: Path):
+    skill_dir = tmp_path / "skills" / "example-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "# example-skill\n\nPrepare a local workflow.\n",
+        encoding="utf-8",
+    )
+    skill_executor = _StubSkillExecutor()
+    skill_registry = SkillRegistry(tmp_path / "skills")
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        skill_registry=skill_registry,
+        skill_loader=SkillLoader(skill_registry),
+        skill_executor=skill_executor,
+    )
+
+    response = await agent.invoke_skill(
+        skill_name="example-skill",
+        session_id="skill-invoke-session",
+        goal="Prepare the local skill workflow",
+        query="run the skill against this workbook",
+        workspace="ops",
+        constraints={"format": "xlsx"},
+    )
+
+    assert response.skill["name"] == "example-skill"
+    assert response.result["tool"] == "skill:example-skill"
+    assert response.result["success"] is True
+    assert response.result["data"]["goal"] == "Prepare the local skill workflow"
+    assert response.metadata["kind"] == "skill"
+    assert response.metadata["workspace"] == "ops"
+    assert skill_executor.calls[0]["constraints"] == {"format": "xlsx"}
 
 
 def test_agent_core_builds_route_judge_with_configured_prompt_version():

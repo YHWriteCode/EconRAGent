@@ -50,6 +50,36 @@ class ToolsResponse(BaseModel):
     tools: list[ToolInfo]
 
 
+class SkillInfo(BaseModel):
+    name: str
+    description: str
+    path: str
+    tags: list[str]
+
+
+class SkillFileInfo(BaseModel):
+    path: str
+    kind: str
+    size_bytes: int
+
+
+class SkillsResponse(BaseModel):
+    skills: list[SkillInfo]
+
+
+class SkillDetailResponse(BaseModel):
+    skill: SkillInfo
+    skill_md: str
+    file_inventory: list[SkillFileInfo]
+
+
+class SkillFileResponse(BaseModel):
+    skill: SkillInfo
+    path: str
+    kind: str
+    content: str
+
+
 class CapabilityInvokeRequest(BaseModel):
     session_id: str = Field(min_length=1)
     query: str = ""
@@ -79,6 +109,67 @@ class CapabilityInvokeResponse(BaseModel):
     capability: ToolInfo
     result: CapabilityInvokeResult
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SkillInvokeRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    goal: str = Field(min_length=1)
+    query: str = ""
+    user_id: str | None = None
+    workspace: str | None = None
+    constraints: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("goal", mode="after")
+    @classmethod
+    def strip_goal(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("query", mode="after")
+    @classmethod
+    def strip_skill_query(cls, value: str) -> str:
+        return value.strip()
+
+
+class SkillInvokeResult(BaseModel):
+    tool: str
+    success: bool
+    optional: bool = False
+    summary: str | None = None
+    error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    data: Any = None
+
+
+class SkillInvokeResponse(BaseModel):
+    skill: SkillInfo
+    result: SkillInvokeResult
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SkillRunLogsResponse(BaseModel):
+    run_id: str
+    skill_name: str | None = None
+    status: str | None = None
+    success: bool = False
+    command: str | None = None
+    stdout: str = ""
+    stderr: str = ""
+    summary: str | None = None
+
+
+class SkillArtifactInfo(BaseModel):
+    path: str
+    size_bytes: int
+
+
+class SkillRunArtifactsResponse(BaseModel):
+    run_id: str
+    skill_name: str | None = None
+    status: str | None = None
+    success: bool = False
+    workspace: str | None = None
+    artifacts: list[SkillArtifactInfo] = Field(default_factory=list)
+    summary: str | None = None
 
 
 class RoutePreviewRequest(BaseModel):
@@ -393,6 +484,84 @@ def create_agent_routes(agent_core, scheduler=None):
     @router.get("/agent/tools", response_model=ToolsResponse)
     async def list_agent_tools():
         return {"tools": agent_core.list_tools()}
+
+    @router.get("/agent/skills", response_model=SkillsResponse)
+    async def list_agent_skills():
+        return {"skills": agent_core.list_skills()}
+
+    @router.get("/agent/skills/{skill_name}", response_model=SkillDetailResponse)
+    async def read_agent_skill(skill_name: str):
+        try:
+            return agent_core.read_skill(skill_name)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @router.get(
+        "/agent/skills/{skill_name}/files/{relative_path:path}",
+        response_model=SkillFileResponse,
+    )
+    async def read_agent_skill_file(skill_name: str, relative_path: str):
+        try:
+            return agent_core.read_skill_file(skill_name, relative_path)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @router.post(
+        "/agent/skills/{skill_name}/invoke",
+        response_model=SkillInvokeResponse,
+    )
+    async def invoke_skill(skill_name: str, request: SkillInvokeRequest):
+        try:
+            response = await agent_core.invoke_skill(
+                skill_name=skill_name,
+                session_id=request.session_id,
+                goal=request.goal,
+                query=request.query,
+                user_id=request.user_id,
+                workspace=request.workspace,
+                constraints=request.constraints,
+            )
+            return response.to_dict()
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @router.get(
+        "/agent/skill-runs/{run_id}/logs",
+        response_model=SkillRunLogsResponse,
+    )
+    async def get_skill_run_logs(run_id: str):
+        try:
+            return await agent_core.get_skill_run_logs(run_id=run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @router.get(
+        "/agent/skill-runs/{run_id}/artifacts",
+        response_model=SkillRunArtifactsResponse,
+    )
+    async def get_skill_run_artifacts(run_id: str):
+        try:
+            return await agent_core.get_skill_run_artifacts(run_id=run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post(
         "/agent/capabilities/{capability_name}/invoke",

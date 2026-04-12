@@ -8,9 +8,11 @@ from kg_agent.skills.models import (
     SkillPlan,
 )
 from kg_agent.skills.registry import SkillRegistry
+from kg_agent.skills.runtime_client import MCPBasedSkillRuntimeClient
 
 __all__ = [
     "LoadedSkill",
+    "MCPBasedSkillRuntimeClient",
     "SkillDefinition",
     "SkillExecutionRequest",
     "SkillExecutor",

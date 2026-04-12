@@ -138,6 +138,32 @@ async def test_route_judge_selects_local_skill_from_available_skills():
 
 
 @pytest.mark.asyncio
+async def test_route_judge_extracts_spreadsheet_constraints_for_xlsx_skill():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query='recalculate formulas in "C:\\Reports\\model.xlsx" and keep formulas intact',
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "xlsx",
+                "description": "Use this skill any time a spreadsheet file is the primary input or output.",
+                "tags": ["spreadsheet", "xlsx", "csv"],
+                "path": "/skills/xlsx",
+            }
+        ],
+    )
+
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "xlsx"
+    assert route.skill_plan.constraints["input_path"] == "C:\\Reports\\model.xlsx"
+    assert route.skill_plan.constraints["operation"] == "recalc"
+    assert route.skill_plan.constraints["preserve_formulas"] is True
+
+
+@pytest.mark.asyncio
 async def test_route_judge_does_not_use_legacy_skill_helper_tools_as_primary_surface():
     judge = RouteJudge(default_max_iterations=3)
 

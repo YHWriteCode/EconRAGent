@@ -33,7 +33,7 @@ class SkillLoader:
             entries.append(
                 SkillFileEntry(
                     path=relative_path,
-                    kind=self._classify_path(relative_path),
+                    kind=self.classify_path(relative_path),
                     size_bytes=path.stat().st_size,
                 )
             )
@@ -51,7 +51,7 @@ class SkillLoader:
         return target.read_text(encoding="utf-8")
 
     @staticmethod
-    def _classify_path(relative_path: str) -> str:
+    def classify_path(relative_path: str) -> str:
         normalized = relative_path.replace("\\", "/")
         if normalized == "SKILL.md":
             return "skill_doc"

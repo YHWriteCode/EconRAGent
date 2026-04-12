@@ -58,6 +58,7 @@ kg_agent/
 │   ├── registry.py                # SkillRegistry: scan `skills/*/SKILL.md` into a lightweight catalog
 │   ├── loader.py                  # SkillLoader: progressive skill content loading + file reads
 │   ├── executor.py                # SkillExecutor: skill_plan execution path and runtime handoff
+│   ├── runtime_client.py          # Optional runtime transport clients (for example MCP-backed skill runtime)
 │   └── models.py                  # SkillDefinition / SkillPlan / LoadedSkill dataclasses
 │
 ├── mcp/                           # External capability transport layer
@@ -495,9 +496,17 @@ Runtime execution
 - `SkillRegistry` scans `./skills/*/SKILL.md` and exposes a lightweight catalog to the planner
 - `SkillLoader` supports progressive disclosure: load `SKILL.md` first, then read specific files on demand (`references/`, `scripts/`, `assets/`, other markdown)
 - `SkillExecutor` is the only skill execution entry in `AgentCore`; the planner no longer decomposes a skill into helper-tool chains
-- Current default execution boundary is conservative: the executor prepares the local runtime context and can hand off to a runtime client, but it does not require `default_script` / `recommended_script` / `entrypoint` just to discover a skill
+- The runtime target is now **shell-oriented skill execution inside an isolated workspace / VM / container**, not planner-visible remote script calls
+- Current default execution boundary is still conservative: the executor prepares the local shell-runtime context and can hand off to a runtime client, but it does not require `default_script` / `recommended_script` / `entrypoint` just to discover a skill
+- When `KG_AGENT_SKILL_RUNTIME_SERVER` is configured and `MCPAdapter` is available, `AgentCore` can auto-wire an internal `MCPBasedSkillRuntimeClient` so `skill_plan` execution uses MCP only as a transport layer behind `SkillExecutor`
+- The current coarse-grained runtime contract is shell-oriented: it accepts either an explicit shell task (`constraints.shell_command` / `constraints.command`) or structured CLI args (`constraints.args` / `constraints.cli_args`) when the skill has a single runnable entrypoint, and it returns run-oriented data such as `run_id`, `command`, `logs_preview`, and `artifacts`
+- The runtime service executes those shell commands inside an isolated workspace, using `/bin/sh -lc` on POSIX runtimes and PowerShell on Windows for local development/testing
+- `RouteJudge` now preserves and emits structured `skill_plan.constraints` when the user query makes them explicit; for example, spreadsheet queries can carry `input_path`, `operation="recalc"`, or `preserve_formulas=true`
 - When `RouteJudge` emits `skill_plan`, `AgentCore` runs it through `SkillExecutor` after any prerequisite tools (for example memory lookup) and before final answer generation
 - Skill execution records are serialized back into the same run result stream / memory metadata surface as tool calls, with `metadata.executor="skill"`
+- Skills also have an explicit API plane separate from capabilities: `GET /agent/skills`, `GET /agent/skills/{skill_name}`, `GET /agent/skills/{skill_name}/files/{relative_path}`, and `POST /agent/skills/{skill_name}/invoke`
+- When a runtime-backed skill invocation returns a `run_id`, the skill plane also supports follow-up run inspection through `GET /agent/skill-runs/{run_id}/logs` and `GET /agent/skill-runs/{run_id}/artifacts`
+- `AgentCore.invoke_skill(...)` bypasses `RouteJudge` and executes one local skill directly through `SkillExecutor`; this still does not make the skill appear as a planner-visible MCP tool
 
 ### 8.5 MCP External Capability Layer
 
@@ -737,6 +746,12 @@ Optional lightweight utility model for internal routing/explanation work:
 | `KG_AGENT_DEFAULT_WORKSPACE` | Falls back to `WORKSPACE` | Default workspace |
 | `KG_AGENT_DEFAULT_DOMAIN_SCHEMA` | `general` | Default domain schema |
 | `KG_AGENT_SKILLS_DIR` | `skills` | Local skill directory scanned by `SkillRegistry` |
+| `KG_AGENT_SKILL_RUNTIME_SERVER` | empty | Optional MCP server name used only as the internal skill-runtime transport |
+| `KG_AGENT_SKILL_RUNTIME_RUN_TOOL` | `run_skill_task` | Remote coarse-grained shell runtime tool used by `MCPBasedSkillRuntimeClient` |
+| `KG_AGENT_SKILL_RUNTIME_READ_TOOL` | `read_skill` | Reserved remote read interface for coarse-grained runtime access |
+| `KG_AGENT_SKILL_RUNTIME_READ_FILE_TOOL` | `read_skill_file` | Reserved remote file-read interface for coarse-grained runtime access |
+| `KG_AGENT_SKILL_RUNTIME_LOGS_TOOL` | `get_run_logs` | Optional remote run-log retrieval tool name reserved for shell-based skill runs |
+| `KG_AGENT_SKILL_RUNTIME_ARTIFACTS_TOOL` | `get_run_artifacts` | Optional remote artifact listing tool name reserved for shell-based skill runs |
 | `KG_AGENT_MAX_ITERATIONS` | `3` | Maximum tool invocation rounds |
 | `KG_AGENT_ROUTE_JUDGE_PROMPT_VERSION` | `v1` | Version key for Route Judge LLM refinement prompt templates |
 | `KG_AGENT_MEMORY_WINDOW_TURNS` | `6` | Maximum number of conversation turns considered for the dynamic attention window |
@@ -875,6 +890,12 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 | Method | Path | Defined In | Description |
 |---|---|---|---|
 | POST | `/agent/chat` | `agent_routes.py` | Main conversation entry point |
+| GET | `/agent/skills` | `agent_routes.py` | List the local skill catalog from `SkillRegistry` |
+| GET | `/agent/skills/{skill_name}` | `agent_routes.py` | Read one skill's `SKILL.md` plus file inventory |
+| GET | `/agent/skills/{skill_name}/files/{relative_path}` | `agent_routes.py` | Read one file inside a skill directory on demand |
+| POST | `/agent/skills/{skill_name}/invoke` | `agent_routes.py` | Explicitly execute one local skill through `SkillExecutor` |
+| GET | `/agent/skill-runs/{run_id}/logs` | `agent_routes.py` | Read logs for one runtime-backed shell skill run |
+| GET | `/agent/skill-runs/{run_id}/artifacts` | `agent_routes.py` | Read artifact metadata for one runtime-backed shell skill run |
 | POST | `/agent/capabilities/{capability_name}/invoke` | `agent_routes.py` | Explicitly invoke one native or external capability without going through RouteJudge |
 | POST | `/agent/ingest` | `agent_routes.py` | Insert content into KG (web page, PDF, manual text, etc.) |
 | GET | `/agent/tools` | `agent_routes.py` | View currently enabled capabilities, including configured and dynamically discovered external MCP capabilities |
@@ -926,7 +947,30 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 - `delta` — incremental answer text chunk
 - `done` — terminal payload with final answer, route, tool calls, path explanation, and metadata
 
-### 11.2 POST /agent/capabilities/{capability_name}/invoke
+### 11.2 Skills API
+
+- `GET /agent/skills`
+  - Returns the lightweight local skill catalog (`name`, `description`, `tags`, `path`) produced by `SkillRegistry`
+- `GET /agent/skills/{skill_name}`
+  - Returns one loaded skill payload: public skill metadata, raw `SKILL.md`, and the current file inventory discovered by `SkillLoader`
+- `GET /agent/skills/{skill_name}/files/{relative_path}`
+  - Reads one specific file inside the skill directory; path traversal outside the skill root is rejected
+- `POST /agent/skills/{skill_name}/invoke`
+  - Bypasses `RouteJudge` and executes exactly one local skill through `AgentCore.invoke_skill(...)`
+  - Request body includes `session_id`, `goal`, optional `query`, optional `workspace`, and optional `constraints`
+  - For shell-oriented runtime execution, either pass a coarse-grained command through `constraints.shell_command` (or `constraints.command`), or pass structured CLI args through `constraints.args` / `constraints.cli_args` when the skill has a single runnable entrypoint
+  - You can also pass `constraints.dry_run=true` (or `plan_only=true`) to ask the runtime to return the planned shell command without executing it
+  - The runtime service executes the resulting command inside the isolated skill workspace instead of exposing per-script MCP tools
+  - Response includes the public skill descriptor, one serialized `skill:<name>` execution record, and invocation metadata; when a runtime server is attached, the result can also include `run_id`, `command`, `logs_preview`, and `artifacts`
+  - Explicit skill invocation remains on the skill plane; it does not go through `CapabilityRegistry`
+- `GET /agent/skill-runs/{run_id}/logs`
+  - Returns the full stdout/stderr payload for a previously started runtime-backed skill run
+  - This endpoint requires a configured skill runtime client; otherwise the API returns service unavailable
+- `GET /agent/skill-runs/{run_id}/artifacts`
+  - Returns the isolated workspace path plus produced artifact metadata for a previously started runtime-backed skill run
+  - This endpoint also stays on the skill plane and does not involve `CapabilityRegistry`
+
+### 11.3 POST /agent/capabilities/{capability_name}/invoke
 
 **Request Body (CapabilityInvokeRequest):**
 
@@ -955,7 +999,7 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 - Unlike `/agent/chat`, the returned capability result always includes the full execution payload rather than the pruned non-debug tool view
 - Memory can be loaded for context, but explicit invocation does not persist a new user/assistant turn into conversation memory
 
-### 11.3 POST /agent/ingest
+### 11.4 POST /agent/ingest
 
 **Request Body (IngestRequest):**
 
@@ -975,7 +1019,7 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 | `source` | `str \| null` | Echoed provenance label |
 | `message` | `str` | Human-readable status message |
 
-### 11.4 Scheduler and Source APIs
+### 11.5 Scheduler and Source APIs
 
 - `GET /agent/scheduler/status`
   - Returns scheduler configured/enabled/running flags, persistence file paths, loop counters, and per-source status including resolved source type / schedule mode / feed priority mode / feed dedup mode / content class / update mode, `consecutive_no_change`, `tracked_item_count`, `active_doc_count`, `expired_doc_count`, and `effective_interval_seconds`
@@ -988,7 +1032,7 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 - `POST /agent/sources/{source_id}/trigger`
   - Immediately polls a source and returns crawl/ingest counts, including `feed_deduplicated_count`, `superseded_count`, `expired_doc_count`, and `deleted_doc_count` when short-term lifecycle handling is active
 
-### 11.5 GET /health
+### 11.6 GET /health
 
 **Response Body:**
 
@@ -1113,6 +1157,7 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 | `SkillLoader` | `skills/loader.py` | Load `SKILL.md` and read skill files on demand |
 | `SkillExecutor` | `skills/executor.py` | Execute `skill_plan` through the local skill-runtime boundary |
 | `SkillPlan` | `skills/models.py` | High-level local skill execution plan |
+| `MCPBasedSkillRuntimeClient` | `skills/runtime_client.py` | Optional MCP-backed transport used internally by `SkillExecutor` |
 | `PathExplainer` | `agent/path_explainer.py` | Path Explainer: `.explain()` returns PathExplanation |
 | `PathExplanation` | `agent/path_explainer.py` | Path explanation result |
 | `ExplainedPath` | `agent/path_explainer.py` | Single explained path |
@@ -1141,7 +1186,7 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 
 - **MCP integration is currently stdio-only**; optional dynamic `tools/list` discovery now exists, but there is still no SSE/HTTP transport or richer MCP server capability negotiation yet
 - **Configured `external_mcp` capabilities are hidden from auto-routing by default**; they execute correctly when explicitly invoked, and the Route Judge only sees them when `planner_exposed=true`
-- **Local skill execution is now architecturally separate from MCP, but the default runtime is still conservative**; `SkillExecutor` prepares the local runtime context and supports runtime handoff, but it does not yet implement a free-form shell agent or generalized dependency-install pipeline
+- **Local skill execution is now architecturally separate from MCP and oriented around shell execution inside an isolated runtime**, but the default runtime is still conservative; `SkillExecutor` supports coarse-grained shell handoff and run-oriented results, but it does not yet implement a full free-form shell agent, dependency installation lifecycle, or multi-step planner-to-command synthesis
 - **Legacy script-level skill helper APIs still exist as a compatibility layer**; `read_skill_docs` / `execute_skill_script` and related binding transforms remain for old flows, but they are no longer the planner's primary skill surface
 - **Scheduler** now supports optional loop leader election plus source-level coordination, but it still does not implement scheduler sharding or a richer distributed control plane
 - **Source persistence** now supports `json` and `sqlite`, but there is still no Redis/Mongo/Postgres-backed scheduler registry/state implementation

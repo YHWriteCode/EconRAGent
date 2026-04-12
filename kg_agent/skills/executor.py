@@ -17,6 +17,12 @@ class SkillRuntimeClient(Protocol):
     ) -> dict[str, Any]:
         ...
 
+    async def get_run_logs(self, *, run_id: str) -> dict[str, Any]:
+        ...
+
+    async def get_run_artifacts(self, *, run_id: str) -> dict[str, Any]:
+        ...
+
 
 class SkillExecutor:
     def __init__(
@@ -64,12 +70,13 @@ class SkillExecutor:
             "user_query": user_query,
             "workspace": workspace,
             "constraints": dict(constraints or {}),
+            "execution_mode": "shell",
             "skill": skill.to_catalog_dict(),
             "file_inventory": [item.to_dict() for item in loaded_skill.file_inventory],
             "summary": (
-                f"Prepared skill '{skill_name}' for runtime execution."
+                f"Prepared skill '{skill_name}' for shell runtime execution."
                 if self.runtime_client is not None
-                else f"Loaded skill '{skill_name}' and prepared its local runtime context."
+                else f"Loaded skill '{skill_name}' and prepared its local shell runtime context."
             ),
         }
 
@@ -95,3 +102,13 @@ class SkillExecutor:
             data=data,
             metadata={"executor": "skill", "skill_name": skill_name},
         )
+
+    async def get_run_logs(self, *, run_id: str) -> dict[str, Any]:
+        if self.runtime_client is None:
+            raise RuntimeError("Skill runtime client is not configured")
+        return await self.runtime_client.get_run_logs(run_id=run_id)
+
+    async def get_run_artifacts(self, *, run_id: str) -> dict[str, Any]:
+        if self.runtime_client is None:
+            raise RuntimeError("Skill runtime client is not configured")
+        return await self.runtime_client.get_run_artifacts(run_id=run_id)

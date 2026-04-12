@@ -44,6 +44,7 @@ _ROUTE_JUDGE_PROMPT_TEMPLATES: dict[str, RouteJudgePromptTemplate] = {
             "Use the capability catalog to understand each capability's description, tags, executor, and input contract. "
             "Use available_skills as a separate planning surface for local or VM-hosted skills. "
             "When a skill is a better fit than tools or external capabilities, emit skill_plan instead of decomposing the skill into helper tools. "
+            "When emitting skill_plan, include structured constraints when they are explicit in the user query, such as file paths, operation hints, or CLI-style args. "
             "Legacy skill helper tools may exist for compatibility, but they are not the primary planner abstraction."
         ),
     ),
@@ -65,8 +66,9 @@ _ROUTE_JUDGE_PROMPT_TEMPLATES: dict[str, RouteJudgePromptTemplate] = {
             "6. Use available_skills to evaluate local or VM-hosted skills independently from the capability plane.\n"
             "7. Prefer skill_plan when a matching skill is a more concrete fit than native KG/web/memory tools.\n"
             "8. Prefer a matching external capability when it is a more concrete fit than native tools and no better skill match exists.\n"
-            "9. Only provide tool args that fit the selected capability's input contract; omit framework-reserved fields unless the tool contract explicitly needs them.\n"
-            "10. Never invent capabilities or skills outside the provided planner surfaces.\n"
+            "9. When emitting skill_plan, include structured constraints when they are explicit in the user query, such as file paths, operation hints, or CLI-style args.\n"
+            "10. Only provide tool args that fit the selected capability's input contract; omit framework-reserved fields unless the tool contract explicitly needs them.\n"
+            "11. Never invent capabilities or skills outside the provided planner surfaces.\n"
         ),
     ),
 }
