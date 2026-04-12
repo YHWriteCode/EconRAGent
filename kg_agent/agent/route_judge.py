@@ -9,6 +9,7 @@ from kg_agent.agent.prompts import (
     build_route_judge_prompt,
     resolve_route_judge_prompt_version,
 )
+from kg_agent.skills import SkillPlan
 
 
 FOLLOWUP_PATTERN = re.compile(
@@ -64,6 +65,18 @@ SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN = re.compile(
     r"\u6700\u5927\u56de\u64a4|"
     r"\u7b56\u7565\u8868\u73b0|"
     r"backtest|sharpe|drawdown|strategy"
+    r")",
+    re.IGNORECASE,
+)
+SKILL_REQUEST_PATTERN = re.compile(
+    r"("
+    r"\u6280\u80fd|"
+    r"\u6280\u80fd\u5305|"
+    r"\u6280\u80fd\u5de5\u4f5c\u6d41|"
+    r"\u5de5\u4f5c\u6d41|"
+    r"\u7535\u5b50\u8868\u683c|"
+    r"\u8868\u683c\u6587\u4ef6|"
+    r"agent skill|agent skills|skill|skills|workflow|spreadsheet|xlsx|xlsm|csv|tsv"
     r")",
     re.IGNORECASE,
 )
@@ -124,6 +137,35 @@ KG_RETRIEVAL_TOOLS = {
     "graph_entity_lookup",
     "graph_relation_trace",
 }
+SKILL_INFRASTRUCTURE_TOOLS = {
+    "list_skills",
+    "read_skill",
+    "read_skill_docs",
+    "read_skill_file",
+    "run_skill_task",
+    "execute_skill_script",
+}
+MATCH_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "for",
+    "from",
+    "help",
+    "into",
+    "need",
+    "query",
+    "run",
+    "show",
+    "that",
+    "the",
+    "this",
+    "tool",
+    "use",
+    "using",
+    "with",
+}
 
 
 @dataclass
@@ -144,6 +186,7 @@ class RouteDecision:
     tool_sequence: list[ToolCallPlan]
     reason: str
     max_iterations: int = 3
+    skill_plan: SkillPlan | None = None
 
 
 class RouteJudge:
@@ -163,23 +206,34 @@ class RouteJudge:
         query: str,
         session_context: dict[str, Any] | None,
         user_profile: dict[str, Any] | None,
-        available_capabilities: list[str] | None = None,
+        available_capabilities: list[Any] | None = None,
+        available_capability_catalog: list[dict[str, Any]] | None = None,
         available_tools: list[str] | None = None,
+        available_skills: list[dict[str, Any]] | None = None,
     ) -> RouteDecision:
-        resolved_capabilities = self._resolve_available_capabilities(
+        capability_catalog = self._resolve_capability_catalog(
             available_capabilities=available_capabilities,
+            available_capability_catalog=available_capability_catalog,
             available_tools=available_tools,
         )
+        skill_catalog = self._resolve_skill_catalog(available_skills)
+        resolved_capabilities = [
+            item["name"] for item in capability_catalog if isinstance(item.get("name"), str)
+        ]
         base_decision = self._rule_based_fallback(
             query=query,
             session_context=session_context,
             available_tools=resolved_capabilities,
+            capability_catalog=capability_catalog,
+            skill_catalog=skill_catalog,
         )
         refined = await self._maybe_refine_with_llm(
             query=query,
             session_context=session_context,
             user_profile=user_profile,
             available_tools=resolved_capabilities,
+            capability_catalog=capability_catalog,
+            skill_catalog=skill_catalog,
             base_decision=base_decision,
         )
         return refined or base_decision
@@ -190,6 +244,8 @@ class RouteJudge:
         query: str,
         session_context: dict[str, Any] | None,
         available_tools: list[str],
+        capability_catalog: list[dict[str, Any]],
+        skill_catalog: list[dict[str, Any]],
     ) -> RouteDecision:
         normalized_query = (query or "").strip()
         history = (
@@ -202,6 +258,14 @@ class RouteJudge:
         )
         has_history = bool(history)
         has_cross_session_tool = "cross_session_search" in available_tools
+        matched_skill = self._select_matching_skill(
+            query=normalized_query,
+            skill_catalog=skill_catalog,
+        )
+        matched_external_capability = self._select_matching_external_capability(
+            query=normalized_query,
+            capability_catalog=capability_catalog,
+        )
 
         is_simple = bool(SIMPLE_PATTERN.search(normalized_query))
         is_followup = bool(FOLLOWUP_PATTERN.search(normalized_query)) and (
@@ -211,6 +275,7 @@ class RouteJudge:
         needs_specialized_external_capability = bool(
             SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN.search(normalized_query)
         )
+        requests_skill_workflow = bool(SKILL_REQUEST_PATTERN.search(normalized_query))
         is_relation = bool(RELATION_PATTERN.search(normalized_query))
         is_entity = bool(ENTITY_PATTERN.search(normalized_query))
         is_ingest = bool(INGEST_PATTERN.search(normalized_query))
@@ -233,6 +298,7 @@ class RouteJudge:
                 is_entity,
                 is_ingest,
                 is_correction,
+                matched_skill is not None,
             ]
         ):
             return RouteDecision(
@@ -246,6 +312,58 @@ class RouteJudge:
                 max_iterations=1,
             )
 
+        if is_followup and "memory_search" in available_tools and has_history and not is_correction:
+            sequence.append(ToolCallPlan(tool="memory_search", args={"limit": 4}))
+            need_memory = True
+        elif is_followup and has_cross_session_tool and not is_correction:
+            sequence.append(ToolCallPlan(tool="cross_session_search", args={"limit": 4}))
+            need_memory = True
+
+        if matched_skill is not None and self._should_route_to_skill(
+            query=normalized_query,
+            matched_skill=matched_skill,
+            requests_skill_workflow=requests_skill_workflow,
+            needs_specialized_external_capability=needs_specialized_external_capability,
+        ):
+            skill_plan = SkillPlan(
+                skill_name=matched_skill["name"],
+                goal=self._build_skill_goal(normalized_query, matched_skill),
+                reason=(
+                    f"Matched local skill '{matched_skill['name']}' from the skill catalog."
+                ),
+            )
+            return RouteDecision(
+                need_tools=bool(sequence),
+                need_memory=need_memory,
+                need_web_search=False,
+                need_path_explanation=False,
+                strategy="memory_first_then_skill" if need_memory else "skill_request",
+                tool_sequence=self._normalize_tool_sequence(sequence, available_tools),
+                reason=skill_plan.reason,
+                max_iterations=max(1, self.default_max_iterations),
+                skill_plan=skill_plan,
+            )
+
+        if needs_specialized_external_capability and matched_external_capability is not None:
+            sequence.append(ToolCallPlan(tool=matched_external_capability["name"]))
+            return RouteDecision(
+                need_tools=True,
+                need_memory=need_memory,
+                need_web_search=False,
+                need_path_explanation=False,
+                strategy=(
+                    "memory_first_then_external_capability"
+                    if need_memory
+                    else "external_capability_request"
+                ),
+                tool_sequence=self._normalize_tool_sequence(sequence, available_tools),
+                reason=(
+                    f"Matched external capability '{matched_external_capability['name']}' "
+                    "for this specialized request."
+                ),
+                max_iterations=1,
+            )
+
         if needs_specialized_external_capability:
             return RouteDecision(
                 need_tools=False,
@@ -255,18 +373,11 @@ class RouteJudge:
                 strategy="specialized_external_capability",
                 tool_sequence=[],
                 reason=(
-                    "This request needs a specialized external capability rather than "
+                    "This request needs a specialized skill or external capability rather than "
                     "the built-in knowledge-graph or web tools."
                 ),
                 max_iterations=1,
             )
-
-        if is_followup and "memory_search" in available_tools and has_history and not is_correction:
-            sequence.append(ToolCallPlan(tool="memory_search", args={"limit": 4}))
-            need_memory = True
-        elif is_followup and has_cross_session_tool and not is_correction:
-            sequence.append(ToolCallPlan(tool="cross_session_search", args={"limit": 4}))
-            need_memory = True
 
         if is_correction and "web_search" in available_tools:
             strategy = "correction_and_refresh"
@@ -329,11 +440,21 @@ class RouteJudge:
             reason = "The user wants to ingest content into the knowledge graph."
         elif direct_urls and "web_search" in available_tools:
             strategy = "direct_url_crawl"
-            sequence.append(
-                ToolCallPlan(tool="web_search", args={"urls": direct_urls[:3]})
+            sequence.append(ToolCallPlan(tool="web_search", args={"urls": direct_urls[:3]}))
+            reason = "The query includes direct URLs, so the crawler should fetch those pages first."
+        elif matched_external_capability is not None and self._should_route_to_external_capability(
+            query=normalized_query,
+            matched_capability=matched_external_capability,
+        ):
+            strategy = (
+                "memory_first_then_external_capability"
+                if need_memory
+                else "external_capability_request"
             )
+            sequence.append(ToolCallPlan(tool=matched_external_capability["name"]))
             reason = (
-                "The query includes direct URLs, so the crawler should fetch those pages first."
+                f"Matched external capability '{matched_external_capability['name']}' "
+                "from the capability catalog."
             )
         elif needs_realtime:
             strategy, realtime_sequence, need_path_explanation, reason = (
@@ -370,20 +491,14 @@ class RouteJudge:
             strategy = "factual_qa"
             if "kg_hybrid_search" in available_tools:
                 sequence.append(ToolCallPlan(tool="kg_hybrid_search"))
-                reason = (
-                    "Hybrid retrieval is the default strategy for factual knowledge questions."
-                )
+                reason = "Hybrid retrieval is the default strategy for factual knowledge questions."
 
         if need_memory and strategy == "factual_qa":
             strategy = "memory_first_then_hybrid"
-            reason = (
-                "The query continues prior context, so memory is checked before hybrid retrieval."
-            )
+            reason = "The query continues prior context, so memory is checked before hybrid retrieval."
         elif need_memory and strategy == "simple_answer_no_tool":
             strategy = "cross_session_memory_first"
-            reason = (
-                "The query continues prior context and needs memory from earlier sessions."
-            )
+            reason = "The query continues prior context and needs memory from earlier sessions."
         elif need_memory and strategy == "graph_entity_lookup_first":
             strategy = "memory_first_then_entity_lookup"
         elif need_memory and strategy == "kg_hybrid_first_then_graph_trace":
@@ -414,35 +529,19 @@ class RouteJudge:
         need_path_explanation = False
 
         if "web_search" in available_tools and "kg_hybrid_search" in available_tools:
-            sequence.extend(
-                [
-                    ToolCallPlan(tool="web_search"),
-                    ToolCallPlan(tool="kg_hybrid_search"),
-                ]
-            )
+            sequence.extend([ToolCallPlan(tool="web_search"), ToolCallPlan(tool="kg_hybrid_search")])
             strategy = "freshness_aware_search"
-            reason = (
-                "The query depends on recent information, so compare live web results with graph retrieval."
-            )
+            reason = "The query depends on recent information, so compare live web results with graph retrieval."
         elif "web_search" in available_tools:
             sequence.append(ToolCallPlan(tool="web_search"))
             strategy = "web_search_first"
-            reason = (
-                "The query depends on recent or real-time information, so web search is prioritized."
-            )
+            reason = "The query depends on recent or real-time information, so web search is prioritized."
         elif "kg_hybrid_search" in available_tools:
             sequence.append(ToolCallPlan(tool="kg_hybrid_search"))
             strategy = "kg_hybrid_fallback_for_realtime"
-            reason = (
-                "Real-time web search is unavailable, so the agent falls back to knowledge retrieval."
-            )
+            reason = "Real-time web search is unavailable, so the agent falls back to knowledge retrieval."
         else:
-            return (
-                "simple_answer_no_tool",
-                [],
-                False,
-                "No appropriate realtime tools are available.",
-            )
+            return "simple_answer_no_tool", [], False, "No appropriate realtime tools are available."
 
         if is_relation and "graph_relation_trace" in available_tools:
             sequence.append(ToolCallPlan(tool="graph_relation_trace", optional=True))
@@ -457,20 +556,32 @@ class RouteJudge:
         session_context: dict[str, Any] | None,
         user_profile: dict[str, Any] | None,
         available_tools: list[str],
+        capability_catalog: list[dict[str, Any]],
+        skill_catalog: list[dict[str, Any]],
         base_decision: RouteDecision,
     ) -> RouteDecision | None:
         if self.llm_client is None or not self.llm_client.is_available():
             return None
-        if base_decision.strategy in {
-            "simple_answer_no_tool",
-            "specialized_external_capability",
-        }:
+        if (
+            base_decision.strategy == "simple_answer_no_tool"
+            and not self._has_external_capabilities(capability_catalog)
+            and not skill_catalog
+        ):
+            return None
+        if (
+            base_decision.strategy == "specialized_external_capability"
+            and not self._has_external_capabilities(capability_catalog)
+            and not skill_catalog
+        ):
             return None
 
         system_prompt, user_prompt = build_route_judge_prompt(
             query=query,
             session_context={**(session_context or {}), "user_profile": user_profile or {}},
+            available_capabilities=available_tools,
+            available_capability_catalog=capability_catalog,
             available_tools=available_tools,
+            available_skills=skill_catalog,
             current_plan=asdict(base_decision),
             prompt_version=self.prompt_version,
         )
@@ -502,8 +613,15 @@ class RouteJudge:
                 )
             )
 
+        skill_plan = self._parse_skill_plan_payload(
+            payload.get("skill_plan"),
+            available_skills=skill_catalog,
+        )
         if not tool_sequence and base_decision.need_tools:
-            return None
+            if skill_plan is None or base_decision.skill_plan is None:
+                return None
+        if skill_plan is None and base_decision.skill_plan is not None:
+            skill_plan = base_decision.skill_plan
 
         return RouteDecision(
             need_tools=bool(payload.get("need_tools", bool(tool_sequence))),
@@ -521,6 +639,7 @@ class RouteJudge:
                 1,
                 min(int(payload.get("max_iterations", base_decision.max_iterations)), 5),
             ),
+            skill_plan=skill_plan,
         )
 
     @staticmethod
@@ -536,10 +655,59 @@ class RouteJudge:
             seen.add(item.tool)
         return normalized
 
+    @classmethod
+    def _resolve_capability_catalog(
+        cls,
+        *,
+        available_capabilities: list[Any] | None,
+        available_capability_catalog: list[dict[str, Any]] | None,
+        available_tools: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        allowed_names = set(
+            cls._resolve_available_capabilities(
+                available_capabilities=available_capabilities,
+                available_tools=available_tools,
+            )
+        )
+        raw_catalog = (
+            available_capability_catalog
+            if available_capability_catalog is not None
+            else available_capabilities
+        )
+
+        resolved: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw_catalog or []:
+            descriptor = cls._normalize_capability_descriptor(item)
+            if descriptor is None:
+                continue
+            if allowed_names and descriptor["name"] not in allowed_names:
+                continue
+            if descriptor["name"] in seen:
+                continue
+            resolved.append(descriptor)
+            seen.add(descriptor["name"])
+
+        for name in sorted(allowed_names):
+            if name in seen:
+                continue
+            resolved.append(
+                {
+                    "name": name,
+                    "description": "",
+                    "tags": [],
+                    "kind": "native",
+                    "executor": "tool_registry",
+                    "arg_names": [],
+                    "required_args": [],
+                }
+            )
+        return resolved
+
     @staticmethod
     def _resolve_available_capabilities(
         *,
-        available_capabilities: list[str] | None,
+        available_capabilities: list[Any] | None,
         available_tools: list[str] | None,
     ) -> list[str]:
         raw = (
@@ -547,7 +715,317 @@ class RouteJudge:
             if available_capabilities is not None
             else (available_tools or [])
         )
-        return [str(item) for item in raw if isinstance(item, str) and item.strip()]
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            name = ""
+            if isinstance(item, str):
+                name = item.strip()
+            elif isinstance(item, dict):
+                name = str(item.get("name", "")).strip()
+            if not name or name in seen:
+                continue
+            resolved.append(name)
+            seen.add(name)
+        return resolved
+
+    @staticmethod
+    def _normalize_capability_descriptor(item: Any) -> dict[str, Any] | None:
+        if isinstance(item, str):
+            name = item.strip()
+            if not name:
+                return None
+            return {
+                "name": name,
+                "description": "",
+                "tags": [],
+                "kind": "native",
+                "executor": "tool_registry",
+                "arg_names": [],
+                "required_args": [],
+            }
+        if not isinstance(item, dict):
+            return None
+
+        name = str(item.get("name", "")).strip()
+        if not name:
+            return None
+
+        input_schema = item.get("input_schema")
+        if not isinstance(input_schema, dict):
+            input_schema = item.get("inputSchema")
+        if not isinstance(input_schema, dict):
+            input_schema = {}
+
+        properties = (
+            input_schema.get("properties")
+            if isinstance(input_schema.get("properties"), dict)
+            else {}
+        )
+        arg_names = item.get("arg_names")
+        if not isinstance(arg_names, list):
+            arg_names = sorted(
+                str(key) for key in properties.keys() if isinstance(key, str) and key.strip()
+            )
+        required_args = item.get("required_args")
+        if not isinstance(required_args, list):
+            required_args = (
+                input_schema.get("required")
+                if isinstance(input_schema.get("required"), list)
+                else []
+            )
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        tags = item.get("tags")
+        return {
+            "name": name,
+            "description": str(item.get("description", "")).strip(),
+            "tags": [str(tag) for tag in tags if isinstance(tag, str)]
+            if isinstance(tags, list)
+            else [],
+            "kind": str(item.get("kind", "native")).strip() or "native",
+            "executor": str(item.get("executor", "tool_registry")).strip()
+            or "tool_registry",
+            "arg_names": [str(arg) for arg in arg_names if isinstance(arg, str) and arg.strip()],
+            "required_args": [
+                str(arg) for arg in required_args if isinstance(arg, str) and arg.strip()
+            ],
+            "server": str(item.get("server") or metadata.get("server") or "").strip(),
+            "planner_exposed": bool(
+                item.get("planner_exposed", metadata.get("planner_exposed", True))
+            ),
+        }
+
+    @staticmethod
+    def _resolve_skill_catalog(
+        available_skills: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        resolved: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in available_skills or []:
+            if isinstance(item, str):
+                name = item.strip()
+                if not name or name in seen:
+                    continue
+                resolved.append({"name": name, "description": "", "tags": [], "path": ""})
+                seen.add(name)
+                continue
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name or name in seen:
+                continue
+            tags = item.get("tags")
+            resolved.append(
+                {
+                    "name": name,
+                    "description": str(item.get("description", "")).strip(),
+                    "tags": [str(tag) for tag in tags if isinstance(tag, str)]
+                    if isinstance(tags, list)
+                    else [],
+                    "path": str(item.get("path", "")).strip(),
+                }
+            )
+            seen.add(name)
+        return resolved
+
+    @staticmethod
+    def _has_external_capabilities(capability_catalog: list[dict[str, Any]]) -> bool:
+        return any(
+            str(item.get("executor", "")).strip().lower() == "mcp"
+            and str(item.get("name", "")).strip().lower() not in SKILL_INFRASTRUCTURE_TOOLS
+            for item in capability_catalog
+        )
+
+    @classmethod
+    def _select_matching_skill(
+        cls,
+        *,
+        query: str,
+        skill_catalog: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not skill_catalog:
+            return None
+        ranked = sorted(
+            (
+                (cls._score_search_match(query=query, item=skill), skill)
+                for skill in skill_catalog
+            ),
+            key=lambda item: (item[0], item[1]["name"]),
+            reverse=True,
+        )
+        best_score, best_skill = ranked[0]
+        if best_score >= 6:
+            return best_skill
+        if SKILL_REQUEST_PATTERN.search(query or "") and best_score >= 3:
+            return best_skill
+        if SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN.search(query or "") and best_score >= 2:
+            return best_skill
+        return None
+
+    @classmethod
+    def _select_matching_external_capability(
+        cls,
+        *,
+        query: str,
+        capability_catalog: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        candidates = [
+            capability
+            for capability in capability_catalog
+            if cls._is_external_capability(capability)
+        ]
+        if not candidates:
+            return None
+        specialized_request = bool(SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN.search(query))
+        ranked = sorted(
+            (
+                (cls._score_search_match(query=query, item=capability), capability)
+                for capability in candidates
+            ),
+            key=lambda item: (item[0], item[1]["name"]),
+            reverse=True,
+        )
+        best_score, best_capability = ranked[0]
+        threshold = 2 if specialized_request else 4
+        if best_score >= threshold:
+            return best_capability
+        if specialized_request and len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    @staticmethod
+    def _is_external_capability(capability: dict[str, Any]) -> bool:
+        name = str(capability.get("name", "")).strip().lower()
+        if not name or name in SKILL_INFRASTRUCTURE_TOOLS:
+            return False
+        kind = str(capability.get("kind", "")).strip().lower()
+        executor = str(capability.get("executor", "")).strip().lower()
+        return kind == "external_mcp" or executor == "mcp"
+
+    @classmethod
+    def _score_search_match(
+        cls,
+        *,
+        query: str,
+        item: dict[str, Any],
+    ) -> int:
+        query_lower = (query or "").strip().lower()
+        if not query_lower:
+            return 0
+        search_text = cls._build_search_text(item)
+        if not search_text:
+            return 0
+
+        score = 0
+        item_name = str(item.get("name", "")).strip().lower()
+        if item_name and item_name in query_lower:
+            score += 5
+
+        tags = [
+            str(tag).strip().lower()
+            for tag in item.get("tags", [])
+            if isinstance(tag, str)
+        ]
+        for tag in tags:
+            if len(tag) < 3:
+                continue
+            if tag in query_lower:
+                score += 3
+
+        for token in cls._extract_query_terms(query_lower):
+            if token in search_text:
+                score += 2
+                if item_name and token in item_name:
+                    score += 1
+        return score
+
+    @staticmethod
+    def _build_search_text(item: dict[str, Any]) -> str:
+        parts = [
+            str(item.get("name", "")),
+            str(item.get("description", "")),
+            " ".join(str(tag) for tag in item.get("tags", []) if isinstance(tag, str)),
+            " ".join(str(arg) for arg in item.get("arg_names", []) if isinstance(arg, str)),
+            " ".join(
+                str(arg) for arg in item.get("required_args", []) if isinstance(arg, str)
+            ),
+        ]
+        return " ".join(parts).replace("_", " ").replace("-", " ").strip().lower()
+
+    @staticmethod
+    def _extract_query_terms(query: str) -> list[str]:
+        terms = []
+        seen: set[str] = set()
+        for token in re.findall(r"[a-z][a-z0-9_./-]{2,}", query or ""):
+            normalized = token.strip("_-/").lower()
+            if (
+                len(normalized) < 3
+                or normalized in MATCH_STOPWORDS
+                or normalized in seen
+            ):
+                continue
+            seen.add(normalized)
+            terms.append(normalized)
+        return terms
+
+    @staticmethod
+    def _should_route_to_skill(
+        *,
+        query: str,
+        matched_skill: dict[str, Any],
+        requests_skill_workflow: bool,
+        needs_specialized_external_capability: bool,
+    ) -> bool:
+        query_lower = (query or "").strip().lower()
+        skill_name = str(matched_skill.get("name", "")).strip().lower()
+        if skill_name and skill_name in query_lower:
+            return True
+        if requests_skill_workflow or needs_specialized_external_capability:
+            return True
+        return RouteJudge._score_search_match(query=query, item=matched_skill) >= 6
+
+    @staticmethod
+    def _should_route_to_external_capability(
+        *,
+        query: str,
+        matched_capability: dict[str, Any],
+    ) -> bool:
+        return RouteJudge._score_search_match(query=query, item=matched_capability) >= 4
+
+    @staticmethod
+    def _build_skill_goal(query: str, matched_skill: dict[str, Any]) -> str:
+        skill_name = str(matched_skill.get("name", "")).strip()
+        if skill_name:
+            return f"Use skill '{skill_name}' to fulfill the user request: {query}".strip()
+        return query.strip()
+
+    @staticmethod
+    def _parse_skill_plan_payload(
+        payload: Any,
+        *,
+        available_skills: list[dict[str, Any]],
+    ) -> SkillPlan | None:
+        if not isinstance(payload, dict):
+            return None
+        skill_name = str(payload.get("skill_name", "")).strip()
+        if not skill_name:
+            return None
+        allowed_names = {
+            str(item.get("name", "")).strip()
+            for item in available_skills
+            if isinstance(item, dict)
+        }
+        if allowed_names and skill_name not in allowed_names:
+            return None
+        goal = str(payload.get("goal", "")).strip()
+        reason = str(payload.get("reason", "")).strip() or f"Selected skill '{skill_name}'."
+        constraints = payload.get("constraints")
+        return SkillPlan(
+            skill_name=skill_name,
+            goal=goal or f"Use skill '{skill_name}' to fulfill the request.",
+            reason=reason,
+            constraints=constraints if isinstance(constraints, dict) else {},
+        )
 
     @staticmethod
     def _last_turn_used_kg_tools(recent_tool_calls: Any) -> bool:

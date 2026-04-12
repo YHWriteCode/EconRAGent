@@ -26,6 +26,7 @@ from kg_agent.mcp.adapter import MCPAdapter
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.memory.cross_session_store import CrossSessionStore
 from kg_agent.memory.user_profile import UserProfileStore
+from kg_agent.skills import SkillExecutor, SkillLoader, SkillRegistry
 
 
 CORRECTION_PHRASE_PATTERN = re.compile(
@@ -143,6 +144,9 @@ class AgentCore:
         conversation_memory: ConversationMemoryStore | None = None,
         cross_session_store: CrossSessionStore | None = None,
         user_profile_store: UserProfileStore | None = None,
+        skill_registry: SkillRegistry | None = None,
+        skill_loader: SkillLoader | None = None,
+        skill_executor: SkillExecutor | None = None,
     ):
         self._rag = rag
         self._rag_provider = rag_provider
@@ -164,6 +168,14 @@ class AgentCore:
             conversation_memory=self.conversation_memory
         )
         self.user_profile_store = user_profile_store or UserProfileStore()
+        self.skill_registry = skill_registry or SkillRegistry(
+            self.config.runtime.skills_dir
+        )
+        self.skill_loader = skill_loader or SkillLoader(self.skill_registry)
+        self.skill_executor = skill_executor or SkillExecutor(
+            registry=self.skill_registry,
+            loader=self.skill_loader,
+        )
         self.tool_registry = tool_registry or build_default_tool_registry(
             self.config, self.conversation_memory, self.cross_session_store
         )
@@ -223,12 +235,18 @@ class AgentCore:
             include_memory=use_memory,
             include_cross_session=bool(user_id),
         )
+        available_capability_catalog = self._available_capability_catalog(
+            include_memory=use_memory,
+            include_cross_session=bool(user_id),
+        )
         profile = await self.user_profile_store.get_profile(user_id)
         return await self.route_judge.plan(
             query=query,
             session_context=session_context,
             user_profile=profile,
             available_capabilities=available_capabilities,
+            available_capability_catalog=available_capability_catalog,
+            available_skills=self._available_skill_catalog(),
         )
 
     async def chat(
@@ -417,6 +435,25 @@ class AgentCore:
                 }
                 break
 
+        if planned.route.skill_plan is not None:
+            yield {
+                "type": "skill_start",
+                "skill_name": planned.route.skill_plan.skill_name,
+            }
+            skill_result = await self._execute_skill_plan(
+                context=planned.context,
+                skill_plan=planned.route.skill_plan,
+            )
+            recorded_call = self._record_tool_call(result=skill_result, optional=False)
+            raw_tool_calls.append(recorded_call)
+            yield {
+                "type": "skill_result",
+                "skill_call": self._serialize_tool_call(
+                    recorded_call,
+                    debug=planned.context.debug,
+                ),
+            }
+
         dynamic_update = await self._maybe_handle_dynamic_graph_update(
             context=planned.context,
             route=planned.route,
@@ -587,6 +624,15 @@ class AgentCore:
             ):
                 break
 
+        if planned.route.skill_plan is not None:
+            skill_result = await self._execute_skill_plan(
+                context=planned.context,
+                skill_plan=planned.route.skill_plan,
+            )
+            raw_tool_calls.append(
+                self._record_tool_call(result=skill_result, optional=False)
+            )
+
         dynamic_update = await self._maybe_handle_dynamic_graph_update(
             context=planned.context,
             route=planned.route,
@@ -655,6 +701,11 @@ class AgentCore:
                 include_memory=context.use_memory,
                 include_cross_session=bool(context.user_id),
             ),
+            available_capability_catalog=self._available_capability_catalog(
+                include_memory=context.use_memory,
+                include_cross_session=bool(context.user_id),
+            ),
+            available_skills=self._available_skill_catalog(),
         )
 
         execution_limit = max(
@@ -730,6 +781,9 @@ class AgentCore:
             "workspace": context.workspace,
             "domain_schema": context.domain_schema,
             "route_strategy": route.strategy,
+            "skill_name": (
+                route.skill_plan.skill_name if getattr(route, "skill_plan", None) else None
+            ),
             "stream_requested": context.stream,
             "streaming_supported": True,
             **(extra_metadata or {}),
@@ -1061,6 +1115,20 @@ class AgentCore:
             input_bindings=getattr(tool_plan, "input_bindings", {}) or {},
         )
 
+    async def _execute_skill_plan(
+        self,
+        *,
+        context: AgentRunContext,
+        skill_plan,
+    ):
+        return await self.skill_executor.execute(
+            skill_name=skill_plan.skill_name,
+            goal=skill_plan.goal,
+            user_query=context.query,
+            workspace=context.workspace,
+            constraints=getattr(skill_plan, "constraints", {}) or {},
+        )
+
     async def _execute_capability(
         self,
         *,
@@ -1181,6 +1249,7 @@ class AgentCore:
         source_call: dict[str, Any],
         transform: str,
     ) -> Any:
+        structured_payload = self._extract_tool_structured_payload(source_call)
         if transform == "web_pages_markdown":
             pages = self._extract_successful_web_pages(source_call)
             documents = [
@@ -1200,7 +1269,58 @@ class AgentCore:
             if not sources:
                 return None
             return sources[0] if len(sources) == 1 else sources
+        if transform == "selected_skill_name":
+            selected_name = self._extract_binding_path(
+                structured_payload,
+                "selected_skill_name",
+            )
+            if isinstance(selected_name, str) and selected_name.strip():
+                return selected_name.strip()
+            selected_name = self._extract_binding_path(
+                structured_payload,
+                "selected_skill.name",
+            )
+            if isinstance(selected_name, str) and selected_name.strip():
+                return selected_name.strip()
+            skills = self._extract_binding_path(structured_payload, "skills[]")
+            if isinstance(skills, list):
+                for item in skills:
+                    if isinstance(item, dict):
+                        name = str(item.get("name", "")).strip()
+                        if name:
+                            return name
+        if transform == "skill_name":
+            for path in ("name", "skill_name", "selected_skill_name"):
+                value = self._extract_binding_path(structured_payload, path)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        if transform == "default_skill_script":
+            for path in (
+                "default_script",
+                "recommended_script",
+                "metadata.default_script",
+                "metadata.recommended_script",
+                "metadata.entrypoint",
+                "metadata.script",
+            ):
+                value = self._extract_binding_path(structured_payload, path)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            scripts = self._extract_binding_path(structured_payload, "scripts[]")
+            if isinstance(scripts, list):
+                for item in scripts:
+                    if isinstance(item, str) and item.strip():
+                        return item.strip()
         return None
+
+    @staticmethod
+    def _extract_tool_structured_payload(source_call: dict[str, Any]) -> Any:
+        data = source_call.get("data")
+        if isinstance(data, dict):
+            structured = data.get("structured_content")
+            if isinstance(structured, dict):
+                return structured
+        return data
 
     @classmethod
     def _extract_binding_path(cls, value: Any, path: str) -> Any:
@@ -1324,6 +1444,22 @@ class AgentCore:
         if "status" in data:
             summary["status"] = data["status"]
 
+        if tool_name.startswith("skill:"):
+            for key in ("skill_name", "goal", "workspace"):
+                if key in data:
+                    summary[key] = data[key]
+            skill = data.get("skill")
+            if isinstance(skill, dict):
+                summary["skill"] = {
+                    "name": skill.get("name"),
+                    "description": skill.get("description"),
+                    "path": skill.get("path"),
+                }
+            files = data.get("file_inventory")
+            if isinstance(files, list):
+                summary["file_count"] = len(files)
+            return summary
+
         if tool_name == "web_search":
             pages = data.get("pages", [])
             if isinstance(pages, list):
@@ -1414,7 +1550,25 @@ class AgentCore:
         include_memory: bool,
         include_cross_session: bool = False,
     ) -> list[str]:
-        capabilities = []
+        return [
+            item["name"]
+            for item in self._available_capability_catalog(
+                include_memory=include_memory,
+                include_cross_session=include_cross_session,
+            )
+        ]
+
+    def _available_skill_catalog(self) -> list[dict[str, Any]]:
+        self.skill_registry.refresh()
+        return [skill.to_catalog_dict() for skill in self.skill_registry.list_skills()]
+
+    def _available_capability_catalog(
+        self,
+        *,
+        include_memory: bool,
+        include_cross_session: bool = False,
+    ) -> list[dict[str, Any]]:
+        capabilities: list[dict[str, Any]] = []
         for capability in self.capability_registry.list_capabilities():
             if not capability.enabled:
                 continue
@@ -1429,8 +1583,45 @@ class AgentCore:
                 and not bool(capability.metadata.get("planner_exposed", False))
             ):
                 continue
-            capabilities.append(capability.name)
+            capabilities.append(self._build_route_capability_descriptor(capability))
         return capabilities
+
+    @staticmethod
+    def _build_route_capability_descriptor(
+        capability: CapabilityDefinition,
+    ) -> dict[str, Any]:
+        input_schema = capability.input_schema if isinstance(capability.input_schema, dict) else {}
+        properties = (
+            input_schema.get("properties")
+            if isinstance(input_schema.get("properties"), dict)
+            else {}
+        )
+        required_args = (
+            input_schema.get("required")
+            if isinstance(input_schema.get("required"), list)
+            else []
+        )
+        descriptor = {
+            "name": capability.name,
+            "description": capability.description,
+            "tags": list(capability.tags),
+            "kind": capability.kind,
+            "executor": capability.executor,
+            "arg_names": sorted(
+                str(key)
+                for key in properties.keys()
+                if isinstance(key, str) and key.strip()
+            ),
+            "required_args": [
+                str(item) for item in required_args if isinstance(item, str) and item.strip()
+            ],
+        }
+        server = capability.metadata.get("server")
+        if isinstance(server, str) and server.strip():
+            descriptor["server"] = server.strip()
+        if "planner_exposed" in capability.metadata:
+            descriptor["planner_exposed"] = bool(capability.metadata["planner_exposed"])
+        return descriptor
 
     def _available_tool_names(
         self,
@@ -1449,6 +1640,9 @@ class AgentCore:
             for capability in self.capability_registry.list_capabilities()
             if capability.enabled
         ]
+
+    def list_skills(self) -> list[dict[str, Any]]:
+        return self._available_skill_catalog()
 
     def get_capability(self, name: str) -> dict[str, Any] | None:
         capability = self.capability_registry.get(name)

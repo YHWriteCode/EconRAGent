@@ -13,6 +13,7 @@ from kg_agent.config import (
     ToolConfig,
 )
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
+from kg_agent.skills import SkillPlan
 from kg_agent.tools.base import ToolDefinition, ToolResult
 
 
@@ -55,6 +56,26 @@ class _CapturingRouteJudge:
     async def plan(self, **kwargs):
         self.seen_session_context = kwargs.get("session_context")
         return self.route
+
+
+class _StubSkillExecutor:
+    def __init__(self):
+        self.calls = []
+
+    async def execute(self, **kwargs):
+        self.calls.append(kwargs)
+        return ToolResult(
+            tool_name=f"skill:{kwargs['skill_name']}",
+            success=True,
+            data={
+                "status": "prepared",
+                "skill_name": kwargs["skill_name"],
+                "goal": kwargs["goal"],
+                "workspace": kwargs.get("workspace"),
+                "summary": f"Prepared skill {kwargs['skill_name']}",
+            },
+            metadata={"executor": "skill", "skill_name": kwargs["skill_name"]},
+        )
 
 
 @pytest.mark.asyncio
@@ -499,6 +520,48 @@ async def test_agent_core_preview_route_uses_smart_memory_window():
     assert "We are now discussing lunch" in contents
     assert "Lunch plan is undecided." in contents
     assert "Acknowledged" not in contents
+
+
+@pytest.mark.asyncio
+async def test_agent_core_dispatches_skill_plan_to_skill_executor():
+    route = RouteDecision(
+        need_tools=False,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="skill_request",
+        tool_sequence=[],
+        reason="skill route",
+        max_iterations=1,
+        skill_plan=SkillPlan(
+            skill_name="example-skill",
+            goal="Use example-skill to create a report",
+            reason="Matched local skill",
+        ),
+    )
+    skill_executor = _StubSkillExecutor()
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        route_judge=_StubRouteJudge(route=route),
+        skill_executor=skill_executor,
+    )
+
+    response = await agent.chat(
+        query="run a report skill",
+        session_id="skill-workflow-session",
+        use_memory=False,
+        debug=True,
+    )
+
+    assert [item["tool"] for item in response.tool_calls] == ["skill:example-skill"]
+    assert skill_executor.calls[0]["skill_name"] == "example-skill"
+    assert skill_executor.calls[0]["goal"] == "Use example-skill to create a report"
+    assert skill_executor.calls[0]["workspace"] is None
 
 
 def test_agent_core_builds_route_judge_with_configured_prompt_version():

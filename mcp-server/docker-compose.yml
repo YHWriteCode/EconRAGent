@@ -1,0 +1,25 @@
+services:
+  mcp-skill-service:
+    container_name: mcp-skill-service
+    build:
+      context: ..
+      dockerfile: mcp-server/Dockerfile
+    image: lightrag-mcp-skill-service:latest
+    command: ["python", "/app/server.py"]
+    stdin_open: true
+    tty: false
+    environment:
+      MCP_SKILLS_DIR: /app/skills
+      MCP_WORKSPACE_DIR: /workspace
+    volumes:
+      - mcp_skill_workspace:/workspace
+    # Local development hot reload for skill definitions:
+    # volumes:
+    #   - ../skills:/app/skills:ro
+    #
+    # Because this server currently uses stdio transport, the most natural
+    # local launch mode for an MCP client is:
+    #   docker compose -f mcp-server/docker-compose.yml run --rm mcp-skill-service
+
+volumes:
+  mcp_skill_workspace:

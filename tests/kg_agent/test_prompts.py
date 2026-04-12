@@ -53,3 +53,37 @@ def test_build_path_explainer_prompt_uses_economy_template_guidance():
     assert "Resolved scenario id:\neconomy_policy_impact_scenario_v1" in user_prompt
     assert "Resolved prompt template:\neconomy_causal_v1" in user_prompt
     assert "driver -> transmission channel -> metric or company outcome" in user_prompt
+
+
+def test_build_route_judge_prompt_includes_skills_and_skill_plan_contract():
+    from kg_agent.agent.prompts import build_route_judge_prompt
+
+    system_prompt, user_prompt = build_route_judge_prompt(
+        query="clean this spreadsheet",
+        session_context={"history": []},
+        available_capabilities=["kg_hybrid_search"],
+        available_capability_catalog=[
+            {
+                "name": "kg_hybrid_search",
+                "description": "Run LightRAG hybrid retrieval.",
+                "kind": "native",
+                "executor": "tool_registry",
+                "tags": ["retrieval"],
+                "arg_names": ["query"],
+                "required_args": ["query"],
+            }
+        ],
+        available_skills=[
+            {
+                "name": "xlsx",
+                "description": "Spreadsheet workflow skill.",
+                "tags": ["spreadsheet", "xlsx"],
+                "path": "/skills/xlsx",
+            }
+        ],
+        current_plan={"strategy": "skill_request"},
+    )
+
+    assert "route judge" in system_prompt.lower()
+    assert "Available skills:" in user_prompt
+    assert '"skill_plan": {"skill_name": str, "goal": str, "reason": str, "constraints": dict} | null' in user_prompt

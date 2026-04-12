@@ -28,13 +28,15 @@ class _FakeRAG:
 class _StubRouteJudge:
     route: RouteDecision
     seen_available_capabilities: list[str] | None = None
+    seen_available_capability_catalog: list[dict] | None = None
 
     async def plan(self, **kwargs):
         self.seen_available_capabilities = kwargs.get("available_capabilities")
+        self.seen_available_capability_catalog = kwargs.get("available_capability_catalog")
         return self.route
 
 
-def _build_mcp_config() -> MCPConfig:
+def _build_mcp_config(*, planner_exposed: bool = False) -> MCPConfig:
     fixture_path = (
         Path(__file__).resolve().parent / "fixtures" / "fake_mcp_server.py"
     )
@@ -64,7 +66,7 @@ def _build_mcp_config() -> MCPConfig:
                 server="quant-skill",
                 remote_name="quant_backtest",
                 tags=["quant"],
-                planner_exposed=False,
+                planner_exposed=planner_exposed,
             )
         ],
     )
@@ -130,7 +132,58 @@ async def test_agent_core_hides_external_mcp_capabilities_from_auto_routing_by_d
 
     assert "quant_backtest_skill" not in (route_judge.seen_available_capabilities or [])
     assert "portfolio_stats" not in (route_judge.seen_available_capabilities or [])
+    catalog_names = [
+        item.get("name")
+        for item in (route_judge.seen_available_capability_catalog or [])
+        if isinstance(item, dict)
+    ]
+    assert "quant_backtest_skill" not in catalog_names
+    assert "portfolio_stats" not in catalog_names
     await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_core_passes_skill_aware_catalog_for_planner_visible_external_capability():
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False),
+        mcp=_build_mcp_config(planner_exposed=True),
+        runtime=AgentRuntimeConfig(default_workspace="", max_iterations=1),
+    )
+    route_judge = _StubRouteJudge(
+        route=RouteDecision(
+            need_tools=False,
+            need_memory=False,
+            need_web_search=False,
+            need_path_explanation=False,
+            strategy="simple_answer_no_tool",
+            tool_sequence=[],
+            reason="test",
+            max_iterations=1,
+        )
+    )
+    adapter = MCPAdapter(config.mcp)
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=config,
+        route_judge=route_judge,
+        mcp_adapter=adapter,
+    )
+
+    try:
+        await agent.preview_route(
+            query="run a backtest for AAPL",
+            session_id="mcp-skill-aware-preview",
+            use_memory=False,
+        )
+        catalog = route_judge.seen_available_capability_catalog or []
+        quant_skill = next(item for item in catalog if item["name"] == "quant_backtest_skill")
+        assert quant_skill["kind"] == "external_mcp"
+        assert quant_skill["executor"] == "mcp"
+        assert quant_skill["description"] == "Run a backtest through an external MCP skill."
+        assert "symbol" in quant_skill["arg_names"]
+    finally:
+        await adapter.close()
 
 
 @pytest.mark.asyncio
@@ -201,7 +254,7 @@ async def test_agent_core_executes_external_mcp_capability_and_lists_it():
         need_memory=False,
         need_web_search=False,
         need_path_explanation=False,
-        strategy="external_skill_request",
+        strategy="external_capability_request",
         tool_sequence=[
             ToolCallPlan(
                 tool="quant_backtest_skill",

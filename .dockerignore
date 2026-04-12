@@ -1,0 +1,8 @@
+# This image only needs the MCP server code and bundled skills.
+# If the repository later adds other Docker build workflows that need more files,
+# expand these allow rules accordingly.
+*
+!mcp-server/
+!mcp-server/**
+!skills/
+!skills/**

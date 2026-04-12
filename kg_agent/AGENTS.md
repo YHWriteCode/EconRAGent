@@ -13,6 +13,7 @@
 
 - Agent main loop (reasoning → routing → tool invocation → summary response)
 - Route Judge: decides "how to query, what to query, how many steps"
+- Local skill catalog / loader / executor for `skills/*/SKILL.md`
 - Path Explainer: organizes graph paths + text evidence into readable explanations
 - Tool registration and execution for the built-in core capability set (retrieval, graph, memory, web search, ingestion)
 - Static MCP-backed external capability execution through the capability layer
@@ -52,6 +53,12 @@ kg_agent/
 │   ├── builtin_tools.py           # Assembly layer: wraps functions from tools/ and registers them to ToolRegistry
 │   ├── prompts.py                 # All prompt templates (route judge version registry / path-explainer template registry / final answer)
 │   └── tool_schemas.py            # Tool parameter JSON Schema definitions
+│
+├── skills/                        # Local skill layer
+│   ├── registry.py                # SkillRegistry: scan `skills/*/SKILL.md` into a lightweight catalog
+│   ├── loader.py                  # SkillLoader: progressive skill content loading + file reads
+│   ├── executor.py                # SkillExecutor: skill_plan execution path and runtime handoff
+│   └── models.py                  # SkillDefinition / SkillPlan / LoadedSkill dataclasses
 │
 ├── mcp/                           # External capability transport layer
 │   ├── __init__.py
@@ -108,14 +115,17 @@ kg_agent/
 - LLM calls go through `AgentLLMClient` (wrapping OpenAI AsyncClient)
 - `AgentCore` can attach a dedicated lightweight utility model for internal routing/explanation work; when it is not configured, Route Judge and Path Explainer warn once and fall back to the main agent model
 
-### 3.4 Capabilities Are Exposed Through CapabilityRegistry; Native Execution Uses ToolRegistry
+### 3.4 Capabilities Are Exposed Through CapabilityRegistry; Skills Are Separate
 
 - All tools must be registered via `ToolRegistry.register()` before use
 - Planner-visible built-in capabilities are registered via `CapabilityRegistry`
 - `AgentCore` currently builds the native capability registry by mirroring the enabled/disabled built-in tool set
 - Configured MCP capabilities are also registered in `CapabilityRegistry` with `kind="external_mcp"` and `executor="mcp"`
+- `SkillRegistry` scans `./skills/*/SKILL.md` into an independent planner-facing skill catalog (`name`, `description`, optional `tags`, local path)
+- `AgentCore` passes both the capability catalog and the skill catalog into `RouteJudge`
 - Do not hardcode tool invocations in `agent_core.py`
 - `ToolRegistry` is for the core built-in capability set only
+- Do not model local skills as planner-visible MCP tools
 - Do not add domain-specific placeholder tools to the core registry; specialized external modules should be exposed through the MCP adapter instead
 
 ### 3.5 Path Explanation Allows Fallback
@@ -221,12 +231,13 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
 1. Load context
    ├─ Session history (ConversationMemoryStore.get_context_window: recent-turn anchor + query-aware older-turn backfill within token budget)
    ├─ User profile (UserProfileStore.get_profile)
-   └─ Available capability list (enabled capabilities from CapabilityRegistry; native capabilities are planner-visible by default, configured MCP capabilities are hidden from auto-routing unless `planner_exposed=true`)
+   ├─ Available capability list + planner-facing capability catalog (enabled capabilities from CapabilityRegistry; native capabilities are planner-visible by default, configured MCP capabilities are hidden from auto-routing unless `planner_exposed=true`)
+   └─ Available skills from `SkillRegistry` (lightweight local catalog only; full skill contents are loaded later on demand)
 
 2. Invoke Route Judge
-   └─ RouteJudge.plan(query, session_context, user_profile, available_capabilities)
-       ├─ Rule engine priority (regex matching for 7 scenario types)
-       └─ Optional LLM refinement (when llm_client is available, LLM can adjust rule results)
+   └─ RouteJudge.plan(query, session_context, user_profile, available_capabilities, available_capability_catalog, available_skills)
+       ├─ Rule engine priority (regex matching + capability matching + skill matching)
+       └─ Optional LLM refinement (when llm_client is available, LLM can adjust rule results using both planner surfaces)
        → Returns RouteDecision (structured routing plan)
 
 3. Execute tools sequentially per tool_sequence
@@ -237,7 +248,13 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
        ├─ Accumulate graph_paths and evidence_chunks (for path explanation)
        └─ Support early termination (optional tools skipped when preceding tools succeed)
 
-3b. Explicit capability invocation (API / direct execution path)
+3b. Execute local skill plan (optional)
+   └─ When `route.skill_plan` is present:
+       └─ SkillExecutor.execute(skill_name, goal, user_query, workspace, constraints)
+            ├─ SkillLoader loads `SKILL.md` + file inventory on demand
+            └─ Runtime handoff stays behind the skill executor boundary
+
+3c. Explicit capability invocation (API / direct execution path)
    └─ AgentCore.invoke_capability(capability_name, session_id, query, args, ...)
        ├─ Bypasses RouteJudge and `tool_sequence`
        ├─ Reuses the same capability registry, memory-context loading, and executor dispatch
@@ -279,7 +296,14 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
 
 ```python
 class RouteJudge:
-    async def plan(query, session_context, user_profile, available_capabilities) -> RouteDecision
+    async def plan(
+        query,
+        session_context,
+        user_profile,
+        available_capabilities,
+        available_capability_catalog=None,
+        available_skills=None,
+    ) -> RouteDecision
 ```
 
 ### 6.2 RouteDecision Structure
@@ -292,12 +316,13 @@ class RouteJudge:
 | `need_path_explanation` | `bool` | Whether path explanation is needed |
 | `strategy` | `str` | Strategy name (for logging and debugging) |
 | `tool_sequence` | `list[ToolCallPlan]` | Ordered tool invocation plan |
+| `skill_plan` | `SkillPlan \| None` | Optional local skill execution plan |
 | `reason` | `str` | Routing decision rationale |
 | `max_iterations` | `int` | Maximum execution steps |
 
 ### 6.3 Routing Logic (LLM + Rule Fallback)
 
-The rule engine covers explicit patterns plus the default factual fallback:
+The rule engine covers explicit patterns, local skill matching, planner-visible external capability matching, plus the default factual fallback:
 
 | Scenario | Detection | Strategy | Tool Sequence |
 |---|---|---|---|
@@ -306,13 +331,25 @@ The rule engine covers explicit patterns plus the default factual fallback:
 | Entity query | `ENTITY_PATTERN` | `graph_entity_lookup_first` | graph_entity_lookup → kg_hybrid_search |
 | Relation/causal | `RELATION_PATTERN` | `kg_hybrid_first_then_graph_trace` | kg_hybrid_search → graph_relation_trace |
 | Context follow-up | `FOLLOWUP_PATTERN` | `memory_first_then_*` | memory_search → subsequent tools |
+| Local skill match | Lexical/metadata match against `available_skills` | `skill_request` or `memory_first_then_skill` | skill_plan |
+| Planner-visible external capability match | Lexical/metadata match against `available_capability_catalog` | `external_capability_request` or `memory_first_then_external_capability` | [memory_search →] external capability |
 | Real-time info | `REALTIME_PATTERN` | `freshness_aware_search` | web_search → kg_hybrid_search |
 | User correction | `CORRECTION_PATTERN` + recent KG tools | `correction_and_refresh` | web_search |
 | Direct URL query | `URL_PATTERN` | `direct_url_crawl` | web_search |
-| Specialized external analysis (currently quant/backtest-like prompts) | `SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN` | `specialized_external_capability` | Empty |
+| Specialized local workflow (for example spreadsheet work) with matching skill | `SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN` or explicit workflow terms + skill match | `skill_request` | skill_plan |
+| Specialized external analysis without a matching skill but with matching external capability | `SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN` + capability match | `external_capability_request` | external capability |
+| Specialized external analysis without a matching skill/capability | `SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN` | `specialized_external_capability` | Empty |
 | Default factual QA | Fallback | `factual_qa` | kg_hybrid_search |
 
-LLM refinement: When `llm_client` is available and the scenario is not a simple greeting or an explicitly external-specialized request, the rule result is passed to the LLM for secondary adjustment (still constrained by `available_capabilities`; it will not invent nonexistent capabilities).
+Skill-aware routing details:
+
+- `AgentCore` now feeds `RouteJudge` two separate planner surfaces: a capability catalog and an independent local skill catalog
+- The capability catalog summarizes `description`, `tags`, `kind`, `executor`, and top-level argument contract (`arg_names`, `required_args`) so planner-visible external MCP capabilities can be selected without hardcoded per-capability route rules
+- The skill catalog is intentionally lightweight: `name`, `description`, optional `tags`, and local path. It does not require `default_script`, `recommended_script`, or `entrypoint`
+- `RouteJudge` now emits `skill_plan` for local skills instead of auto-composing legacy helper-tool workflows
+- Legacy helper APIs such as `list_skills`, `read_skill_docs`, and `execute_skill_script` may still exist for compatibility, but they are no longer the planner's primary skill surface
+
+LLM refinement: When `llm_client` is available, the rule result is passed to the LLM for secondary adjustment using both the capability catalog and `available_skills`. The LLM remains constrained by those provided planner surfaces; it will not invent nonexistent capabilities or skills.
 
 Route Judge prompt management now supports versioned templates through `agent/prompts.py`:
 
@@ -320,8 +357,8 @@ Route Judge prompt management now supports versioned templates through `agent/pr
 - `list_route_judge_prompt_versions()` exposes the registered versions
 - unknown versions fall back to `v1` with a warning
 - current built-in versions are:
-  - `v1`: original concise route-refinement prompt
-  - `v2`: more conservative refinement prompt that emphasizes minimal edits to the rule-based plan
+  - `v1`: original concise route-refinement prompt, now also exposing capability catalog context
+  - `v2`: more conservative refinement prompt that emphasizes minimal edits to the rule-based plan while explicitly using the capability catalog for planner-visible external skills
 
 `AgentCore` wires Route Judge to a utility-model client first. If `KG_AGENT_UTILITY_MODEL_*` / `UTILITY_LLM_*` is not configured, the module falls back to the main `KG_AGENT_MODEL_*` client and emits a one-time warning.
 
@@ -453,13 +490,23 @@ Runtime execution
 > When MCP capabilities are configured, `GET /agent/tools` also returns `kind="external_mcp"` / `executor="mcp"` entries, including dynamically discovered MCP tools after app startup or the first async agent call.
 > At default startup, 7 tools are available when `user_id` is present (`web_search` is disabled by default; `cross_session_search` is user-scoped).
 
-### 8.4 MCP External Capability Layer
+### 8.4 Skills Layer
+
+- `SkillRegistry` scans `./skills/*/SKILL.md` and exposes a lightweight catalog to the planner
+- `SkillLoader` supports progressive disclosure: load `SKILL.md` first, then read specific files on demand (`references/`, `scripts/`, `assets/`, other markdown)
+- `SkillExecutor` is the only skill execution entry in `AgentCore`; the planner no longer decomposes a skill into helper-tool chains
+- Current default execution boundary is conservative: the executor prepares the local runtime context and can hand off to a runtime client, but it does not require `default_script` / `recommended_script` / `entrypoint` just to discover a skill
+- When `RouteJudge` emits `skill_plan`, `AgentCore` runs it through `SkillExecutor` after any prerequisite tools (for example memory lookup) and before final answer generation
+- Skill execution records are serialized back into the same run result stream / memory metadata surface as tool calls, with `metadata.executor="skill"`
+
+### 8.5 MCP External Capability Layer
 
 - `MCPAdapter` currently supports **stdio** transport only
 - MCP capabilities can be provided in two ways:
   - statically declared through config (`KG_AGENT_MCP_CAPABILITIES_JSON`)
   - optionally discovered from MCP `tools/list` when a server entry sets `discover_tools=true`
 - MCP capabilities can now be invoked explicitly through `AgentCore.invoke_capability(...)` and `POST /agent/capabilities/{capability_name}/invoke`, without constructing a synthetic `ToolCallPlan`
+- When an external capability is `planner_exposed=true`, `AgentCore` now surfaces it to `RouteJudge` not only by name but also via the planner-facing capability catalog
 - Dynamic discovery is additive and compatible with static declarations:
   - static declarations keep custom public names, `planner_exposed`, tags, and remote-name overrides
   - if a discovered remote tool matches a static declaration on the same `(server, remote_name)`, the static declaration wins and no duplicate capability is registered
@@ -470,6 +517,12 @@ Runtime execution
   - optional remote tool name override (`remote_name`)
   - `planner_exposed` flag controlling whether the Route Judge can see it by default
 - External capability execution sanitizes arguments down to JSON-safe values before sending them across MCP, so in-process objects such as `rag`, stores, adapters, and locks are not leaked into the transport payload
+- MCP is no longer the primary abstraction for local skills. A skill runtime service may still use MCP as an internal transport, but planner-visible skill selection comes from `SkillRegistry`, not from `list_skills` / `read_skill_docs` / `execute_skill_script`
+- For generic skill-container workflows, `AgentCore` now supports additional binding transforms over prior tool results:
+  - `selected_skill_name`
+  - `skill_name`
+  - `default_skill_script`
+- These legacy transforms remain only as compatibility hooks for old helper-style flows; they are not part of the new planner-facing skill abstraction
 - The current execution result shape stores:
   - `data.summary`
   - `data.structured_content`
@@ -478,7 +531,7 @@ Runtime execution
   - `metadata.executor="mcp"`
   - `metadata.server=<server_name>`
 
-### 8.5 Crawler Layer Architecture
+### 8.6 Crawler Layer Architecture
 
 The crawler layer (`kg_agent/crawler/`) provides the infrastructure behind `web_search`:
 
@@ -531,7 +584,7 @@ Recurring ingest uses the same crawler stack, but the scheduler layer now distin
 | `GENERIC_PATH_SEGMENTS` | URL path segments indicating listing pages (tag, category, archive, etc.) |
 | `TRACKING_QUERY_KEYS` | URL query parameters stripped during normalization (utm_*, ref, src, etc.) |
 
-### 8.4 Web Search Semantics
+### 8.7 Web Search Semantics
 
 `web_search` supports two execution paths depending on input:
 
@@ -563,7 +616,7 @@ When the active `LightRAG` instance has a configured rerank model (`rerank_model
 | Some pages failed | `partial_success` | `true` |
 | All pages succeeded | `success` | `true` |
 
-### 8.6 Standard Steps for Adding a New Tool
+### 8.8 Standard Steps for Adding a New Tool
 
 1. Create a new file under `tools/`, implementing `async def my_tool(*, rag, query, ..., **_) -> ToolResult`
 2. Add parameter JSON Schema in `tool_schemas.py`
@@ -571,7 +624,7 @@ When the active `LightRAG` instance has a configured rerank model (`rerank_model
 4. If toggle control is needed, add a corresponding field in `ToolConfig` in `config.py`
 5. If routing support is needed, add a corresponding rule pattern in `route_judge.py`
 
-### 8.7 Retrieval Freshness Decay
+### 8.9 Retrieval Freshness Decay
 
 - `kg_hybrid_search` and `kg_naive_search` both accept internal `search_query`
 - When `KG_AGENT_ENABLE_FRESHNESS_DECAY=true`, `retrieval_tools.py` passes freshness parameters into `QueryParam`
@@ -683,6 +736,7 @@ Optional lightweight utility model for internal routing/explanation work:
 |---|---|---|
 | `KG_AGENT_DEFAULT_WORKSPACE` | Falls back to `WORKSPACE` | Default workspace |
 | `KG_AGENT_DEFAULT_DOMAIN_SCHEMA` | `general` | Default domain schema |
+| `KG_AGENT_SKILLS_DIR` | `skills` | Local skill directory scanned by `SkillRegistry` |
 | `KG_AGENT_MAX_ITERATIONS` | `3` | Maximum tool invocation rounds |
 | `KG_AGENT_ROUTE_JUDGE_PROMPT_VERSION` | `v1` | Version key for Route Judge LLM refinement prompt templates |
 | `KG_AGENT_MEMORY_WINDOW_TURNS` | `6` | Maximum number of conversation turns considered for the dynamic attention window |
@@ -1055,6 +1109,10 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 | `RouteJudge` | `agent/route_judge.py` | Route Judge: `.plan()` returns RouteDecision |
 | `RouteDecision` | `agent/route_judge.py` | Structured routing plan |
 | `ToolCallPlan` | `agent/route_judge.py` | Single-step tool invocation plan |
+| `SkillRegistry` | `skills/registry.py` | Scan local `skills/*/SKILL.md` into a lightweight catalog |
+| `SkillLoader` | `skills/loader.py` | Load `SKILL.md` and read skill files on demand |
+| `SkillExecutor` | `skills/executor.py` | Execute `skill_plan` through the local skill-runtime boundary |
+| `SkillPlan` | `skills/models.py` | High-level local skill execution plan |
 | `PathExplainer` | `agent/path_explainer.py` | Path Explainer: `.explain()` returns PathExplanation |
 | `PathExplanation` | `agent/path_explainer.py` | Path explanation result |
 | `ExplainedPath` | `agent/path_explainer.py` | Single explained path |
@@ -1082,7 +1140,9 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 ## 15. Known Limitations and TODOs
 
 - **MCP integration is currently stdio-only**; optional dynamic `tools/list` discovery now exists, but there is still no SSE/HTTP transport or richer MCP server capability negotiation yet
-- **Configured `external_mcp` capabilities are hidden from auto-routing by default**; they execute correctly when explicitly invoked, but the Route Judge does not auto-plan them unless `planner_exposed=true`
+- **Configured `external_mcp` capabilities are hidden from auto-routing by default**; they execute correctly when explicitly invoked, and the Route Judge only sees them when `planner_exposed=true`
+- **Local skill execution is now architecturally separate from MCP, but the default runtime is still conservative**; `SkillExecutor` prepares the local runtime context and supports runtime handoff, but it does not yet implement a free-form shell agent or generalized dependency-install pipeline
+- **Legacy script-level skill helper APIs still exist as a compatibility layer**; `read_skill_docs` / `execute_skill_script` and related binding transforms remain for old flows, but they are no longer the planner's primary skill surface
 - **Scheduler** now supports optional loop leader election plus source-level coordination, but it still does not implement scheduler sharding or a richer distributed control plane
 - **Source persistence** now supports `json` and `sqlite`, but there is still no Redis/Mongo/Postgres-backed scheduler registry/state implementation
 - **RSS / Feed source support** now includes auto-detected feed typing, `adaptive_feed` scheduling, entry filtering, RSS/Atom `published_at` extraction, author/category/domain-aware filtering, canonical URL tracking, content-level dedup, short-term vs long-term crawler lifecycle classification, optional expiry deletion, workspace-global event-cluster candidate recall through `chunks_vdb`, batch article crawling via the shared crawler adapter, and both latest-item and age-based retention, but discovery/management is still URL-centric and does not yet provide richer feed semantics such as source credibility scoring or full feed graph provenance

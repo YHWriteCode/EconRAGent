@@ -573,6 +573,7 @@ class PersistenceConfig:
 class AgentRuntimeConfig:
     default_workspace: str = ""
     default_domain_schema: str = "general"
+    skills_dir: str = "skills"
     max_iterations: int = 3
     route_judge_prompt_version: str = "v1"
     memory_window_turns: int = 6
@@ -589,6 +590,7 @@ class AgentRuntimeConfig:
             default_domain_schema=os.getenv(
                 "KG_AGENT_DEFAULT_DOMAIN_SCHEMA", "general"
             ),
+            skills_dir=os.getenv("KG_AGENT_SKILLS_DIR", "skills").strip() or "skills",
             max_iterations=_env_int("KG_AGENT_MAX_ITERATIONS", 3),
             route_judge_prompt_version=(
                 os.getenv("KG_AGENT_ROUTE_JUDGE_PROMPT_VERSION", "v1").strip() or "v1"

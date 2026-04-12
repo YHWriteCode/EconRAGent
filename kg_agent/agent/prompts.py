@@ -40,7 +40,11 @@ _ROUTE_JUDGE_PROMPT_TEMPLATES: dict[str, RouteJudgePromptTemplate] = {
             "Return strict JSON only."
         ),
         planner_guidance=(
-            "Refine the current rule-based plan when needed, but do not invent capabilities outside available_capabilities."
+            "Refine the current rule-based plan when needed, but do not invent capabilities outside available_capabilities. "
+            "Use the capability catalog to understand each capability's description, tags, executor, and input contract. "
+            "Use available_skills as a separate planning surface for local or VM-hosted skills. "
+            "When a skill is a better fit than tools or external capabilities, emit skill_plan instead of decomposing the skill into helper tools. "
+            "Legacy skill helper tools may exist for compatibility, but they are not the primary planner abstraction."
         ),
     ),
     "v2": RouteJudgePromptTemplate(
@@ -57,7 +61,12 @@ _ROUTE_JUDGE_PROMPT_TEMPLATES: dict[str, RouteJudgePromptTemplate] = {
             "2. Use memory tools only for contextual follow-ups.\n"
             "3. Use web_search for direct URLs, realtime/freshness needs, or correction-driven refresh.\n"
             "4. Preserve tool order unless there is a concrete reason to reorder it.\n"
-            "5. Never invent capabilities outside available_capabilities."
+            "5. Use the capability catalog to evaluate planner-visible external capabilities from their descriptions, tags, executor, and input contract.\n"
+            "6. Use available_skills to evaluate local or VM-hosted skills independently from the capability plane.\n"
+            "7. Prefer skill_plan when a matching skill is a more concrete fit than native KG/web/memory tools.\n"
+            "8. Prefer a matching external capability when it is a more concrete fit than native tools and no better skill match exists.\n"
+            "9. Only provide tool args that fit the selected capability's input contract; omit framework-reserved fields unless the tool contract explicitly needs them.\n"
+            "10. Never invent capabilities or skills outside the provided planner surfaces.\n"
         ),
     ),
 }
@@ -246,15 +255,39 @@ def build_route_judge_prompt(
     query: str,
     session_context: dict[str, Any] | None,
     current_plan: dict[str, Any],
-    available_capabilities: list[str] | None = None,
+    available_capabilities: list[Any] | None = None,
+    available_capability_catalog: list[dict[str, Any]] | None = None,
     available_tools: list[str] | None = None,
+    available_skills: list[dict[str, Any]] | None = None,
     prompt_version: str | None = None,
 ) -> tuple[str, str]:
-    resolved_capabilities = (
-        available_capabilities
-        if available_capabilities is not None
-        else (available_tools or [])
+    resolved_catalog = (
+        available_capability_catalog
+        if available_capability_catalog is not None
+        else (
+            available_capabilities
+            if available_capabilities is not None
+            else (available_tools or [])
+        )
     )
+    resolved_capabilities = [
+        (
+            item.get("name").strip()
+            if isinstance(item, dict)
+            else item.strip()
+        )
+        for item in resolved_catalog
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and item.get("name", "").strip()
+        )
+        or (isinstance(item, str) and item.strip())
+    ]
+    if not resolved_capabilities:
+        resolved_capabilities = [
+            str(item) for item in (available_tools or []) if isinstance(item, str) and item.strip()
+        ]
     resolved_version = resolve_route_judge_prompt_version(prompt_version)
     template = _ROUTE_JUDGE_PROMPT_TEMPLATES[resolved_version]
     system_prompt = template.system_prompt
@@ -267,6 +300,10 @@ def build_route_judge_prompt(
         f"{json.dumps(session_context or {}, ensure_ascii=False, indent=2)}\n\n"
         "Available capabilities:\n"
         f"{json.dumps(resolved_capabilities, ensure_ascii=False)}\n\n"
+        "Capability catalog:\n"
+        f"{json.dumps(resolved_catalog, ensure_ascii=False, indent=2)}\n\n"
+        "Available skills:\n"
+        f"{json.dumps(available_skills or [], ensure_ascii=False, indent=2)}\n\n"
         "Current rule-based plan:\n"
         f"{json.dumps(current_plan, ensure_ascii=False, indent=2)}\n\n"
         f"{template.planner_guidance}\n\n"
@@ -277,7 +314,8 @@ def build_route_judge_prompt(
         '"need_web_search": bool, '
         '"need_path_explanation": bool, '
         '"strategy": str, '
-        '"tool_sequence": [{"tool": str, "args": dict, "optional": bool}], '
+        '"tool_sequence": [{"tool": str, "args": dict, "optional": bool, "input_bindings": dict}], '
+        '"skill_plan": {"skill_name": str, "goal": str, "reason": str, "constraints": dict} | null, '
         '"reason": str, '
         '"max_iterations": int'
         "}\n"
