@@ -25,6 +25,66 @@ _LOW_SIGNAL_PATTERN = re.compile(
 )
 
 
+class _FallbackQdrantDistance:
+    COSINE = "cosine"
+
+
+class _FallbackQdrantVectorParams:
+    def __init__(self, *, size: int, distance: str):
+        self.size = size
+        self.distance = distance
+
+
+class _FallbackQdrantKeywordIndexType:
+    KEYWORD = "keyword"
+
+
+class _FallbackQdrantKeywordIndexParams:
+    def __init__(self, *, type: str):
+        self.type = type
+
+
+class _FallbackQdrantMatchValue:
+    def __init__(self, *, value: Any):
+        self.value = value
+
+
+class _FallbackQdrantFieldCondition:
+    def __init__(self, *, key: str, match: Any):
+        self.key = key
+        self.match = match
+
+
+class _FallbackQdrantFilter:
+    def __init__(self, *, must: list[Any] | None = None, must_not: list[Any] | None = None):
+        self.must = list(must or [])
+        self.must_not = list(must_not or [])
+
+
+class _FallbackQdrantPointStruct:
+    def __init__(self, *, id: str, vector: list[float], payload: dict[str, Any]):
+        self.id = id
+        self.vector = vector
+        self.payload = payload
+
+
+class _FallbackQdrantPointIdsList:
+    def __init__(self, *, points: list[str]):
+        self.points = list(points)
+
+
+class _FallbackQdrantModels:
+    Distance = _FallbackQdrantDistance
+    VectorParams = _FallbackQdrantVectorParams
+    KeywordIndexType = _FallbackQdrantKeywordIndexType
+    KeywordIndexParams = _FallbackQdrantKeywordIndexParams
+    MatchValue = _FallbackQdrantMatchValue
+    FieldCondition = _FallbackQdrantFieldCondition
+    Filter = _FallbackQdrantFilter
+    PointStruct = _FallbackQdrantPointStruct
+    PointIdsList = _FallbackQdrantPointIdsList
+
+
 def _normalize_backend(value: str | None) -> str:
     normalized = (value or "memory").strip().lower()
     if normalized in {"mongo_qdrant", "mongo-qdrant", "mongo+qdrant", "vector"}:
@@ -593,11 +653,11 @@ class CrossSessionStore:
         elif self._qdrant_models is None:
             try:
                 from qdrant_client import models
-            except ImportError as exc:
-                raise RuntimeError(
-                    "qdrant-client is required for cross-session vector storage"
-                ) from exc
-            self._qdrant_models = models
+            except ImportError:
+                # Tests may inject a fake client without the real qdrant SDK installed.
+                self._qdrant_models = _FallbackQdrantModels
+            else:
+                self._qdrant_models = models
 
         models = self._qdrant_models
         collection_exists = await asyncio.to_thread(
