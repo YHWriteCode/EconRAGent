@@ -100,6 +100,12 @@ DEFAULT_RUN_TIMEOUT_S = int(os.environ.get("MCP_RUN_TIMEOUT_S", "300"))
 MAX_REFERENCE_BYTES = int(os.environ.get("MCP_MAX_REFERENCE_BYTES", "200000"))
 MAX_LOG_PREVIEW_BYTES = int(os.environ.get("MCP_MAX_LOG_PREVIEW_BYTES", "12000"))
 MAX_GENERATED_FILE_BYTES = 64000
+MAX_TRANSPORT_GENERATED_FILE_PREVIEW_BYTES = int(
+    os.environ.get("MCP_MAX_TRANSPORT_GENERATED_FILE_PREVIEW_BYTES", "4096")
+)
+MAX_TRANSPORT_GENERATED_FILES_TOTAL_BYTES = int(
+    os.environ.get("MCP_MAX_TRANSPORT_GENERATED_FILES_TOTAL_BYTES", "12288")
+)
 MAX_REPAIR_ATTEMPTS = max(
     1,
     int(os.environ.get("MCP_FREE_SHELL_MAX_REPAIR_ATTEMPTS", "3")),
@@ -192,6 +198,8 @@ CANCEL_WAIT_TIMEOUT_S = float(os.environ.get("MCP_CANCEL_WAIT_TIMEOUT_S", "5.0")
 RUN_STORE_DB_INITIALIZED = False
 QUEUE_WORKER_PROCESSES: dict[int, subprocess.Popen] = {}
 IS_QUEUE_WORKER_PROCESS = os.environ.get("MCP_RUNTIME_ROLE", "").strip() == "queue_worker"
+INTERNAL_RUNTIME_DIRNAME = ".skill_runtime"
+TERMINAL_SNAPSHOT_FILENAME = "terminal_run_record.json"
 
 
 class SkillServerError(RuntimeError):
@@ -615,6 +623,52 @@ def _ensure_queue_worker_processes() -> list[int]:
     return sorted(QUEUE_WORKER_PROCESSES)
 
 
+def _maybe_recover_terminal_snapshot(
+    *,
+    run_id: str,
+    row: sqlite3.Row | None = None,
+    record: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    resolved_row = row or _load_run_row(run_id)
+    if resolved_row is None:
+        return None
+    resolved_record = (
+        dict(record)
+        if isinstance(record, dict)
+        else _inflate_run_record(resolved_row)
+    )
+    workspace = str(resolved_record.get("workspace", "")).strip()
+    if not workspace:
+        return None
+    snapshot_record = _load_terminal_snapshot(
+        workspace_dir=Path(workspace).resolve(),
+        run_id=run_id,
+    )
+    if snapshot_record is None:
+        return None
+    recovered_record = dict(snapshot_record)
+    runtime = dict(recovered_record.get("runtime", {}))
+    runtime["terminal_snapshot_recovered"] = True
+    recovered_record["runtime"] = runtime
+    terminal_queue_state = (
+        str(recovered_record.get("run_status", "")).strip() or "failed"
+    )
+    _upsert_run_row(
+        run_id=run_id,
+        record=recovered_record,
+        queue_state=terminal_queue_state,
+        worker_pid=None,
+        active_process_pid=None,
+        cancel_requested=bool(recovered_record.get("cancel_requested", False)),
+        lease_owner=None,
+        lease_expires_at=None,
+        attempt_count=int(resolved_row["attempt_count"] or 0),
+        max_attempts=int(resolved_row["max_attempts"] or QUEUE_MAX_ATTEMPTS),
+        heartbeat=True,
+    )
+    return _load_run_record(run_id)
+
+
 def _recover_stale_queued_runs() -> None:
     _ensure_run_store_initialized()
     now = datetime.now(timezone.utc)
@@ -629,6 +683,14 @@ def _recover_stale_queued_runs() -> None:
             """
         ).fetchall()
     for row in rows:
+        record = json.loads(str(row["record_json"]))
+        recovered_record = _maybe_recover_terminal_snapshot(
+            run_id=str(row["run_id"]),
+            row=row,
+            record=record,
+        )
+        if recovered_record is not None:
+            continue
         queue_state = str(row["queue_state"] or "").strip()
         heartbeat_at = str(row["heartbeat_at"] or "").strip()
         age_s: float | None = None
@@ -651,7 +713,6 @@ def _recover_stale_queued_runs() -> None:
         active_alive = _is_process_alive(active_process_pid)
         attempt_count = int(row["attempt_count"] or 0)
         max_attempts = int(row["max_attempts"] or QUEUE_MAX_ATTEMPTS)
-        record = json.loads(str(row["record_json"]))
         runtime = dict(record.get("runtime", {}))
         runtime["delivery"] = "durable_worker"
         runtime["store_backend"] = "sqlite"
@@ -785,6 +846,14 @@ def _recover_stale_running_record(run_id: str) -> dict[str, Any] | None:
     record = _inflate_run_record(row)
     if str(record.get("run_status", "")).strip() != "running":
         return record
+
+    recovered_record = _maybe_recover_terminal_snapshot(
+        run_id=run_id,
+        row=row,
+        record=record,
+    )
+    if recovered_record is not None:
+        return recovered_record
 
     queue_state = str(row["queue_state"] or "").strip()
     if queue_state in {"queued", "claimed", "worker_starting"}:
@@ -1149,14 +1218,80 @@ def _write_skill_request(
     return request_path
 
 
+def _internal_runtime_dir(workspace_dir: Path) -> Path:
+    return (workspace_dir / INTERNAL_RUNTIME_DIRNAME).resolve()
+
+
+def _terminal_snapshot_path(workspace_dir: Path) -> Path:
+    return (_internal_runtime_dir(workspace_dir) / TERMINAL_SNAPSHOT_FILENAME).resolve()
+
+
+def _is_internal_workspace_artifact(relative_path: str) -> bool:
+    normalized = relative_path.replace("\\", "/").strip()
+    return normalized.startswith(f"{INTERNAL_RUNTIME_DIRNAME}/")
+
+
+def _is_hidden_bootstrap_artifact(relative_path: str) -> bool:
+    normalized = relative_path.replace("\\", "/").strip()
+    return normalized.startswith(".skill_bootstrap/")
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def _write_terminal_snapshot(*, workspace_dir: Path, record: dict[str, Any]) -> None:
+    _write_json_atomic(
+        _terminal_snapshot_path(workspace_dir),
+        {
+            "version": 1,
+            "run_id": str(record.get("run_id", "")).strip(),
+            "record": dict(record),
+        },
+    )
+
+
+def _load_terminal_snapshot(
+    *,
+    workspace_dir: Path,
+    run_id: str,
+) -> dict[str, Any] | None:
+    snapshot_path = _terminal_snapshot_path(workspace_dir)
+    if not snapshot_path.is_file():
+        return None
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    record = payload.get("record")
+    if not isinstance(record, dict):
+        return None
+    if str(record.get("run_id", "")).strip() != run_id:
+        return None
+    run_status = str(record.get("run_status", "")).strip()
+    if run_status not in {"planned", "completed", "failed", "manual_required"}:
+        return None
+    return dict(record)
+
+
 def _collect_workspace_artifacts(workspace_dir: Path) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for path in sorted(workspace_dir.rglob("*")):
         if not path.is_file():
             continue
+        relative_path = str(path.relative_to(workspace_dir)).replace("\\", "/")
+        if _is_internal_workspace_artifact(relative_path):
+            continue
+        if _is_hidden_bootstrap_artifact(relative_path):
+            continue
         artifacts.append(
             {
-                "path": str(path.relative_to(workspace_dir)).replace("\\", "/"),
+                "path": relative_path,
                 "size_bytes": path.stat().st_size,
             }
         )
@@ -1168,6 +1303,82 @@ def _truncate_log(text: str) -> tuple[str, bool]:
     if len(encoded) <= MAX_LOG_PREVIEW_BYTES:
         return text, False
     return encoded[:MAX_LOG_PREVIEW_BYTES].decode("utf-8", errors="ignore"), True
+
+
+def _truncate_utf8_text(text: str, max_bytes: int) -> tuple[str, bool]:
+    if max_bytes <= 0:
+        return "", bool(text)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
+def _utc_duration_seconds(started_at: str | None, finished_at: str | None) -> float | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        started_dt = datetime.fromisoformat(str(started_at))
+        finished_dt = datetime.fromisoformat(str(finished_at))
+    except ValueError:
+        return None
+    return max(0.0, (finished_dt - started_dt).total_seconds())
+
+
+def _compact_generated_files_for_transport(
+    generated_files: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    remaining_budget = max(0, MAX_TRANSPORT_GENERATED_FILES_TOTAL_BYTES)
+    compacted: list[dict[str, Any]] = []
+    any_truncated = False
+    for raw_entry in generated_files:
+        entry = dict(raw_entry)
+        content = (
+            str(entry.get("content"))
+            if entry.get("content") is not None
+            else ""
+        )
+        content_bytes = len(content.encode("utf-8"))
+        preview_budget = min(
+            max(0, MAX_TRANSPORT_GENERATED_FILE_PREVIEW_BYTES),
+            remaining_budget,
+        )
+        preview, truncated = _truncate_utf8_text(content, preview_budget)
+        preview_bytes = len(preview.encode("utf-8"))
+        remaining_budget = max(0, remaining_budget - preview_bytes)
+        entry["content"] = preview
+        entry["content_bytes"] = content_bytes
+        entry["content_truncated"] = truncated
+        compacted.append(entry)
+        any_truncated = any_truncated or truncated
+    return compacted, any_truncated
+
+
+def _compact_command_plan_for_transport(command_plan: dict[str, Any]) -> dict[str, Any]:
+    compacted = dict(command_plan)
+    generated_files = compacted.get("generated_files")
+    if isinstance(generated_files, list):
+        compacted_generated_files, any_truncated = _compact_generated_files_for_transport(
+            [dict(item) for item in generated_files if isinstance(item, dict)]
+        )
+        compacted["generated_files"] = compacted_generated_files
+        if any_truncated:
+            hints = dict(compacted.get("hints", {})) if isinstance(
+                compacted.get("hints"), dict
+            ) else {}
+            hints["generated_files_transport_compacted"] = True
+            compacted["hints"] = hints
+    return compacted
+
+
+def _prepare_transport_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    transport_payload = dict(payload)
+    command_plan = transport_payload.get("command_plan")
+    if isinstance(command_plan, dict):
+        transport_payload["command_plan"] = _compact_command_plan_for_transport(
+            command_plan
+        )
+    return transport_payload
 
 
 def _build_skill_catalog_entry(skill_dir: Path) -> dict[str, Any]:
@@ -1326,6 +1537,21 @@ def _build_skill_runtime_context(
         constraints=constraints,
     )
     return payload, loaded_skill, request
+
+
+def _request_with_runtime_target(
+    request: SkillExecutionRequest,
+    runtime_target: SkillRuntimeTarget,
+) -> SkillExecutionRequest:
+    return SkillExecutionRequest(
+        skill_name=request.skill_name,
+        goal=request.goal,
+        user_query=request.user_query,
+        workspace=request.workspace,
+        shell_mode=request.shell_mode,
+        runtime_target=runtime_target,
+        constraints=dict(request.constraints),
+    )
 
 
 async def _resolve_command_plan(
@@ -2039,6 +2265,9 @@ def _build_repair_history_entry(
             else _failure_reason_from_execution(execution)
         ),
         "exit_code": execution.get("exit_code"),
+        "started_at": execution.get("started_at"),
+        "finished_at": execution.get("finished_at"),
+        "duration_s": execution.get("duration_s"),
         "stdout_tail": str(execution.get("stdout", ""))[-2000:],
         "stderr_tail": str(execution.get("stderr", ""))[-2000:],
     }
@@ -2056,6 +2285,9 @@ def _build_bootstrap_history_entry(
         "success": bool(result.get("success")),
         "failure_reason": result.get("failure_reason"),
         "exit_code": result.get("exit_code"),
+        "started_at": result.get("started_at"),
+        "finished_at": result.get("finished_at"),
+        "duration_s": result.get("duration_s"),
         "stdout_tail": str(result.get("stdout", ""))[-2000:],
         "stderr_tail": str(result.get("stderr", ""))[-2000:],
     }
@@ -2075,6 +2307,8 @@ def _bootstrap_failure_payload(
     stderr: str = "",
     exit_code: int | None = None,
     failure_reason: str = "bootstrap_failed",
+    started_at: str | None = None,
+    finished_at: str | None = None,
 ) -> dict[str, Any]:
     stdout_preview, stdout_truncated = _truncate_log(stdout)
     stderr_preview, stderr_truncated = _truncate_log(stderr)
@@ -2085,6 +2319,9 @@ def _bootstrap_failure_payload(
         "exit_code": exit_code,
         "success": False,
         "failure_reason": failure_reason,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_s": _utc_duration_seconds(started_at, finished_at),
         "logs_preview": {
             "stdout": stdout_preview,
             "stderr": stderr_preview,
@@ -2101,7 +2338,9 @@ async def _execute_bootstrap_commands(
     env: dict[str, str],
     timeout_s: int,
 ) -> dict[str, Any]:
+    run_started_at = _utc_now()
     if not commands:
+        run_finished_at = _utc_now()
         return {
             "commands": [],
             "stdout": "",
@@ -2109,6 +2348,9 @@ async def _execute_bootstrap_commands(
             "exit_code": 0,
             "success": True,
             "failure_reason": None,
+            "started_at": run_started_at,
+            "finished_at": run_finished_at,
+            "duration_s": _utc_duration_seconds(run_started_at, run_finished_at),
             "logs_preview": {
                 "stdout": "",
                 "stderr": "",
@@ -2124,6 +2366,8 @@ async def _execute_bootstrap_commands(
         return _bootstrap_failure_payload(
             commands=commands,
             failure_reason="bootstrap_network_not_allowed",
+            started_at=run_started_at,
+            finished_at=_utc_now(),
         )
 
     stdout_chunks: list[str] = []
@@ -2157,6 +2401,8 @@ async def _execute_bootstrap_commands(
                 stderr="".join(stderr_chunks) + f"Bootstrap command timed out: {command}\n",
                 exit_code=124,
                 failure_reason="bootstrap_timed_out",
+                started_at=run_started_at,
+                finished_at=_utc_now(),
             )
         stdout_chunks.append(stdout_bytes.decode("utf-8", errors="replace"))
         stderr_chunks.append(stderr_bytes.decode("utf-8", errors="replace"))
@@ -2168,12 +2414,15 @@ async def _execute_bootstrap_commands(
                 stderr="".join(stderr_chunks),
                 exit_code=last_exit_code,
                 failure_reason="bootstrap_failed",
+                started_at=run_started_at,
+                finished_at=_utc_now(),
             )
 
     stdout_text = "".join(stdout_chunks)
     stderr_text = "".join(stderr_chunks)
     stdout_preview, stdout_truncated = _truncate_log(stdout_text)
     stderr_preview, stderr_truncated = _truncate_log(stderr_text)
+    run_finished_at = _utc_now()
     return {
         "commands": list(commands),
         "stdout": stdout_text,
@@ -2181,6 +2430,9 @@ async def _execute_bootstrap_commands(
         "exit_code": last_exit_code,
         "success": True,
         "failure_reason": None,
+        "started_at": run_started_at,
+        "finished_at": run_finished_at,
+        "duration_s": _utc_duration_seconds(run_started_at, run_finished_at),
         "logs_preview": {
             "stdout": stdout_preview,
             "stderr": stderr_preview,
@@ -2198,6 +2450,7 @@ async def _execute_shell_command(
     env: dict[str, str],
     timeout_s: int,
 ) -> dict[str, Any]:
+    execution_started_at = _utc_now()
     process = await asyncio.create_subprocess_exec(
         *_build_shell_exec_argv(shell_command),
         cwd=str(workspace_dir),
@@ -2326,12 +2579,16 @@ async def _execute_shell_command(
         cancel_requested=cancel_requested,
         heartbeat=True,
     )
+    execution_finished_at = _utc_now()
     return {
         "exit_code": exit_code,
         "timed_out": timed_out,
         "cancel_requested": cancel_requested,
         "cancelled": cancel_requested and not timed_out,
         "success": (exit_code == 0) and not timed_out and not cancel_requested,
+        "started_at": execution_started_at,
+        "finished_at": execution_finished_at,
+        "duration_s": _utc_duration_seconds(execution_started_at, execution_finished_at),
         "stdout": stdout_text,
         "stderr": stderr_text,
         "logs_preview": {
@@ -2360,6 +2617,7 @@ async def _complete_shell_run(
     env: dict[str, str],
     timeout_s: int,
     cleanup_workspace: bool,
+    worker_started_at: str | None = None,
 ) -> dict[str, Any]:
     try:
         final_plan = command_plan
@@ -2763,6 +3021,7 @@ async def _complete_shell_run(
         )
         final_success = bool(final_execution["success"])
         final_run_status = "completed" if final_success else "failed"
+        finished_at = _utc_now()
         final_failure_reason = None
         if not final_success:
             if final_preflight.get("failure_reason"):
@@ -2797,7 +3056,7 @@ async def _complete_shell_run(
             command=final_command,
             workspace=str(workspace_dir),
             started_at=started_at,
-            finished_at=_utc_now(),
+            finished_at=finished_at,
             exit_code=final_execution["exit_code"],
             failure_reason=final_failure_reason,
             artifacts=final_execution["artifacts"],
@@ -2807,6 +3066,16 @@ async def _complete_shell_run(
                 free_shell_repair_attempts=repair_attempt_count,
                 free_shell_bootstrap_limit=MAX_BOOTSTRAP_ATTEMPTS,
                 free_shell_bootstrap_attempts=bootstrap_attempt_count,
+                enqueued_at=started_at,
+                worker_started_at=worker_started_at,
+                queue_latency_s=_utc_duration_seconds(started_at, worker_started_at),
+                bootstrap_duration_s=sum(
+                    float(item.get("duration_s", 0.0) or 0.0)
+                    for item in bootstrap_history
+                    if isinstance(item, dict)
+                ),
+                execution_duration_s=final_execution.get("duration_s"),
+                total_duration_s=_utc_duration_seconds(started_at, finished_at),
             ),
             preflight=final_preflight,
             repair_attempted=repair_attempted,
@@ -2837,6 +3106,13 @@ async def _complete_shell_run(
             "stdout": final_execution["stdout"],
             "stderr": final_execution["stderr"],
         }
+        try:
+            _write_terminal_snapshot(
+                workspace_dir=workspace_dir,
+                record=response,
+            )
+        except Exception:
+            pass
         _store_run_record(response)
         _update_run_metadata(
             run_id=run_id,
@@ -2846,7 +3122,7 @@ async def _complete_shell_run(
             cancel_requested=bool(final_execution.get("cancel_requested", False)),
             heartbeat=True,
         )
-        return response
+        return _prepare_transport_payload(response)
     except Exception as exc:
         failed_record = SkillRunRecord(
             skill_name=request.skill_name,
@@ -2876,6 +3152,13 @@ async def _complete_shell_run(
         response["request_file"] = str(request_file)
         response["generated_files"] = generated_files
         response["logs"] = {"stdout": "", "stderr": str(exc)}
+        try:
+            _write_terminal_snapshot(
+                workspace_dir=workspace_dir,
+                record=response,
+            )
+        except Exception:
+            pass
         _store_run_record(response)
         _update_run_metadata(
             run_id=run_id,
@@ -2885,7 +3168,7 @@ async def _complete_shell_run(
             cancel_requested=_is_cancel_requested(run_id),
             heartbeat=True,
         )
-        return response
+        return _prepare_transport_payload(response)
     finally:
         if cleanup_workspace:
             shutil.rmtree(workspace_dir, ignore_errors=True)
@@ -2965,6 +3248,7 @@ async def _run_shell_task(
     run_id = f"skill-run-{uuid.uuid4().hex}"
     started_at = _utc_now()
     request_file: Path | None = None
+    effective_runtime_target = command_plan.runtime_target
 
     cleanup_workspace_here = cleanup_workspace
     try:
@@ -2981,7 +3265,7 @@ async def _run_shell_task(
             goal=request.goal,
             user_query=request.user_query,
             constraints=request.constraints,
-            runtime_target=request.runtime_target,
+            runtime_target=effective_runtime_target,
             request_file=request_file,
         )
         preflight, generated_files = _run_preflight(
@@ -3044,7 +3328,7 @@ async def _run_shell_task(
             response["generated_files"] = generated_files
             response["logs"] = {"stdout": "", "stderr": ""}
             _store_run_record(response)
-            return response
+            return _prepare_transport_payload(response)
 
         running_record = SkillRunRecord(
             skill_name=request.skill_name,
@@ -3068,6 +3352,7 @@ async def _run_shell_task(
                 free_shell_repair_attempts=0,
                 free_shell_bootstrap_limit=MAX_BOOTSTRAP_ATTEMPTS,
                 free_shell_bootstrap_attempts=0,
+                enqueued_at=started_at,
             ),
             preflight=preflight,
             repair_attempt_count=0,
@@ -3151,12 +3436,13 @@ async def _run_shell_task(
                 cancel_requested=False,
                 heartbeat=True,
             )
-            return failed_payload
+            return _prepare_transport_payload(failed_payload)
         if wait_for_completion:
-            return await _wait_for_terminal_run_record(
+            terminal_record = await _wait_for_terminal_run_record(
                 run_id=run_id,
                 timeout_s=float(timeout_s) + WAIT_FOR_TERMINAL_GRACE_S,
             )
+            return _prepare_transport_payload(terminal_record)
         running_payload["notes"] = (
             "Shell task was enqueued for a durable worker. Poll get_run_status/get_run_logs/"
             "get_run_artifacts with run_id for live progress or terminal results. "
@@ -3166,7 +3452,7 @@ async def _run_shell_task(
         running_payload["runtime"]["queue_state"] = "queued"
         if worker_pids:
             running_payload["runtime"]["queue_worker_pids"] = worker_pids
-        return running_payload
+        return _prepare_transport_payload(running_payload)
     finally:
         if cleanup_workspace_here:
             shutil.rmtree(workspace_dir, ignore_errors=True)
@@ -3174,6 +3460,7 @@ async def _run_shell_task(
 
 async def _run_durable_worker(run_id: str) -> int:
     global UTILITY_LLM_CLIENT
+    worker_started_at = _utc_now()
     job_context = _load_run_job_context(run_id)
     if not isinstance(job_context, dict):
         raise SkillServerError(f"Missing worker job context for run_id: {run_id}")
@@ -3263,10 +3550,10 @@ async def _run_durable_worker(run_id: str) -> int:
             exit_code=130,
             failure_reason="cancelled",
             artifacts=_collect_workspace_artifacts(workspace_dir),
-            runtime=_durable_runtime_metadata(queue_state="failed"),
-            preflight=preflight,
-            cancel_requested=True,
-        )
+        runtime=_durable_runtime_metadata(queue_state="failed"),
+        preflight=preflight,
+        cancel_requested=True,
+    )
         cancelled_payload = _build_run_record_payload(
             record=cancelled_record,
             goal=request.goal,
@@ -3278,6 +3565,13 @@ async def _run_durable_worker(run_id: str) -> int:
         cancelled_payload["request_file"] = str(request_file)
         cancelled_payload["generated_files"] = generated_files
         cancelled_payload["logs"] = {"stdout": "", "stderr": ""}
+        try:
+            _write_terminal_snapshot(
+                workspace_dir=workspace_dir,
+                record=cancelled_payload,
+            )
+        except Exception:
+            pass
         _store_run_record(cancelled_payload)
         _update_run_metadata(
             run_id=run_id,
@@ -3315,6 +3609,7 @@ async def _run_durable_worker(run_id: str) -> int:
         env=env,
         timeout_s=timeout_s,
         cleanup_workspace=cleanup_workspace,
+        worker_started_at=worker_started_at,
     )
     return 0
 
@@ -3349,6 +3644,15 @@ async def _run_queue_worker_loop() -> int:
                 runtime["queue_state"] = "failed"
                 runtime["error"] = str(exc)
                 record["runtime"] = runtime
+                workspace = str(record.get("workspace", "")).strip()
+                if workspace:
+                    try:
+                        _write_terminal_snapshot(
+                            workspace_dir=Path(workspace).resolve(),
+                            record=record,
+                        )
+                    except Exception:
+                        pass
                 _upsert_run_row(
                     run_id=claimed_run_id,
                     record=record,
@@ -3477,6 +3781,10 @@ async def run_skill_task(
         request=request,
         command_plan_payload=command_plan,
     )
+    request = _request_with_runtime_target(
+        request,
+        resolved_command_plan.runtime_target,
+    )
     resolved_wait_for_completion = _resolve_wait_for_completion(
         constraints=normalized_constraints,
         wait_for_completion=wait_for_completion,
@@ -3513,7 +3821,7 @@ async def run_skill_task(
         )
         response["logs"] = {"stdout": "", "stderr": ""}
         _store_run_record(response)
-        return response
+        return _prepare_transport_payload(response)
 
     materialized_command = _materialize_shell_command(
         loaded_skill=loaded_skill,
@@ -3545,7 +3853,7 @@ async def run_skill_task(
         response["notes"] = "Dry run only; the shell command was planned but not executed."
         response["logs"] = {"stdout": "", "stderr": ""}
         _store_run_record(response)
-        return response
+        return _prepare_transport_payload(response)
 
     return await _run_shell_task(
         skill_payload=payload,
@@ -3564,7 +3872,8 @@ def get_run_status(run_id: str) -> dict[str, Any]:
     record = _recover_stale_running_record(run_id)
     if record is None:
         raise SkillServerError(f"Unknown run_id: {run_id}")
-    return {
+    return _prepare_transport_payload(
+        {
         "summary": record.get("summary"),
         "run_id": run_id,
         "skill_name": record.get("skill_name"),
@@ -3595,7 +3904,8 @@ def get_run_status(run_id: str) -> dict[str, Any]:
         "bootstrap_attempt_limit": int(record.get("bootstrap_attempt_limit", 0) or 0),
         "bootstrap_history": record.get("bootstrap_history", []),
         "cancel_requested": bool(record.get("cancel_requested", False)),
-    }
+        }
+    )
 
 
 @mcp.tool()
@@ -3631,7 +3941,8 @@ def get_run_logs(run_id: str) -> dict[str, Any]:
     if record is None:
         raise SkillServerError(f"Unknown run_id: {run_id}")
     logs = record.get("logs", {})
-    return {
+    return _prepare_transport_payload(
+        {
         "summary": f"Loaded logs for run '{run_id}'",
         "run_id": run_id,
         "skill_name": record.get("skill_name"),
@@ -3660,7 +3971,8 @@ def get_run_logs(run_id: str) -> dict[str, Any]:
         "cancel_requested": bool(record.get("cancel_requested", False)),
         "stdout": logs.get("stdout", ""),
         "stderr": logs.get("stderr", ""),
-    }
+        }
+    )
 
 
 @mcp.tool()
@@ -3669,7 +3981,8 @@ def get_run_artifacts(run_id: str) -> dict[str, Any]:
     record = _recover_stale_running_record(run_id)
     if record is None:
         raise SkillServerError(f"Unknown run_id: {run_id}")
-    return {
+    return _prepare_transport_payload(
+        {
         "summary": f"Loaded artifacts for run '{run_id}'",
         "run_id": run_id,
         "skill_name": record.get("skill_name"),
@@ -3697,7 +4010,8 @@ def get_run_artifacts(run_id: str) -> dict[str, Any]:
         "bootstrap_history": record.get("bootstrap_history", []),
         "cancel_requested": bool(record.get("cancel_requested", False)),
         "artifacts": record.get("artifacts", []),
-    }
+        }
+    )
 
 
 @mcp.tool()

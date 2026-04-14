@@ -2,6 +2,7 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
     MCP_SKILLS_DIR=/app/skills \
     MCP_WORKSPACE_DIR=/workspace
 
@@ -20,6 +21,7 @@ RUN groupadd --gid 10001 appuser \
     && chown -R appuser:appuser /app /workspace
 
 COPY mcp-server/server.py /app/server.py
+COPY kg_agent /app/kg_agent
 COPY skills /app/skills
 
 RUN chmod -R a-w /app/skills \

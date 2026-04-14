@@ -112,6 +112,8 @@ async def test_runtime_service_can_infer_and_execute_single_script_skill(
     assert result["execution_mode"] == "shell"
     assert result["shell_mode"] == "conservative"
     assert result["runtime_target"]["platform"] == "linux"
+    assert result["runtime"]["total_duration_s"] is not None
+    assert result["runtime"]["execution_duration_s"] is not None
     assert "run_report.py" in result["command"]
     assert result["command_plan"]["mode"] == "inferred"
     assert result["command_plan"]["entrypoint"] == "scripts/run_report.py"
@@ -358,6 +360,63 @@ async def test_runtime_service_can_execute_multi_file_generated_bundle_via_entry
 
 
 @pytest.mark.asyncio
+async def test_runtime_service_compacts_large_generated_script_payload_for_transport(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    large_content = "print('transport-safe preview')\n" + ("# filler\n" * 7000)
+
+    result = await module.run_skill_task(
+        skill_name="pdf",
+        goal="Return a large generated script plan without overflowing transport",
+        user_query="free shell mode",
+        constraints={"shell_mode": "free_shell", "dry_run": True},
+        command_plan={
+            "skill_name": "pdf",
+            "goal": "Return a large generated script plan without overflowing transport",
+            "user_query": "free shell mode",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {"shell_mode": "free_shell"},
+            "command": "python ./.skill_generated/large.py",
+            "mode": "generated_script",
+            "shell_mode": "free_shell",
+            "rationale": "Exercise transport compaction for large generated files.",
+            "generated_files": [
+                {
+                    "path": ".skill_generated/large.py",
+                    "content": large_content,
+                    "description": "Large helper script payload",
+                }
+            ],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "free_shell", "required_tools": ["python"]},
+        },
+    )
+
+    generated_entry = result["command_plan"]["generated_files"][0]
+    assert result["run_status"] == "planned"
+    assert generated_entry["path"] == ".skill_generated/large.py"
+    assert generated_entry["content_truncated"] is True
+    assert generated_entry["content_bytes"] > len(generated_entry["content"].encode("utf-8"))
+    assert generated_entry["content"].startswith("print('transport-safe preview')")
+    assert result["command_plan"]["hints"]["generated_files_transport_compacted"] is True
+
+    status = module.get_run_status(result["run_id"])
+    status_generated_entry = status["command_plan"]["generated_files"][0]
+    assert status_generated_entry["content_truncated"] is True
+    assert status_generated_entry["content_bytes"] == generated_entry["content_bytes"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_service_starts_background_run_and_reports_running_status(
     tmp_path: Path,
     monkeypatch,
@@ -597,6 +656,64 @@ def test_runtime_service_marks_worker_lost_after_max_attempts(
     assert status["runtime"]["queue_state"] == "failed"
     assert status["runtime"]["attempt_count"] == 2
     assert status["runtime"]["max_attempts"] == 2
+
+
+def test_runtime_service_recovers_terminal_snapshot_before_requeue(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module, "_ensure_queue_worker_processes", lambda: [])
+    run_id = f"skill-run-{uuid.uuid4().hex}"
+    _insert_stale_runtime_row(
+        module,
+        run_id=run_id,
+        queue_state="claimed",
+        attempt_count=1,
+        max_attempts=2,
+    )
+
+    row = module._load_run_row(run_id)
+    assert row is not None
+    record = module._inflate_run_record(row)
+    workspace_dir = Path(record["workspace"]).resolve()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    (workspace_dir / "recovered.txt").write_text("ok", encoding="utf-8")
+    terminal_record = dict(record)
+    terminal_record.update(
+        {
+            "run_status": "completed",
+            "status": "completed",
+            "success": True,
+            "summary": "Recovered terminal state from workspace snapshot.",
+            "finished_at": "2026-01-01T00:01:00+00:00",
+            "exit_code": 0,
+            "failure_reason": None,
+            "artifacts": [{"path": "recovered.txt", "size_bytes": 2}],
+            "logs": {"stdout": "done\n", "stderr": ""},
+            "logs_preview": {
+                "stdout": "done\n",
+                "stderr": "",
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+            },
+            "runtime": {
+                **dict(record.get("runtime", {})),
+                "queue_state": "completed",
+            },
+        }
+    )
+    module._write_terminal_snapshot(workspace_dir=workspace_dir, record=terminal_record)
+
+    status = module.get_run_status(run_id)
+    artifacts = module.get_run_artifacts(run_id)
+
+    assert status["run_status"] == "completed"
+    assert status["success"] is True
+    assert status["runtime"]["queue_state"] == "completed"
+    assert status["runtime"]["terminal_snapshot_recovered"] is True
+    assert artifacts["run_status"] == "completed"
+    assert any(item["path"] == "recovered.txt" for item in artifacts["artifacts"])
 
 
 @pytest.mark.asyncio
@@ -857,6 +974,9 @@ async def test_runtime_service_bootstraps_missing_tool_before_execution(
     assert result["bootstrap_attempt_limit"] >= 1
     assert len(result["bootstrap_history"]) == 1
     assert result["bootstrap_history"][0]["success"] is True
+    assert result["bootstrap_history"][0]["duration_s"] is not None
+    assert result["runtime"]["bootstrap_duration_s"] is not None
+    assert result["runtime"]["execution_duration_s"] is not None
     assert (Path(result["workspace"]) / "bootstrap.txt").read_text(encoding="utf-8").strip() == (
         "bootstrapped tool"
     )
@@ -868,6 +988,67 @@ async def test_runtime_service_bootstraps_missing_tool_before_execution(
     assert logs["bootstrap_attempt_count"] == 1
     assert artifacts["bootstrap_attempt_count"] == 1
     assert any(item.get("path") == "bootstrap.txt" for item in artifacts["artifacts"])
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_uses_command_plan_runtime_target_for_bootstrap_network_policy(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    result = await module.run_skill_task(
+        skill_name="pdf",
+        goal="Allow bootstrap when the resolved command plan runtime target enables network",
+        user_query="free shell mode",
+        constraints={"shell_mode": "free_shell"},
+        wait_for_completion=True,
+        command_plan={
+            "skill_name": "pdf",
+            "goal": "Allow bootstrap when the resolved command plan runtime target enables network",
+            "user_query": "free shell mode",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": True,
+                "supports_python": True,
+            },
+            "constraints": {"shell_mode": "free_shell"},
+            "command": (
+                "python -c \"from pathlib import Path; "
+                "Path('network-bootstrap-ok.txt').write_text('ok', encoding='utf-8')\""
+            ),
+            "mode": "free_shell",
+            "shell_mode": "free_shell",
+            "rationale": "Bootstrap command should honor the plan runtime target.",
+            "generated_files": [],
+            "bootstrap_commands": [
+                "python -m pip install --help > pip-install-help.txt"
+            ],
+            "bootstrap_reason": "Exercise the network-policy gate with an install-shaped command.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "free_shell", "required_tools": ["python"]},
+        },
+    )
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    assert result["bootstrap_attempted"] is True
+    assert result["bootstrap_succeeded"] is True
+    assert result["bootstrap_attempt_count"] == 1
+    assert result["runtime_target"]["network_allowed"] is True
+    assert (Path(result["workspace"]) / "network-bootstrap-ok.txt").read_text(
+        encoding="utf-8"
+    ) == "ok"
+    assert (Path(result["workspace"]) / "pip-install-help.txt").is_file()
+
+    status = module.get_run_status(result["run_id"])
+    assert status["run_status"] == "completed"
+    assert status["runtime_target"]["network_allowed"] is True
+    assert status["bootstrap_history"][0]["success"] is True
 
 
 @pytest.mark.asyncio

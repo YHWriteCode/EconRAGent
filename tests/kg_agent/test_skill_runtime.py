@@ -17,6 +17,8 @@ from kg_agent.config import (
 )
 from kg_agent.mcp.adapter import MCPAdapter
 from kg_agent.skills import SkillPlan
+from kg_agent.skills.runtime_client import MCPBasedSkillRuntimeClient
+from kg_agent.tools.base import ToolResult
 
 
 class _FakeRAG:
@@ -29,6 +31,79 @@ class _StubRouteJudge:
 
     async def plan(self, **kwargs):
         return self.route
+
+
+class _FallbackArtifactsAdapter:
+    def __init__(self, workspace_root: Path):
+        self.workspace_root = workspace_root.resolve()
+        self.server_config = MCPServerConfig(
+            name="skill-runtime",
+            command="docker",
+            args=[
+                "run",
+                "--rm",
+                "-i",
+                "-v",
+                f"{self.workspace_root.as_posix()}:/workspace",
+                "fake-image",
+                "python",
+                "/app/server.py",
+            ],
+        )
+
+    async def invoke_remote_tool(self, *, server_name: str, remote_name: str, arguments: dict):
+        if remote_name == "get_run_status":
+            return ToolResult(
+                tool_name=remote_name,
+                success=True,
+                data={
+                    "structured_content": {
+                        "summary": "loaded run status",
+                        "run_id": arguments["run_id"],
+                        "skill_name": "financial-researching",
+                        "run_status": "completed",
+                        "status": "completed",
+                        "success": True,
+                        "shell_mode": "free_shell",
+                        "runtime_target": {
+                            "platform": "linux",
+                            "shell": "/bin/sh",
+                            "workspace_root": "/workspace",
+                            "workdir": "/workspace",
+                            "network_allowed": True,
+                            "supports_python": True,
+                        },
+                        "workspace": "/workspace/run-42",
+                        "started_at": "2026-01-01T00:00:00+00:00",
+                        "finished_at": "2026-01-01T00:05:00+00:00",
+                        "failure_reason": None,
+                        "runtime": {"delivery": "durable_worker", "queue_state": "completed"},
+                        "preflight": {"ok": True, "status": "ok", "failure_reason": None},
+                        "repair_attempted": False,
+                        "repair_succeeded": False,
+                        "repaired_from_run_id": None,
+                        "repair_attempt_count": 0,
+                        "repair_attempt_limit": 3,
+                        "repair_history": [],
+                        "bootstrap_attempted": True,
+                        "bootstrap_succeeded": True,
+                        "bootstrap_attempt_count": 1,
+                        "bootstrap_attempt_limit": 2,
+                        "bootstrap_history": [],
+                        "cancel_requested": False,
+                    }
+                },
+            )
+        if remote_name == "get_run_artifacts":
+            return ToolResult(
+                tool_name=remote_name,
+                success=False,
+                error="Separator is not found, and chunk exceed the limit",
+            )
+        raise AssertionError(f"Unexpected remote tool: {remote_name}")
+
+    def get_server_config(self, server_name: str):
+        return self.server_config
 
 
 @pytest.mark.asyncio
@@ -215,3 +290,32 @@ async def test_agent_core_can_cancel_skill_run_via_mcp_runtime_transport():
     assert status["cancel_requested"] is True
     assert status["runtime"]["delivery"] == "durable_worker"
     assert status["runtime"]["log_transport"] == "poll"
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_falls_back_to_host_workspace_for_artifacts_on_transport_overflow(
+    tmp_path: Path,
+):
+    workspace_root = (tmp_path / "mounted-workspace").resolve()
+    run_workspace = workspace_root / "run-42"
+    output_dir = run_workspace / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "report.json").write_text('{"ok":true}', encoding="utf-8")
+    (run_workspace / ".skill_bootstrap" / "site-packages").mkdir(parents=True, exist_ok=True)
+    (run_workspace / ".skill_bootstrap" / "site-packages" / "ignored.py").write_text(
+        "ignored",
+        encoding="utf-8",
+    )
+
+    client = MCPBasedSkillRuntimeClient(
+        adapter=_FallbackArtifactsAdapter(workspace_root),
+        config=SkillRuntimeConfig(server="skill-runtime"),
+    )
+
+    artifacts = await client.get_run_artifacts(run_id="skill-run-overflow")
+
+    assert artifacts["run_status"] == "completed"
+    assert artifacts["workspace"] == str(run_workspace)
+    assert artifacts["runtime"]["artifacts_host_fallback"] is True
+    assert artifacts["runtime"]["container_workspace"] == "/workspace/run-42"
+    assert artifacts["artifacts"] == [{"path": "output/report.json", "size_bytes": 11}]

@@ -12,6 +12,10 @@ from kg_agent.config import MCPCapabilityConfig, MCPConfig, MCPServerConfig
 from kg_agent.tools.base import ToolResult
 
 logger = logging.getLogger(__name__)
+DEFAULT_STDIO_STREAM_LIMIT_BYTES = max(
+    65536,
+    int(os.environ.get("KG_AGENT_MCP_STDIO_STREAM_LIMIT_BYTES", str(1024 * 1024))),
+)
 
 
 class MCPError(RuntimeError):
@@ -22,6 +26,7 @@ class MCPError(RuntimeError):
 class _MCPServerSession:
     config: MCPServerConfig
     process: asyncio.subprocess.Process
+    stdio_framing: str = "content_length"
     request_id: int = 0
     initialized: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -43,6 +48,9 @@ class MCPAdapter:
 
     def list_capability_configs(self) -> list[MCPCapabilityConfig]:
         return [self._capabilities[name] for name in sorted(self._capabilities)]
+
+    def get_server_config(self, server_name: str) -> MCPServerConfig | None:
+        return self._servers.get(server_name)
 
     async def discover_capabilities(
         self,
@@ -217,20 +225,67 @@ class MCPAdapter:
         if config.transport != "stdio":
             raise MCPError(f"Unsupported MCP transport: {config.transport}")
 
+        framings = self._candidate_stdio_framings(config.stdio_framing)
+        last_error: Exception | None = None
+        for framing in framings:
+            session = await self._launch_session(config=config, stdio_framing=framing)
+            self._sessions[server_name] = session
+            try:
+                await self._initialize_session(session)
+                return session
+            except Exception as exc:
+                last_error = exc
+                await self._close_session(session)
+                if self._sessions.get(server_name) is session:
+                    self._sessions.pop(server_name, None)
+
+        if last_error is not None:
+            raise last_error
+        raise MCPError(f"Failed to start MCP server session: {server_name}")
+
+    async def _launch_session(
+        self,
+        *,
+        config: MCPServerConfig,
+        stdio_framing: str,
+    ) -> _MCPServerSession:
         env = os.environ.copy()
         env.update(config.env)
-        process = await asyncio.create_subprocess_exec(
-            config.command,
-            *config.args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
+        popen_kwargs: dict[str, Any] = {
+            "stdin": asyncio.subprocess.PIPE,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+            "env": env,
+            "limit": DEFAULT_STDIO_STREAM_LIMIT_BYTES,
+        }
+        try:
+            process = await asyncio.create_subprocess_exec(
+                config.command,
+                *config.args,
+                **popen_kwargs,
+            )
+        except TypeError:
+            popen_kwargs.pop("limit", None)
+            process = await asyncio.create_subprocess_exec(
+                config.command,
+                *config.args,
+                **popen_kwargs,
+            )
+        return _MCPServerSession(
+            config=config,
+            process=process,
+            stdio_framing=stdio_framing,
         )
-        session = _MCPServerSession(config=config, process=process)
-        self._sessions[server_name] = session
-        await self._initialize_session(session)
-        return session
+
+    async def _close_session(self, session: _MCPServerSession) -> None:
+        process = session.process
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except Exception:
+                process.kill()
+                await process.wait()
 
     async def _initialize_session(self, session: _MCPServerSession) -> None:
         if session.initialized:
@@ -346,8 +401,11 @@ class MCPAdapter:
         if session.process.stdin is None:
             raise MCPError("MCP server stdin is unavailable")
         encoded = json.dumps(message, ensure_ascii=False).encode("utf-8")
-        header = f"Content-Length: {len(encoded)}\r\n\r\n".encode("ascii")
-        session.process.stdin.write(header + encoded)
+        if session.stdio_framing == "json_lines":
+            session.process.stdin.write(encoded + b"\n")
+        else:
+            header = f"Content-Length: {len(encoded)}\r\n\r\n".encode("ascii")
+            session.process.stdin.write(header + encoded)
         await session.process.stdin.drain()
 
     async def _read_message(self, session: _MCPServerSession) -> dict[str, Any]:
@@ -363,6 +421,9 @@ class MCPAdapter:
                     "MCP server closed the connection"
                     + (f": {stderr_output}" if stderr_output else "")
                 )
+            stripped = line.strip()
+            if stripped.startswith(b"{") or stripped.startswith(b"["):
+                return json.loads(stripped.decode("utf-8"))
             decoded = line.decode("ascii", errors="ignore").strip()
             if not decoded:
                 break
@@ -373,6 +434,15 @@ class MCPAdapter:
             raise MCPError("MCP message is missing Content-Length")
         payload = await session.process.stdout.readexactly(content_length)
         return json.loads(payload.decode("utf-8"))
+
+    @staticmethod
+    def _candidate_stdio_framings(raw_value: str) -> list[str]:
+        normalized = str(raw_value or "").strip().lower()
+        if normalized in {"jsonl", "json_lines", "json-lines", "line", "line_json"}:
+            return ["json_lines"]
+        if normalized in {"content_length", "content-length", "header"}:
+            return ["content_length"]
+        return ["content_length", "json_lines"]
 
     async def _read_stderr(self, session: _MCPServerSession) -> str:
         if session.process.stderr is None:

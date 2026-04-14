@@ -1,2 +1,7 @@
 mcp[cli]>=1,<2
 PyYAML>=6,<7
+python-dotenv>=1,<2
+openai>=2,<3
+numpy>=2,<3
+pandas>=2,<3
+yfinance>=0.2,<1

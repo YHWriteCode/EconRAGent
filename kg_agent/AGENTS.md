@@ -503,6 +503,7 @@ Runtime execution
 - `SkillExecutor` is the only skill execution entry in `AgentCore`; the planner no longer decomposes a skill into helper-tool chains
 - The runtime target is now **shell-oriented skill execution inside an isolated workspace / VM / container**, not planner-visible remote script calls
 - `SkillExecutionRequest` and `SkillCommandPlan` now both carry an explicit `runtime_target` with `platform`, `shell`, `workspace_root`, `workdir`, `network_allowed`, and `supports_python`
+- Once a runtime-backed skill request resolves its final `SkillCommandPlan`, the execution phase now treats `command_plan.runtime_target` as authoritative for environment construction, durable worker job context, bootstrap network policy, and shell execution; server-side defaults must not silently override a plan's `network_allowed` or other runtime-target fields
 - The default runtime target is now **Linux-first**: `platform="linux"` and `shell="/bin/sh"` unless overridden by skill-runtime config
 - Current default execution boundary is still conservative: the executor prepares the local shell-runtime context and can hand off to a runtime client, but it does not require `default_script` / `recommended_script` / `entrypoint` just to discover a skill
 - Skill shell planning now supports two runtime-facing modes:
@@ -516,6 +517,7 @@ Runtime execution
 - In `free_shell` mode, `SkillCommandPlanner` may also return `generated_files`, which the runtime materializes inside the isolated workspace before executing the final shell command
 - Generated-script plans no longer require a single inline `command`: the planner may instead return `generated_files + entrypoint + cli_args`, and the runtime will materialize the whole bundle, choose/validate the generated entrypoint, and then execute that entrypoint inside the isolated workspace
 - Free-shell planning now also auto-promotes long inline `python -c ...` plans into `generated_script` bundles when the request/doc context indicates script-first execution or rich Python-example synthesis, so “write script first, then execute” no longer depends only on the LLM returning `generated_files` explicitly
+- Runtime-facing `command_plan.generated_files` transport is now compacted when scripts are large: public MCP/API payloads keep `path` / `description`, inline only a bounded `content` preview, and add `content_bytes` plus `content_truncated=true` so large script bundles do not blow up stdio MCP responses
 - Free-shell planning can now also return `bootstrap_commands` plus `bootstrap_reason` when dependency/tool setup should happen before the main command; planner prompts steer Python package bootstrap toward workspace-local installs such as `python -m pip install --target ./.skill_bootstrap/site-packages ...`
 - Before execution, the runtime now performs a `preflight` phase for planned shell runs:
   - validate `required_tools` from planner hints against the runtime PATH
@@ -534,7 +536,11 @@ Runtime execution
 - Durable queue progress is surfaced through `runtime.queue_state` (`queued`, `claimed`, `executing`, `cancelling`, terminal states), while the public lifecycle contract still uses canonical `run_status`
 - The durable queue now also tracks lease/attempt metadata in `runtime`: `lease_owner`, `lease_expires_at`, `attempt_count`, and `max_attempts`
 - Queue workers are now configurable as a small local pool via `MCP_QUEUE_WORKER_CONCURRENCY`; stale claimed/executing runs may be re-queued until `max_attempts` is exhausted, after which the run terminates as `worker_lost`
+- Durable worker runs now also persist a private workspace terminal snapshot under `.skill_runtime/`; if the worker dies after producing a terminal payload but before SQLite metadata is updated, `get_run_status` / `get_run_logs` / `get_run_artifacts` recover the final terminal state from that snapshot instead of leaving the run stuck in `running`
 - Running shell tasks now update `stdout` / `stderr` incrementally in the durable SQLite-backed run store, and the runtime also refreshes visible workspace artifacts while the task is still running
+- Artifact listing now hides `.skill_bootstrap/` dependency payloads from the public artifact inventory by default, so runtime-backed finance/backtest runs do not flood MCP responses with installed package trees
+- `MCPBasedSkillRuntimeClient.get_run_artifacts()` now supports a host-mounted workspace fallback: if `get_run_artifacts` overflows MCP stdio transport, or if `KG_AGENT_SKILL_RUNTIME_ARTIFACTS_TOOL` is set to `host_workspace` / `host_workspace_fallback` / `disabled`, the client resolves the Docker bind mount and enumerates files directly from the mounted host workspace instead
+- Runtime-backed shell runs now expose coarse timing in `runtime`, including `enqueued_at`, optional `worker_started_at`, `queue_latency_s`, `bootstrap_duration_s`, `execution_duration_s`, and `total_duration_s`; bootstrap and repair history entries also include `started_at`, `finished_at`, and `duration_s`
 - Runtime-backed shell runs can now be cancelled through `cancel_skill_run(run_id)`; cancellation marks the durable run row, terminates the active shell process when possible, and resolves to canonical `run_status="failed"` with `failure_reason="cancelled"` plus `cancel_requested=true`
 - For blocking or test-oriented flows, callers can still request synchronous completion with `wait_for_completion=true` (or `constraints.wait_for_completion=true`)
 - `RouteJudge` now preserves and emits structured `skill_plan.constraints` when the user query makes them explicit; for example, spreadsheet queries can carry `input_path`, `operation="recalc"`, or `preserve_formulas=true`
@@ -765,8 +771,50 @@ Optional lightweight utility model for internal routing/explanation work:
 
 | Environment Variable | Default | Description |
 |---|---|---|
-| `KG_AGENT_MCP_SERVERS_JSON` | `[]` | JSON array of stdio MCP server definitions (`name`, `command`, optional `args`, `env`, `startup_timeout_s`, `tool_timeout_s`, optional `discover_tools`) |
+| `KG_AGENT_MCP_SERVERS_JSON` | `[]` | JSON array of stdio MCP server definitions (`name`, `command`, optional `args`, optional `stdio_framing`, `env`, `startup_timeout_s`, `tool_timeout_s`, optional `discover_tools`); `stdio_framing` may be `auto`, `content_length`, or `json_lines`, and FastMCP-over-`docker run` commonly needs `json_lines` |
 | `KG_AGENT_MCP_CAPABILITIES_JSON` | `[]` | JSON array of static MCP capability declarations (`name`, `description`, `server`, `input_schema`, optional `remote_name`, `planner_exposed`, `tags`, `enabled`) |
+
+Recommended dockerized skill-runtime example for `KG_AGENT_MCP_SERVERS_JSON`:
+
+```json
+[
+  {
+    "name": "skill-runtime",
+    "command": "docker",
+    "stdio_framing": "json_lines",
+    "args": [
+      "run",
+      "--rm",
+      "-i",
+      "-e",
+      "MCP_SKILLS_DIR=/app/skills",
+      "-e",
+      "MCP_WORKSPACE_DIR=/workspace",
+      "-v",
+      "lightrag_mcp_skill_workspace:/workspace",
+      "lightrag-mcp-skill-service:latest",
+      "python",
+      "/app/server.py"
+    ],
+    "startup_timeout_s": 20.0,
+    "tool_timeout_s": 40.0,
+    "discover_tools": false
+  }
+]
+```
+
+Companion runtime setting:
+
+```dotenv
+KG_AGENT_SKILL_RUNTIME_SERVER=skill-runtime
+```
+
+Notes:
+
+- Build the image first with `docker build -f mcp-server/Dockerfile -t lightrag-mcp-skill-service:latest .`
+- The volume entry above uses a Docker named volume for durable run state and artifacts; replace it with a bind mount such as `D:/skill-runtime:/workspace` if host-side file inspection is more important than portability
+- Keep `stdio_framing="json_lines"` when the container entrypoint is `python /app/server.py` running FastMCP over stdio
+- The image now bakes in `numpy`, `pandas`, and `yfinance` during `docker build`. Shell skills like `financial-researching` therefore avoid reinstalling those packages inside `.skill_bootstrap/` on every cold run; remaining bootstrap work is only for dependencies that are not already present in the image.
 
 ### 10.3 Tool Switches (ToolConfig)
 
@@ -789,7 +837,7 @@ Optional lightweight utility model for internal routing/explanation work:
 | `KG_AGENT_SKILL_RUNTIME_READ_TOOL` | `read_skill` | Reserved remote read interface for coarse-grained runtime access |
 | `KG_AGENT_SKILL_RUNTIME_READ_FILE_TOOL` | `read_skill_file` | Reserved remote file-read interface for coarse-grained runtime access |
 | `KG_AGENT_SKILL_RUNTIME_LOGS_TOOL` | `get_run_logs` | Optional remote run-log retrieval tool name reserved for shell-based skill runs |
-| `KG_AGENT_SKILL_RUNTIME_ARTIFACTS_TOOL` | `get_run_artifacts` | Optional remote artifact listing tool name reserved for shell-based skill runs |
+| `KG_AGENT_SKILL_RUNTIME_ARTIFACTS_TOOL` | `get_run_artifacts` | Optional remote artifact listing tool name reserved for shell-based skill runs; set to `host_workspace` / `host_workspace_fallback` / `disabled` to skip the remote artifact tool and enumerate files from a Docker bind-mounted host workspace directly |
 | `KG_AGENT_SKILL_DEFAULT_SHELL_MODE` | `conservative` | Default skill shell-planning mode: `conservative` or `free_shell` |
 | `KG_AGENT_SKILL_TARGET_PLATFORM` | `linux` | Default skill runtime target platform (`linux` or `windows`) |
 | `KG_AGENT_SKILL_TARGET_SHELL` | `/bin/sh` | Default skill runtime target shell (`/bin/sh`, `bash`, or `powershell`) |
@@ -1256,13 +1304,19 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 - **MCP integration is currently stdio-only**; optional dynamic `tools/list` discovery now exists, but there is still no SSE/HTTP transport or richer MCP server capability negotiation yet
 - **Configured `external_mcp` capabilities are hidden from auto-routing by default**; they execute correctly when explicitly invoked, and the Route Judge only sees them when `planner_exposed=true`
 - **Local skill execution is now architecturally separate from MCP and oriented around shell execution inside an isolated runtime**; `SkillExecutor` now has an explicit command-planning stage, canonical `run_status`, LLM-first `free_shell` planning when requested, generated-script bundle execution through `entrypoint + cli_args`, and a bounded workspace-local bootstrap/install lifecycle through `bootstrap_commands`, but it still does not implement a full multi-step autonomous shell agent or a richer environment-provisioning system
+- **Large `generated_script` payloads are now transport-compacted rather than sent verbatim across public MCP/API responses**; callers still get `path`, `description`, and bounded `content` previews with `content_bytes` / `content_truncated`, and the MCP adapter now launches stdio subprocesses with a larger read limit, but extremely large multi-file bundles are still better staged in the runtime workspace than round-tripped through transport payloads
 - **Compatibility `status` is still exposed at the API / MCP boundary** for old clients (`manual_required -> needs_shell_command`), but internal logic must treat canonical `run_status` as the only source of truth
 - **Runtime-backed shell runs now use an independent queue-worker process plus a SQLite-backed durable queue/store**, so queued/running state and live-polled logs/artifacts survive MCP server restarts as long as the SQLite file remains available and queue workers can be relaunched
 - **Skill runtime run persistence is now SQLite-backed inside `mcp-server/server.py`**, but it is still local-file durability only; there is no distributed queue, multi-node worker pool, or conversation-memory linkage yet. Replacing it with a shared Redis/Postgres-style durable queue remains an explicit lower-priority TODO after the current local-runtime hardening work
+- **Automatic dependency-missing attribution into bootstrap planning is still heuristic-light**; the runtime now supports bounded workspace-local `bootstrap_commands`, but explicitly classifying failures like `ModuleNotFoundError` / `command not found` into a preferred bootstrap plan is still a lower-priority TODO behind the current container/runtime validation work
 - **Queue workers are still local process-pool workers on one host**; there is no cross-node worker coordination yet
 - **`worker_lost` recovery intentionally stops at bounded requeue via `max_attempts`**; there is still no richer backoff policy or dead-letter queue flow
+- **Durable worker recovery is now better at converging stale runs that already reached a terminal payload** by restoring a private workspace terminal snapshot, but if a worker dies before it can write that snapshot the system still falls back to bounded requeue / terminal `worker_lost`
 - **Running shell tasks now expose incremental polled logs/artifacts and explicit cancellation through the durable store**, with local lease/attempt bookkeeping and limited requeue on worker loss, but this is still polling rather than SSE log streaming or a richer external job-control plane
+- **Artifact retrieval now has a best-effort host-workspace fallback for Docker bind mounts**, but that fallback only works when the MCP server uses a real host bind mount for `/workspace`; it cannot recover files from Docker named volumes or remote workers that are not visible on the host filesystem
 - **The new `free_shell` repair loop is intentionally bounded by a small retry limit rather than being open-ended**; it now supports multi-step observe-execute-repair (including repairable preflight failures), and the runtime also supports bounded workspace-local bootstrap commands, but there is still no unlimited autonomous shell loop, richer environment provisioning, or full host/container dependency management lifecycle
+- **The dockerized skill runtime image must now include `kg_agent/` planner/runtime code in addition to `mcp-server/server.py` and `skills/`**; the supported container deployment pattern is still stdio MCP over `docker run` / `docker compose run`, not a long-lived HTTP/SSE runtime service
+- **Dockerized runtime coverage now includes both explicit free-shell commands and `generated_script` bundles** through a `docker run` stdio MCP server with `json_lines` framing, so container viability is now validated for both direct shell execution and “write script first, then execute” flows
 - **`mcp-server/server.py` no longer owns a duplicate free-shell planner**, but compatibility wrappers such as `read_skill_docs` / `execute_skill_script` still exist for older callers
 - **Legacy script-level skill helper APIs still exist as a compatibility layer**; `read_skill_docs` / `execute_skill_script` and related binding transforms remain for old flows, but they are no longer the planner's primary skill surface
 - **Scheduler** now supports optional loop leader election plus source-level coordination, but it still does not implement scheduler sharding or a richer distributed control plane

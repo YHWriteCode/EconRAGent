@@ -4,5 +4,7 @@
 *
 !mcp-server/
 !mcp-server/**
+!kg_agent/
+!kg_agent/**
 !skills/
 !skills/**

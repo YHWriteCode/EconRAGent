@@ -72,6 +72,25 @@ def _build_mcp_config(*, planner_exposed: bool = False) -> MCPConfig:
     )
 
 
+def _build_jsonl_mcp_config() -> MCPConfig:
+    fixture_path = (
+        Path(__file__).resolve().parent / "fixtures" / "fake_jsonl_mcp_server.py"
+    )
+    return MCPConfig(
+        servers=[
+            MCPServerConfig(
+                name="jsonl-skill",
+                command=sys.executable,
+                args=[str(fixture_path)],
+                startup_timeout_s=5.0,
+                tool_timeout_s=5.0,
+                discover_tools=False,
+            )
+        ],
+        capabilities=[],
+    )
+
+
 def test_mcp_config_from_env_parses_servers_and_capabilities(monkeypatch):
     monkeypatch.setenv(
         "KG_AGENT_MCP_SERVERS_JSON",
@@ -94,6 +113,69 @@ def test_mcp_config_from_env_parses_servers_and_capabilities(monkeypatch):
     assert len(config.mcp.capabilities) == 1
     assert config.mcp.capabilities[0].name == "quant_backtest_skill"
     assert config.mcp.capabilities[0].planner_exposed is False
+
+
+def test_mcp_config_from_env_parses_stdio_framing(monkeypatch):
+    monkeypatch.setenv(
+        "KG_AGENT_MCP_SERVERS_JSON",
+        '[{"name":"jsonl-skill","command":"python","args":["server.py"],"stdio_framing":"json_lines"}]',
+    )
+
+    config = KGAgentConfig.from_env()
+
+    assert len(config.mcp.servers) == 1
+    assert config.mcp.servers[0].stdio_framing == "json_lines"
+
+
+def test_skill_runtime_config_allows_host_workspace_artifacts_override(monkeypatch):
+    monkeypatch.setenv("KG_AGENT_SKILL_RUNTIME_SERVER", "skill-runtime")
+    monkeypatch.setenv("KG_AGENT_SKILL_RUNTIME_ARTIFACTS_TOOL", "host_workspace")
+
+    config = KGAgentConfig.from_env()
+
+    assert config.skill_runtime.server == "skill-runtime"
+    assert config.skill_runtime.artifacts_tool_name == ""
+
+
+@pytest.mark.asyncio
+async def test_mcp_adapter_auto_detects_json_lines_stdio_server():
+    adapter = MCPAdapter(_build_jsonl_mcp_config())
+
+    try:
+        result = await adapter.invoke_remote_tool(
+            server_name="jsonl-skill",
+            remote_name="run_skill_task",
+            arguments={"skill_name": "pdf", "goal": "docker-style jsonl test"},
+        )
+    finally:
+        await adapter.close()
+
+    assert result.success is True
+    assert result.error is None
+    assert result.data["structured_content"]["tool"] == "run_skill_task"
+    assert result.data["structured_content"]["echo"]["skill_name"] == "pdf"
+
+
+@pytest.mark.asyncio
+async def test_mcp_adapter_reads_large_json_lines_payload():
+    adapter = MCPAdapter(_build_jsonl_mcp_config())
+
+    try:
+        result = await adapter.invoke_remote_tool(
+            server_name="jsonl-skill",
+            remote_name="run_skill_task",
+            arguments={
+                "skill_name": "pdf",
+                "goal": "exercise large json-lines payload handling",
+                "payload_bytes": 200000,
+            },
+        )
+    finally:
+        await adapter.close()
+
+    assert result.success is True
+    assert result.error is None
+    assert len(result.data["structured_content"]["blob"]) == 200000
 
 
 @pytest.mark.asyncio

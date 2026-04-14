@@ -200,6 +200,7 @@ class MCPServerConfig:
     transport: str = "stdio"
     command: str = ""
     args: list[str] = field(default_factory=list)
+    stdio_framing: str = "auto"
     env: dict[str, str] = field(default_factory=dict)
     startup_timeout_s: float = 15.0
     tool_timeout_s: float = 60.0
@@ -226,6 +227,7 @@ class MCPServerConfig:
             transport=str(payload.get("transport", "stdio")).strip() or "stdio",
             command=command,
             args=[str(item) for item in args if isinstance(item, (str, int, float))],
+            stdio_framing=str(payload.get("stdio_framing", "auto")).strip() or "auto",
             env=normalized_env,
             startup_timeout_s=float(payload.get("startup_timeout_s", 15.0)),
             tool_timeout_s=float(payload.get("tool_timeout_s", 60.0)),
@@ -323,6 +325,17 @@ class SkillRuntimeConfig:
     def from_env(cls) -> "SkillRuntimeConfig":
         from kg_agent.skills.models import SkillRuntimeTarget
 
+        raw_artifacts_tool_name = os.getenv(
+            "KG_AGENT_SKILL_RUNTIME_ARTIFACTS_TOOL",
+            "get_run_artifacts",
+        ).strip()
+        artifacts_tool_name = (
+            ""
+            if raw_artifacts_tool_name.lower()
+            in {"disabled", "host_workspace", "host_workspace_fallback"}
+            else raw_artifacts_tool_name or "get_run_artifacts"
+        )
+
         return cls(
             server=os.getenv("KG_AGENT_SKILL_RUNTIME_SERVER", "").strip(),
             run_tool_name=os.getenv(
@@ -355,11 +368,7 @@ class SkillRuntimeConfig:
                 "get_run_logs",
             ).strip()
             or "get_run_logs",
-            artifacts_tool_name=os.getenv(
-                "KG_AGENT_SKILL_RUNTIME_ARTIFACTS_TOOL",
-                "get_run_artifacts",
-            ).strip()
-            or "get_run_artifacts",
+            artifacts_tool_name=artifacts_tool_name,
             default_shell_mode=os.getenv(
                 "KG_AGENT_SKILL_DEFAULT_SHELL_MODE",
                 "conservative",
