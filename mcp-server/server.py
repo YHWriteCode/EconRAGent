@@ -21,8 +21,19 @@ import yaml
 from kg_agent.config import AgentLLMClient, AgentModelConfig, SkillRuntimeConfig
 from kg_agent.skills.command_planner import (
     SkillCommandPlanner,
+    build_portable_script_command,
     build_shell_hints as build_skill_shell_hints,
+    default_generated_file_command,
+    default_generated_file_entrypoint,
+    extract_python_examples,
     is_dry_run,
+    maybe_promote_inline_python_to_generated_script,
+    normalize_cli_args,
+    normalize_generated_command,
+    normalize_generated_entrypoint,
+    normalize_generated_files,
+    normalize_shell_command,
+    normalize_shell_commands,
 )
 from kg_agent.skills.models import (
     LoadedSkill,
@@ -89,7 +100,14 @@ DEFAULT_RUN_TIMEOUT_S = int(os.environ.get("MCP_RUN_TIMEOUT_S", "300"))
 MAX_REFERENCE_BYTES = int(os.environ.get("MCP_MAX_REFERENCE_BYTES", "200000"))
 MAX_LOG_PREVIEW_BYTES = int(os.environ.get("MCP_MAX_LOG_PREVIEW_BYTES", "12000"))
 MAX_GENERATED_FILE_BYTES = 64000
-MAX_REPAIR_ATTEMPTS = 1
+MAX_REPAIR_ATTEMPTS = max(
+    1,
+    int(os.environ.get("MCP_FREE_SHELL_MAX_REPAIR_ATTEMPTS", "3")),
+)
+MAX_BOOTSTRAP_ATTEMPTS = max(
+    1,
+    int(os.environ.get("MCP_FREE_SHELL_MAX_BOOTSTRAP_ATTEMPTS", "2")),
+)
 WAIT_FOR_TERMINAL_GRACE_S = float(
     os.environ.get("MCP_WAIT_FOR_TERMINAL_GRACE_S", "10.0")
 )
@@ -946,6 +964,30 @@ def _build_shell_exec_argv(shell_command: str) -> list[str]:
     return ["/bin/sh", "-lc", shell_command]
 
 
+BOOTSTRAP_NETWORK_INSTALL_PATTERN = re.compile(
+    r"("
+    r"\bpip(?:3)?\s+install\b|"
+    r"\bpython\s+-m\s+pip\s+install\b|"
+    r"\buv\s+pip\s+install\b|"
+    r"\bnpm\s+install\b|"
+    r"\byarn\s+add\b|"
+    r"\bpnpm\s+add\b|"
+    r"\bapt(?:-get)?\s+install\b|"
+    r"\byum\s+install\b|"
+    r"\bdnf\s+install\b|"
+    r"\bapk\s+add\b|"
+    r"\bbrew\s+install\b|"
+    r"\bwinget\s+install\b|"
+    r"\bchoco\s+install\b|"
+    r"\bcurl\b|"
+    r"\bwget\b|"
+    r"Invoke-WebRequest|"
+    r"Start-BitsTransfer"
+    r")",
+    re.IGNORECASE,
+)
+
+
 def _default_shell_command(relative_script: str) -> str:
     suffix = Path(relative_script).suffix.lower()
     quoted_script = shlex.quote(relative_script)
@@ -956,6 +998,16 @@ def _default_shell_command(relative_script: str) -> str:
     if suffix == ".ps1":
         return f"powershell -File {quoted_script}"
     return quoted_script
+
+
+def _bootstrap_workspace_paths(workspace_dir: Path) -> dict[str, Path]:
+    root = (workspace_dir / ".skill_bootstrap").resolve()
+    return {
+        "root": root,
+        "bin": (root / "bin").resolve(),
+        "scripts": (root / "Scripts").resolve(),
+        "site_packages": (root / "site-packages").resolve(),
+    }
 
 
 def _build_script_shell_command(
@@ -1017,15 +1069,31 @@ def _build_run_env(
     goal: str,
     user_query: str,
     constraints: dict[str, Any],
+    runtime_target: SkillRuntimeTarget,
     request_file: Path,
 ) -> dict[str, str]:
     env = os.environ.copy()
     python_bin_dir = str(Path(sys.executable).resolve().parent)
+    bootstrap_paths = _bootstrap_workspace_paths(workspace_dir)
+    for path in bootstrap_paths.values():
+        path.mkdir(parents=True, exist_ok=True)
     existing_path = env.get("PATH", "")
-    env["PATH"] = (
-        python_bin_dir
-        if not existing_path
-        else python_bin_dir + os.pathsep + existing_path
+    path_entries = [
+        str(bootstrap_paths["bin"]),
+        str(bootstrap_paths["scripts"]),
+        python_bin_dir,
+    ]
+    if existing_path:
+        path_entries.append(existing_path)
+    env["PATH"] = os.pathsep.join(
+        entry for entry in path_entries if isinstance(entry, str) and entry
+    )
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    pythonpath_entries = [str(bootstrap_paths["site_packages"])]
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(
+        entry for entry in pythonpath_entries if isinstance(entry, str) and entry
     )
     env.update(
         {
@@ -1037,6 +1105,12 @@ def _build_run_env(
             "SKILL_USER_QUERY": user_query,
             "SKILL_CONSTRAINTS_JSON": json.dumps(constraints, ensure_ascii=False),
             "SKILL_REQUEST_FILE": str(request_file),
+            "SKILL_NETWORK_ALLOWED": "true" if runtime_target.network_allowed else "false",
+            "SKILL_BOOTSTRAP_ROOT": str(bootstrap_paths["root"]),
+            "SKILL_BOOTSTRAP_BIN": str(bootstrap_paths["bin"]),
+            "SKILL_BOOTSTRAP_SCRIPTS": str(bootstrap_paths["scripts"]),
+            "SKILL_BOOTSTRAP_SITE_PACKAGES": str(bootstrap_paths["site_packages"]),
+            "PIP_TARGET": str(bootstrap_paths["site_packages"]),
             "HOME": str(workspace_dir),
         }
     )
@@ -1286,10 +1360,12 @@ def _build_free_shell_repair_prompt(
     request: SkillExecutionRequest,
     command_plan: SkillCommandPlan,
     command: str,
+    failure_stage: str,
     exit_code: int | None,
     stdout: str,
     stderr: str,
     preflight: dict[str, Any],
+    repair_history: list[dict[str, Any]],
 ) -> tuple[str, str]:
     system_prompt = (
         "You repair failed free-shell skill execution plans. "
@@ -1301,7 +1377,11 @@ def _build_free_shell_repair_prompt(
         "{"
         '"mode": "free_shell" | "generated_script" | "manual_required", '
         '"command": str | null, '
+        '"entrypoint": str | null, '
+        '"cli_args": [str], '
         '"generated_files": [{"path": str, "content": str, "description": str}], '
+        '"bootstrap_commands": [str], '
+        '"bootstrap_reason": str | null, '
         '"rationale": str, '
         '"missing_fields": [str], '
         '"failure_reason": str | null, '
@@ -1314,10 +1394,13 @@ def _build_free_shell_repair_prompt(
         f"{json.dumps({'skill_name': request.skill_name, 'goal': request.goal, 'user_query': request.user_query, 'constraints': request.constraints}, ensure_ascii=False, indent=2)}\n\n"
         "Previous command plan:\n"
         f"{json.dumps(command_plan.to_dict(), ensure_ascii=False, indent=2)}\n\n"
+        f"Current failure stage:\n{failure_stage}\n\n"
         f"Executed command:\n{command}\n\n"
         f"Exit code:\n{exit_code}\n\n"
         "Preflight result:\n"
         f"{json.dumps(preflight, ensure_ascii=False, indent=2)}\n\n"
+        "Prior repair history:\n"
+        f"{json.dumps(repair_history[-4:], ensure_ascii=False, indent=2)}\n\n"
         "stdout:\n"
         f"{stdout[-5000:]}\n\n"
         "stderr:\n"
@@ -1327,14 +1410,24 @@ def _build_free_shell_repair_prompt(
         "Rules:\n"
         "1. Prefer the minimal repair that fixes the observed failure.\n"
         "2. Preserve the declared runtime target.\n"
-        "3. Keep generated file paths relative and do not use heredocs.\n"
-        "4. If the failure cannot be repaired safely in one step, return manual_required.\n"
+        "3. Do not repeat the same failing command or generated entrypoint unless the new evidence clearly shows the prior failure was transient.\n"
+        "4. Keep generated file paths relative and do not use heredocs.\n"
+        "5. When you return generated_files, you may omit command and instead set entrypoint plus optional cli_args.\n"
+        "6. When the task involves substantial Python logic, prefer generated_files plus entrypoint over a long python -c one-liner.\n"
+        "7. If the failure is caused by missing dependencies or tools and setup can be done safely, return bootstrap_commands and explain them in bootstrap_reason.\n"
+        "8. For Python package bootstrap, prefer workspace-local commands such as python -m pip install --target ./.skill_bootstrap/site-packages <packages>.\n"
+        "9. If the current failure is in preflight, fix the plan itself instead of restating the same invalid command.\n"
+        "10. If the failure cannot be repaired safely within the remaining repair budget, return manual_required.\n"
         "Keep JSON valid and do not include markdown fences."
     )
     return system_prompt, user_prompt
 
 
-def _preflight_required_tools(command_plan: SkillCommandPlan) -> list[dict[str, Any]]:
+def _preflight_required_tools(
+    command_plan: SkillCommandPlan,
+    *,
+    search_path: str | None = None,
+) -> list[dict[str, Any]]:
     required_tools = command_plan.hints.get("required_tools", [])
     tools: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -1343,7 +1436,7 @@ def _preflight_required_tools(command_plan: SkillCommandPlan) -> list[dict[str, 
         if not tool_name or tool_name in seen:
             continue
         seen.add(tool_name)
-        resolved = shutil.which(tool_name)
+        resolved = shutil.which(tool_name, path=search_path)
         tools.append(
             {
                 "name": tool_name,
@@ -1378,9 +1471,13 @@ def _run_preflight(
     *,
     workspace_dir: Path,
     command_plan: SkillCommandPlan,
+    env: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     generated_file_specs = _validate_generated_file_specs(command_plan)
-    required_tools = _preflight_required_tools(command_plan)
+    required_tools = _preflight_required_tools(
+        command_plan,
+        search_path=(env or {}).get("PATH"),
+    )
     written_paths: list[str] = []
     generated_file_results = [dict(item) for item in generated_file_specs]
     failure_reason: str | None = None
@@ -1464,10 +1561,12 @@ async def _attempt_repair_plan(
     request: SkillExecutionRequest,
     command_plan: SkillCommandPlan,
     command: str,
+    failure_stage: str,
     exit_code: int | None,
     stdout: str,
     stderr: str,
     preflight: dict[str, Any],
+    repair_history: list[dict[str, Any]],
 ) -> SkillCommandPlan | None:
     if not UTILITY_LLM_CLIENT.is_available():
         return None
@@ -1476,10 +1575,12 @@ async def _attempt_repair_plan(
         request=request,
         command_plan=command_plan,
         command=command,
+        failure_stage=failure_stage,
         exit_code=exit_code,
         stdout=stdout,
         stderr=stderr,
         preflight=preflight,
+        repair_history=repair_history,
     )
     payload = await UTILITY_LLM_CLIENT.complete_json(
         system_prompt=system_prompt,
@@ -1487,8 +1588,56 @@ async def _attempt_repair_plan(
         temperature=0.0,
         max_tokens=1800,
     )
+    generated_files = normalize_generated_files(payload.get("generated_files"))
+    cli_args = normalize_cli_args(payload.get("cli_args")) or []
+    bootstrap_commands = normalize_shell_commands(payload.get("bootstrap_commands"))
+    bootstrap_reason = str(payload.get("bootstrap_reason", "")).strip()
+    entrypoint = normalize_generated_entrypoint(
+        payload.get("entrypoint"),
+        generated_files=generated_files,
+    )
+    command_payload = normalize_shell_command(payload.get("command"))
+    command_payload = normalize_generated_command(command_payload, generated_files)
+    if command_payload is None and entrypoint:
+        command_payload = build_portable_script_command(
+            entrypoint,
+            cli_args,
+            runtime_target=command_plan.runtime_target,
+        )
+    if command_payload is None and generated_files:
+        command_payload = default_generated_file_command(
+            generated_files,
+            runtime_target=command_plan.runtime_target,
+            cli_args=cli_args,
+        )
+        if command_payload:
+            entrypoint = entrypoint or default_generated_file_entrypoint(generated_files)
+    (
+        command_payload,
+        generated_files,
+        entrypoint,
+        cli_args,
+        promoted_inline_python,
+    ) = maybe_promote_inline_python_to_generated_script(
+        command=command_payload,
+        generated_files=generated_files,
+        entrypoint=entrypoint,
+        cli_args=cli_args,
+        runtime_target=command_plan.runtime_target,
+        request_text="\n".join([request.goal, request.user_query]),
+        python_example_count=len(extract_python_examples(loaded_skill.skill_md)),
+    )
+    normalized_payload = dict(payload)
+    normalized_payload["command"] = command_payload
+    normalized_payload["generated_files"] = [item.to_dict() for item in generated_files]
+    normalized_payload["entrypoint"] = entrypoint
+    normalized_payload["cli_args"] = list(cli_args)
+    normalized_payload["bootstrap_commands"] = list(bootstrap_commands)
+    normalized_payload["bootstrap_reason"] = bootstrap_reason
+    if generated_files and str(normalized_payload.get("mode", "")).strip().lower() != "manual_required":
+        normalized_payload["mode"] = "generated_script"
     base_plan = SkillCommandPlan.from_dict(
-        payload,
+        normalized_payload,
         skill_name=request.skill_name,
         goal=request.goal,
         user_query=request.user_query,
@@ -1524,13 +1673,23 @@ async def _attempt_repair_plan(
         entrypoint=base_plan.entrypoint,
         cli_args=list(base_plan.cli_args),
         generated_files=list(base_plan.generated_files),
+        bootstrap_commands=list(base_plan.bootstrap_commands),
+        bootstrap_reason=base_plan.bootstrap_reason,
         missing_fields=list(base_plan.missing_fields),
         failure_reason=base_plan.failure_reason,
         hints={
             **dict(command_plan.hints),
             "planner": "free_shell",
             "required_tools": required_tools,
-            "warnings": warnings,
+            "warnings": (
+                [
+                    *warnings,
+                    "Promoted a repair inline Python command into a generated script bundle.",
+                ]
+                if promoted_inline_python
+                else warnings
+            ),
+            "promoted_inline_python_to_generated_script": promoted_inline_python,
         },
     )
     if repaired_plan.is_manual_required or not repaired_plan.command:
@@ -1546,15 +1705,25 @@ def _materialize_shell_command(
 ) -> str | None:
     if command_plan.mode == "explicit":
         return command_plan.command
-    if command_plan.mode == "generated_script" and command_plan.generated_files:
-        relative_script = command_plan.generated_files[0].path
+    if command_plan.mode == "generated_script":
+        relative_script = command_plan.entrypoint
+        if not relative_script and command_plan.generated_files:
+            relative_script = command_plan.generated_files[0].path
         if workspace_dir is not None:
-            return _build_workspace_script_shell_command(
-                workspace_dir=workspace_dir,
-                relative_script=relative_script,
-                cli_args=command_plan.cli_args,
+            if relative_script:
+                return _build_workspace_script_shell_command(
+                    workspace_dir=workspace_dir,
+                    relative_script=relative_script,
+                    cli_args=command_plan.cli_args,
+                )
+            return command_plan.command
+        if relative_script:
+            return build_portable_script_command(
+                relative_script,
+                command_plan.cli_args,
+                runtime_target=command_plan.runtime_target,
             )
-        return command_plan.command or relative_script
+        return command_plan.command
     if command_plan.entrypoint:
         return _build_script_shell_command(
             skill_dir=loaded_skill.skill.path,
@@ -1791,6 +1960,236 @@ def _store_attempt_snapshot(
     return snapshot_run_id
 
 
+def _remove_workspace_files(
+    *,
+    workspace_dir: Path,
+    relative_paths: list[str],
+) -> None:
+    for raw_path in relative_paths:
+        relative_path = str(raw_path or "").replace("\\", "/").strip()
+        if not relative_path:
+            continue
+        target = (workspace_dir / relative_path).resolve()
+        if target == workspace_dir or workspace_dir not in target.parents:
+            continue
+        if target.is_file():
+            target.unlink(missing_ok=True)
+
+
+def _failure_reason_from_execution(execution: dict[str, Any]) -> str:
+    if bool(execution.get("cancelled") or execution.get("cancel_requested")):
+        return "cancelled"
+    if bool(execution.get("timed_out")):
+        return "timed_out"
+    return "process_failed"
+
+
+def _failed_execution_payload(
+    *,
+    workspace_dir: Path,
+    stdout: str = "",
+    stderr: str = "",
+    exit_code: int | None = None,
+    timed_out: bool = False,
+    cancel_requested: bool = False,
+) -> dict[str, Any]:
+    stdout_preview, stdout_truncated = _truncate_log(stdout)
+    stderr_preview, stderr_truncated = _truncate_log(stderr)
+    return {
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "cancel_requested": cancel_requested,
+        "cancelled": cancel_requested and not timed_out,
+        "success": False,
+        "stdout": stdout,
+        "stderr": stderr,
+        "logs_preview": {
+            "stdout": stdout_preview,
+            "stderr": stderr_preview,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+        },
+        "artifacts": _collect_workspace_artifacts(workspace_dir),
+    }
+
+
+def _build_repair_history_entry(
+    *,
+    attempt_index: int,
+    stage: str,
+    snapshot_run_id: str,
+    command_plan: SkillCommandPlan,
+    command: str | None,
+    preflight: dict[str, Any],
+    execution: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "attempt_index": attempt_index,
+        "snapshot_run_id": snapshot_run_id,
+        "stage": stage,
+        "plan_mode": command_plan.mode,
+        "entrypoint": command_plan.entrypoint,
+        "generated_files": [item.path for item in command_plan.generated_files],
+        "command": command,
+        "preflight_status": preflight.get("status"),
+        "preflight_failure_reason": preflight.get("failure_reason"),
+        "failure_reason": (
+            preflight.get("failure_reason")
+            if preflight.get("failure_reason")
+            else _failure_reason_from_execution(execution)
+        ),
+        "exit_code": execution.get("exit_code"),
+        "stdout_tail": str(execution.get("stdout", ""))[-2000:],
+        "stderr_tail": str(execution.get("stderr", ""))[-2000:],
+    }
+
+
+def _build_bootstrap_history_entry(
+    *,
+    attempt_index: int,
+    commands: list[str],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "attempt_index": attempt_index,
+        "commands": list(commands),
+        "success": bool(result.get("success")),
+        "failure_reason": result.get("failure_reason"),
+        "exit_code": result.get("exit_code"),
+        "stdout_tail": str(result.get("stdout", ""))[-2000:],
+        "stderr_tail": str(result.get("stderr", ""))[-2000:],
+    }
+
+
+def _bootstrap_commands_require_network(commands: list[str]) -> bool:
+    return any(
+        BOOTSTRAP_NETWORK_INSTALL_PATTERN.search(str(command or ""))
+        for command in commands
+    )
+
+
+def _bootstrap_failure_payload(
+    *,
+    commands: list[str],
+    stdout: str = "",
+    stderr: str = "",
+    exit_code: int | None = None,
+    failure_reason: str = "bootstrap_failed",
+) -> dict[str, Any]:
+    stdout_preview, stdout_truncated = _truncate_log(stdout)
+    stderr_preview, stderr_truncated = _truncate_log(stderr)
+    return {
+        "commands": list(commands),
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
+        "success": False,
+        "failure_reason": failure_reason,
+        "logs_preview": {
+            "stdout": stdout_preview,
+            "stderr": stderr_preview,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+        },
+    }
+
+
+async def _execute_bootstrap_commands(
+    *,
+    commands: list[str],
+    workspace_dir: Path,
+    env: dict[str, str],
+    timeout_s: int,
+) -> dict[str, Any]:
+    if not commands:
+        return {
+            "commands": [],
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "success": True,
+            "failure_reason": None,
+            "logs_preview": {
+                "stdout": "",
+                "stderr": "",
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+            },
+        }
+    if (
+        not env.get("SKILL_BOOTSTRAP_ROOT")
+        or _bootstrap_commands_require_network(commands)
+        and str(env.get("SKILL_NETWORK_ALLOWED", "false")).strip().lower() != "true"
+    ):
+        return _bootstrap_failure_payload(
+            commands=commands,
+            failure_reason="bootstrap_network_not_allowed",
+        )
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    last_exit_code = 0
+    per_command_timeout = max(1, min(int(timeout_s), DEFAULT_SCRIPT_TIMEOUT_S))
+    for index, command in enumerate(commands, start=1):
+        marker = f"[bootstrap {index}/{len(commands)}] {command}\n"
+        stdout_chunks.append(marker)
+        process = await asyncio.create_subprocess_exec(
+            *_build_shell_exec_argv(command),
+            cwd=str(workspace_dir),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(),
+                timeout=per_command_timeout,
+            )
+        except asyncio.TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            return _bootstrap_failure_payload(
+                commands=commands,
+                stdout="".join(stdout_chunks),
+                stderr="".join(stderr_chunks) + f"Bootstrap command timed out: {command}\n",
+                exit_code=124,
+                failure_reason="bootstrap_timed_out",
+            )
+        stdout_chunks.append(stdout_bytes.decode("utf-8", errors="replace"))
+        stderr_chunks.append(stderr_bytes.decode("utf-8", errors="replace"))
+        last_exit_code = process.returncode or 0
+        if last_exit_code != 0:
+            return _bootstrap_failure_payload(
+                commands=commands,
+                stdout="".join(stdout_chunks),
+                stderr="".join(stderr_chunks),
+                exit_code=last_exit_code,
+                failure_reason="bootstrap_failed",
+            )
+
+    stdout_text = "".join(stdout_chunks)
+    stderr_text = "".join(stderr_chunks)
+    stdout_preview, stdout_truncated = _truncate_log(stdout_text)
+    stderr_preview, stderr_truncated = _truncate_log(stderr_text)
+    return {
+        "commands": list(commands),
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+        "exit_code": last_exit_code,
+        "success": True,
+        "failure_reason": None,
+        "logs_preview": {
+            "stdout": stdout_preview,
+            "stderr": stderr_preview,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+        },
+    }
+
+
 async def _execute_shell_command(
     *,
     run_id: str,
@@ -1963,58 +2362,300 @@ async def _complete_shell_run(
     cleanup_workspace: bool,
 ) -> dict[str, Any]:
     try:
-        _update_run_metadata(
-            run_id=run_id,
-            queue_state="executing",
-            worker_pid=os.getpid(),
-            cancel_requested=_is_cancel_requested(run_id),
-            heartbeat=True,
-        )
-        execution = await _execute_shell_command(
-            run_id=run_id,
-            shell_command=shell_command,
-            workspace_dir=workspace_dir,
-            env=env,
-            timeout_s=timeout_s,
-        )
-
         final_plan = command_plan
         final_preflight = preflight
         final_command = shell_command
-        final_execution = execution
+        final_execution = _failed_execution_payload(workspace_dir=workspace_dir)
         repair_attempted = False
         repair_succeeded = False
         repaired_from_run_id: str | None = None
-
-        execution_cancelled = bool(
-            execution.get("cancelled") or execution.get("cancel_requested")
-        )
-        can_repair = (
-            not execution["success"]
-            and not execution_cancelled
-            and command_plan.shell_mode == "free_shell"
+        repair_attempt_count = 0
+        repair_history: list[dict[str, Any]] = []
+        bootstrap_attempted = False
+        bootstrap_succeeded = False
+        bootstrap_attempt_count = 0
+        bootstrap_history: list[dict[str, Any]] = []
+        bootstrap_stdout_parts: list[str] = []
+        bootstrap_stderr_parts: list[str] = []
+        repairable_free_shell = (
+            command_plan.shell_mode == "free_shell"
             and command_plan.mode in {"free_shell", "generated_script"}
         )
-        if can_repair:
+
+        current_plan = command_plan
+        current_preflight = preflight
+        current_command = shell_command
+        current_generated_files = list(generated_files)
+        current_bootstrap_pending = bool(current_plan.bootstrap_commands)
+
+        while True:
+            final_plan = current_plan
+            final_preflight = current_preflight
+            final_command = current_command
+            generated_files = list(current_generated_files)
+
+            if current_plan.bootstrap_commands and current_bootstrap_pending:
+                if bootstrap_attempt_count >= MAX_BOOTSTRAP_ATTEMPTS:
+                    current_preflight = {
+                        **dict(current_preflight),
+                        "status": "manual_required",
+                        "ok": False,
+                        "failure_reason": (
+                            current_preflight.get("failure_reason")
+                            or "bootstrap_attempt_limit_exceeded"
+                        ),
+                    }
+                    current_bootstrap_pending = False
+                else:
+                    bootstrap_attempted = True
+                    bootstrap_result = await _execute_bootstrap_commands(
+                        commands=current_plan.bootstrap_commands,
+                        workspace_dir=workspace_dir,
+                        env=env,
+                        timeout_s=timeout_s,
+                    )
+                    bootstrap_attempt_count += 1
+                    bootstrap_history.append(
+                        _build_bootstrap_history_entry(
+                            attempt_index=bootstrap_attempt_count,
+                            commands=current_plan.bootstrap_commands,
+                            result=bootstrap_result,
+                        )
+                    )
+                    bootstrap_stdout_parts.append(str(bootstrap_result.get("stdout", "")))
+                    bootstrap_stderr_parts.append(str(bootstrap_result.get("stderr", "")))
+                    current_bootstrap_pending = False
+                    if bootstrap_result.get("success"):
+                        bootstrap_succeeded = True
+                        current_preflight, current_generated_files = _run_preflight(
+                            workspace_dir=workspace_dir,
+                            command_plan=current_plan,
+                            env=env,
+                        )
+                        current_command = _materialize_shell_command(
+                            loaded_skill=loaded_skill,
+                            command_plan=current_plan,
+                            workspace_dir=workspace_dir,
+                        )
+                        if not current_command:
+                            current_preflight = {
+                                **dict(current_preflight),
+                                "status": "manual_required",
+                                "ok": False,
+                                "failure_reason": (
+                                    current_preflight.get("failure_reason")
+                                    or "command_materialization_failed"
+                                ),
+                            }
+                        continue
+                    current_preflight = {
+                        **dict(current_preflight),
+                        "status": "manual_required",
+                        "ok": False,
+                        "failure_reason": (
+                            bootstrap_result.get("failure_reason")
+                            or current_preflight.get("failure_reason")
+                            or "bootstrap_failed"
+                        ),
+                    }
+                    final_execution = _failed_execution_payload(
+                        workspace_dir=workspace_dir,
+                        stdout=str(bootstrap_result.get("stdout", "")),
+                        stderr=str(bootstrap_result.get("stderr", "")),
+                        exit_code=bootstrap_result.get("exit_code"),
+                    )
+
+            if not current_preflight.get("ok") or not current_command:
+                failure_reason = (
+                    current_preflight.get("failure_reason")
+                    or "command_materialization_failed"
+                )
+                final_preflight = {
+                    **dict(current_preflight),
+                    "status": str(current_preflight.get("status") or "manual_required"),
+                    "ok": False,
+                    "failure_reason": failure_reason,
+                }
+                final_execution = _failed_execution_payload(workspace_dir=workspace_dir)
+                can_repair_preflight = (
+                    repairable_free_shell
+                    and not _is_cancel_requested(run_id)
+                    and repair_attempt_count < MAX_REPAIR_ATTEMPTS
+                )
+                if not can_repair_preflight:
+                    break
+
+                snapshot_index = len(repair_history) + 1
+                repair_attempted = True
+                failed_attempt_record = SkillRunRecord(
+                    skill_name=request.skill_name,
+                    run_status="failed",
+                    success=False,
+                    summary=(
+                        f"Free-shell preflight attempt {snapshot_index} for skill "
+                        f"'{request.skill_name}' failed."
+                    ),
+                    command_plan=current_plan,
+                    run_id=run_id,
+                    command=current_command,
+                    workspace=str(workspace_dir),
+                    started_at=started_at,
+                    finished_at=_utc_now(),
+                    failure_reason=failure_reason,
+                    artifacts=_collect_workspace_artifacts(workspace_dir),
+                    logs_preview=final_execution["logs_preview"],
+                    runtime=_durable_runtime_metadata(
+                        free_shell_repair_limit=MAX_REPAIR_ATTEMPTS,
+                    ),
+                    preflight=final_preflight,
+                    repair_attempted=True,
+                    repair_attempt_count=repair_attempt_count,
+                    repair_attempt_limit=MAX_REPAIR_ATTEMPTS,
+                    repair_history=list(repair_history),
+                    bootstrap_attempted=bootstrap_attempted,
+                    bootstrap_succeeded=bootstrap_succeeded,
+                    bootstrap_attempt_count=bootstrap_attempt_count,
+                    bootstrap_attempt_limit=MAX_BOOTSTRAP_ATTEMPTS,
+                    bootstrap_history=list(bootstrap_history),
+                )
+                failed_attempt_payload = _build_run_record_payload(
+                    record=failed_attempt_record,
+                    goal=request.goal,
+                    user_query=request.user_query,
+                    constraints=request.constraints,
+                    payload=skill_payload,
+                    loaded_skill=loaded_skill,
+                )
+                failed_attempt_payload["request_file"] = str(request_file)
+                failed_attempt_payload["generated_files"] = list(current_generated_files)
+                failed_attempt_payload["logs"] = {"stdout": "", "stderr": ""}
+                snapshot_run_id = _store_attempt_snapshot(
+                    base_run_id=run_id,
+                    suffix=f"attempt-{snapshot_index}",
+                    record=failed_attempt_payload,
+                )
+                if repaired_from_run_id is None:
+                    repaired_from_run_id = snapshot_run_id
+                repair_history.append(
+                    _build_repair_history_entry(
+                        attempt_index=snapshot_index,
+                        stage="preflight",
+                        snapshot_run_id=snapshot_run_id,
+                        command_plan=current_plan,
+                        command=current_command,
+                        preflight=final_preflight,
+                        execution=final_execution,
+                    )
+                )
+                repair_attempt_count += 1
+
+                try:
+                    repaired_plan = await _attempt_repair_plan(
+                        loaded_skill=loaded_skill,
+                        request=request,
+                        command_plan=current_plan,
+                        command=current_command,
+                        failure_stage="preflight",
+                        exit_code=None,
+                        stdout="",
+                        stderr="",
+                        preflight=final_preflight,
+                        repair_history=repair_history,
+                    )
+                except Exception:
+                    repaired_plan = None
+                if repaired_plan is None:
+                    break
+
+                if current_generated_files:
+                    _remove_workspace_files(
+                        workspace_dir=workspace_dir,
+                        relative_paths=current_generated_files,
+                    )
+                current_plan = repaired_plan
+                current_preflight, current_generated_files = _run_preflight(
+                    workspace_dir=workspace_dir,
+                    command_plan=current_plan,
+                    env=env,
+                )
+                current_command = _materialize_shell_command(
+                    loaded_skill=loaded_skill,
+                    command_plan=current_plan,
+                    workspace_dir=workspace_dir,
+                )
+                current_bootstrap_pending = bool(current_plan.bootstrap_commands)
+                if not current_command:
+                    current_preflight = {
+                        **dict(current_preflight),
+                        "status": "manual_required",
+                        "ok": False,
+                        "failure_reason": (
+                            current_preflight.get("failure_reason")
+                            or "command_materialization_failed"
+                        ),
+                    }
+                continue
+
+            _update_run_metadata(
+                run_id=run_id,
+                queue_state="executing",
+                worker_pid=os.getpid(),
+                cancel_requested=_is_cancel_requested(run_id),
+                heartbeat=True,
+            )
+            execution = await _execute_shell_command(
+                run_id=run_id,
+                shell_command=current_command,
+                workspace_dir=workspace_dir,
+                env=env,
+                timeout_s=timeout_s,
+            )
+            final_execution = execution
+            execution_cancelled = bool(
+                execution.get("cancelled") or execution.get("cancel_requested")
+            )
+            can_repair_execution = (
+                repairable_free_shell
+                and not execution["success"]
+                and not execution_cancelled
+                and repair_attempt_count < MAX_REPAIR_ATTEMPTS
+            )
+            if not can_repair_execution:
+                break
+
+            snapshot_index = len(repair_history) + 1
             repair_attempted = True
             failed_attempt_record = SkillRunRecord(
                 skill_name=request.skill_name,
                 run_status="failed",
                 success=False,
-                summary=f"Initial shell execution for skill '{request.skill_name}' failed.",
-                command_plan=command_plan,
+                summary=(
+                    f"Free-shell execution attempt {snapshot_index} for skill "
+                    f"'{request.skill_name}' failed."
+                ),
+                command_plan=current_plan,
                 run_id=run_id,
-                command=shell_command,
+                command=current_command,
                 workspace=str(workspace_dir),
                 started_at=started_at,
                 finished_at=_utc_now(),
                 exit_code=execution["exit_code"],
-                failure_reason=("timed_out" if execution["timed_out"] else "process_failed"),
+                failure_reason=_failure_reason_from_execution(execution),
                 artifacts=execution["artifacts"],
                 logs_preview=execution["logs_preview"],
-                runtime=_durable_runtime_metadata(),
-                preflight=preflight,
+                runtime=_durable_runtime_metadata(
+                    free_shell_repair_limit=MAX_REPAIR_ATTEMPTS,
+                ),
+                preflight=current_preflight,
                 repair_attempted=True,
+                repair_attempt_count=repair_attempt_count,
+                repair_attempt_limit=MAX_REPAIR_ATTEMPTS,
+                repair_history=list(repair_history),
+                bootstrap_attempted=bootstrap_attempted,
+                bootstrap_succeeded=bootstrap_succeeded,
+                bootstrap_attempt_count=bootstrap_attempt_count,
+                bootstrap_attempt_limit=MAX_BOOTSTRAP_ATTEMPTS,
+                bootstrap_history=list(bootstrap_history),
             )
             failed_attempt_payload = _build_run_record_payload(
                 record=failed_attempt_record,
@@ -2025,72 +2666,97 @@ async def _complete_shell_run(
                 loaded_skill=loaded_skill,
             )
             failed_attempt_payload["request_file"] = str(request_file)
-            failed_attempt_payload["generated_files"] = generated_files
+            failed_attempt_payload["generated_files"] = list(current_generated_files)
             failed_attempt_payload["logs"] = {
                 "stdout": execution["stdout"],
                 "stderr": execution["stderr"],
             }
-            repaired_from_run_id = _store_attempt_snapshot(
+            snapshot_run_id = _store_attempt_snapshot(
                 base_run_id=run_id,
-                suffix="attempt-1",
+                suffix=f"attempt-{snapshot_index}",
                 record=failed_attempt_payload,
             )
+            if repaired_from_run_id is None:
+                repaired_from_run_id = snapshot_run_id
+            repair_history.append(
+                _build_repair_history_entry(
+                    attempt_index=snapshot_index,
+                    stage="execution",
+                    snapshot_run_id=snapshot_run_id,
+                    command_plan=current_plan,
+                    command=current_command,
+                    preflight=current_preflight,
+                    execution=execution,
+                )
+            )
+            repair_attempt_count += 1
 
-            repaired_plan = None
             try:
-                for _attempt in range(MAX_REPAIR_ATTEMPTS):
-                    repaired_plan = await _attempt_repair_plan(
-                        loaded_skill=loaded_skill,
-                        request=request,
-                        command_plan=command_plan,
-                        command=shell_command,
-                        exit_code=execution["exit_code"],
-                        stdout=execution["stdout"],
-                        stderr=execution["stderr"],
-                        preflight=preflight,
-                    )
-                    if repaired_plan is not None:
-                        break
+                repaired_plan = await _attempt_repair_plan(
+                    loaded_skill=loaded_skill,
+                    request=request,
+                    command_plan=current_plan,
+                    command=current_command,
+                    failure_stage="execution",
+                    exit_code=execution["exit_code"],
+                    stdout=execution["stdout"],
+                    stderr=execution["stderr"],
+                    preflight=current_preflight,
+                    repair_history=repair_history,
+                )
             except Exception:
                 repaired_plan = None
+            if repaired_plan is None:
+                break
 
-            if repaired_plan is not None:
-                repaired_preflight, repaired_generated_files = _run_preflight(
+            if current_generated_files:
+                _remove_workspace_files(
                     workspace_dir=workspace_dir,
-                    command_plan=repaired_plan,
+                    relative_paths=current_generated_files,
                 )
-                repaired_command = _materialize_shell_command(
-                    loaded_skill=loaded_skill,
-                    command_plan=repaired_plan,
-                    workspace_dir=workspace_dir,
-                )
-                if repaired_preflight["ok"] and repaired_command:
-                    repaired_execution = await _execute_shell_command(
-                        run_id=run_id,
-                        shell_command=repaired_command,
-                        workspace_dir=workspace_dir,
-                        env=env,
-                        timeout_s=timeout_s,
-                    )
-                    final_plan = repaired_plan
-                    final_preflight = repaired_preflight
-                    final_command = repaired_command
-                    final_execution = repaired_execution
-                    generated_files = repaired_generated_files
-                    repair_succeeded = repaired_execution["success"]
-                else:
-                    final_plan = repaired_plan
-                    final_preflight = repaired_preflight
-                    final_command = repaired_command or final_command
-                    final_execution = {
-                        "exit_code": execution["exit_code"],
-                        "timed_out": False,
-                        "success": False,
-                        "stdout": execution["stdout"],
-                        "stderr": execution["stderr"],
-                        "logs_preview": execution["logs_preview"],
-                        "artifacts": _collect_workspace_artifacts(workspace_dir),
-                    }
+            current_plan = repaired_plan
+            current_preflight, current_generated_files = _run_preflight(
+                workspace_dir=workspace_dir,
+                command_plan=current_plan,
+                env=env,
+            )
+            current_command = _materialize_shell_command(
+                loaded_skill=loaded_skill,
+                command_plan=current_plan,
+                workspace_dir=workspace_dir,
+            )
+            current_bootstrap_pending = bool(current_plan.bootstrap_commands)
+            if not current_command:
+                current_preflight = {
+                    **dict(current_preflight),
+                    "status": "manual_required",
+                    "ok": False,
+                    "failure_reason": (
+                        current_preflight.get("failure_reason")
+                        or "command_materialization_failed"
+                    ),
+                }
+
+        bootstrap_stdout = "".join(bootstrap_stdout_parts)
+        bootstrap_stderr = "".join(bootstrap_stderr_parts)
+        if bootstrap_stdout or bootstrap_stderr:
+            combined_stdout = bootstrap_stdout + str(final_execution.get("stdout", ""))
+            combined_stderr = bootstrap_stderr + str(final_execution.get("stderr", ""))
+            stdout_preview, stdout_truncated = _truncate_log(combined_stdout)
+            stderr_preview, stderr_truncated = _truncate_log(combined_stderr)
+            final_execution = {
+                **dict(final_execution),
+                "stdout": combined_stdout,
+                "stderr": combined_stderr,
+                "logs_preview": {
+                    "stdout": stdout_preview,
+                    "stderr": stderr_preview,
+                    "stdout_truncated": stdout_truncated,
+                    "stderr_truncated": stderr_truncated,
+                },
+            }
+
+        repair_succeeded = repair_attempted and bool(final_execution.get("success"))
 
         final_cancelled = bool(
             final_execution.get("cancelled") or final_execution.get("cancel_requested")
@@ -2118,7 +2784,12 @@ async def _complete_shell_run(
                 else (
                     f"Shell execution for skill '{request.skill_name}' was cancelled."
                     if final_cancelled
-                    else f"Shell execution for skill '{request.skill_name}' failed."
+                    else (
+                        f"Shell execution for skill '{request.skill_name}' failed after "
+                        f"{repair_attempt_count} repair attempt(s)."
+                        if repair_attempted
+                        else f"Shell execution for skill '{request.skill_name}' failed."
+                    )
                 )
             ),
             command_plan=final_plan,
@@ -2131,11 +2802,24 @@ async def _complete_shell_run(
             failure_reason=final_failure_reason,
             artifacts=final_execution["artifacts"],
             logs_preview=final_execution["logs_preview"],
-            runtime=_durable_runtime_metadata(),
+            runtime=_durable_runtime_metadata(
+                free_shell_repair_limit=MAX_REPAIR_ATTEMPTS,
+                free_shell_repair_attempts=repair_attempt_count,
+                free_shell_bootstrap_limit=MAX_BOOTSTRAP_ATTEMPTS,
+                free_shell_bootstrap_attempts=bootstrap_attempt_count,
+            ),
             preflight=final_preflight,
             repair_attempted=repair_attempted,
             repair_succeeded=repair_succeeded,
             repaired_from_run_id=repaired_from_run_id,
+            repair_attempt_count=repair_attempt_count,
+            repair_attempt_limit=MAX_REPAIR_ATTEMPTS,
+            repair_history=repair_history,
+            bootstrap_attempted=bootstrap_attempted,
+            bootstrap_succeeded=bootstrap_succeeded,
+            bootstrap_attempt_count=bootstrap_attempt_count,
+            bootstrap_attempt_limit=MAX_BOOTSTRAP_ATTEMPTS,
+            bootstrap_history=bootstrap_history,
             cancel_requested=bool(final_execution.get("cancel_requested", False)),
         )
         response = _build_run_record_payload(
@@ -2284,18 +2968,6 @@ async def _run_shell_task(
 
     cleanup_workspace_here = cleanup_workspace
     try:
-        preflight, generated_files = _run_preflight(
-            workspace_dir=workspace_dir,
-            command_plan=command_plan,
-        )
-        shell_command = _materialize_shell_command(
-            loaded_skill=loaded_skill,
-            command_plan=command_plan,
-            workspace_dir=workspace_dir,
-        )
-        if not shell_command:
-            raise SkillServerError("Command plan did not resolve to an executable shell command")
-
         request_file = _write_skill_request(
             workspace_dir=workspace_dir,
             skill_payload=skill_payload,
@@ -2303,8 +2975,46 @@ async def _run_shell_task(
             user_query=request.user_query,
             constraints=request.constraints,
         )
+        env = _build_run_env(
+            skill_dir=Path(skill_payload["path"]).resolve(),
+            workspace_dir=workspace_dir,
+            goal=request.goal,
+            user_query=request.user_query,
+            constraints=request.constraints,
+            runtime_target=request.runtime_target,
+            request_file=request_file,
+        )
+        preflight, generated_files = _run_preflight(
+            workspace_dir=workspace_dir,
+            command_plan=command_plan,
+            env=env,
+        )
+        shell_command = _materialize_shell_command(
+            loaded_skill=loaded_skill,
+            command_plan=command_plan,
+            workspace_dir=workspace_dir,
+        )
+        if not shell_command:
+            preflight = {
+                **dict(preflight),
+                "status": "manual_required",
+                "ok": False,
+                "failure_reason": preflight.get("failure_reason")
+                or "command_materialization_failed",
+            }
+            shell_command = ""
 
-        if not preflight["ok"]:
+        can_auto_repair_preflight = (
+            not is_dry_run(request.constraints)
+            and command_plan.shell_mode == "free_shell"
+            and command_plan.mode in {"free_shell", "generated_script"}
+            and UTILITY_LLM_CLIENT.is_available()
+        )
+        can_auto_bootstrap_preflight = (
+            not is_dry_run(request.constraints)
+            and bool(command_plan.bootstrap_commands)
+        )
+        if not preflight["ok"] and not (can_auto_repair_preflight or can_auto_bootstrap_preflight):
             preflight_record = SkillRunRecord(
                 skill_name=request.skill_name,
                 run_status="manual_required",
@@ -2340,7 +3050,11 @@ async def _run_shell_task(
             skill_name=request.skill_name,
             run_status="running",
             success=True,
-            summary=f"Running shell task for skill '{request.skill_name}'.",
+            summary=(
+                f"Running free-shell repair loop for skill '{request.skill_name}'."
+                if not preflight["ok"]
+                else f"Running shell task for skill '{request.skill_name}'."
+            ),
             command_plan=command_plan,
             run_id=run_id,
             command=shell_command,
@@ -2350,8 +3064,16 @@ async def _run_shell_task(
                 queue_state="queued",
                 attempt_count=0,
                 max_attempts=QUEUE_MAX_ATTEMPTS,
+                free_shell_repair_limit=MAX_REPAIR_ATTEMPTS,
+                free_shell_repair_attempts=0,
+                free_shell_bootstrap_limit=MAX_BOOTSTRAP_ATTEMPTS,
+                free_shell_bootstrap_attempts=0,
             ),
             preflight=preflight,
+            repair_attempt_count=0,
+            repair_attempt_limit=MAX_REPAIR_ATTEMPTS,
+            bootstrap_attempt_count=0,
+            bootstrap_attempt_limit=MAX_BOOTSTRAP_ATTEMPTS,
             cancel_requested=False,
         )
         running_payload = _build_run_record_payload(
@@ -2575,6 +3297,7 @@ async def _run_durable_worker(run_id: str) -> int:
         goal=request.goal,
         user_query=request.user_query,
         constraints=request.constraints,
+        runtime_target=runtime_target,
         request_file=request_file,
     )
     await _complete_shell_run(
@@ -2863,6 +3586,14 @@ def get_run_status(run_id: str) -> dict[str, Any]:
         "repair_attempted": bool(record.get("repair_attempted", False)),
         "repair_succeeded": bool(record.get("repair_succeeded", False)),
         "repaired_from_run_id": record.get("repaired_from_run_id"),
+        "repair_attempt_count": int(record.get("repair_attempt_count", 0) or 0),
+        "repair_attempt_limit": int(record.get("repair_attempt_limit", 0) or 0),
+        "repair_history": record.get("repair_history", []),
+        "bootstrap_attempted": bool(record.get("bootstrap_attempted", False)),
+        "bootstrap_succeeded": bool(record.get("bootstrap_succeeded", False)),
+        "bootstrap_attempt_count": int(record.get("bootstrap_attempt_count", 0) or 0),
+        "bootstrap_attempt_limit": int(record.get("bootstrap_attempt_limit", 0) or 0),
+        "bootstrap_history": record.get("bootstrap_history", []),
         "cancel_requested": bool(record.get("cancel_requested", False)),
     }
 
@@ -2918,6 +3649,14 @@ def get_run_logs(run_id: str) -> dict[str, Any]:
         "repair_attempted": bool(record.get("repair_attempted", False)),
         "repair_succeeded": bool(record.get("repair_succeeded", False)),
         "repaired_from_run_id": record.get("repaired_from_run_id"),
+        "repair_attempt_count": int(record.get("repair_attempt_count", 0) or 0),
+        "repair_attempt_limit": int(record.get("repair_attempt_limit", 0) or 0),
+        "repair_history": record.get("repair_history", []),
+        "bootstrap_attempted": bool(record.get("bootstrap_attempted", False)),
+        "bootstrap_succeeded": bool(record.get("bootstrap_succeeded", False)),
+        "bootstrap_attempt_count": int(record.get("bootstrap_attempt_count", 0) or 0),
+        "bootstrap_attempt_limit": int(record.get("bootstrap_attempt_limit", 0) or 0),
+        "bootstrap_history": record.get("bootstrap_history", []),
         "cancel_requested": bool(record.get("cancel_requested", False)),
         "stdout": logs.get("stdout", ""),
         "stderr": logs.get("stderr", ""),
@@ -2948,6 +3687,14 @@ def get_run_artifacts(run_id: str) -> dict[str, Any]:
         "repair_attempted": bool(record.get("repair_attempted", False)),
         "repair_succeeded": bool(record.get("repair_succeeded", False)),
         "repaired_from_run_id": record.get("repaired_from_run_id"),
+        "repair_attempt_count": int(record.get("repair_attempt_count", 0) or 0),
+        "repair_attempt_limit": int(record.get("repair_attempt_limit", 0) or 0),
+        "repair_history": record.get("repair_history", []),
+        "bootstrap_attempted": bool(record.get("bootstrap_attempted", False)),
+        "bootstrap_succeeded": bool(record.get("bootstrap_succeeded", False)),
+        "bootstrap_attempt_count": int(record.get("bootstrap_attempt_count", 0) or 0),
+        "bootstrap_attempt_limit": int(record.get("bootstrap_attempt_limit", 0) or 0),
+        "bootstrap_history": record.get("bootstrap_history", []),
         "cancel_requested": bool(record.get("cancel_requested", False)),
         "artifacts": record.get("artifacts", []),
     }

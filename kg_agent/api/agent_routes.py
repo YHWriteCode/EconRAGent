@@ -168,6 +168,14 @@ class SkillRunStatusResponse(BaseModel):
     repair_attempted: bool = False
     repair_succeeded: bool = False
     repaired_from_run_id: str | None = None
+    repair_attempt_count: int = 0
+    repair_attempt_limit: int = 0
+    repair_history: list[dict[str, Any]] = Field(default_factory=list)
+    bootstrap_attempted: bool = False
+    bootstrap_succeeded: bool = False
+    bootstrap_attempt_count: int = 0
+    bootstrap_attempt_limit: int = 0
+    bootstrap_history: list[dict[str, Any]] = Field(default_factory=list)
     cancel_requested: bool = False
 
 
@@ -188,6 +196,14 @@ class SkillRunLogsResponse(BaseModel):
     repair_attempted: bool = False
     repair_succeeded: bool = False
     repaired_from_run_id: str | None = None
+    repair_attempt_count: int = 0
+    repair_attempt_limit: int = 0
+    repair_history: list[dict[str, Any]] = Field(default_factory=list)
+    bootstrap_attempted: bool = False
+    bootstrap_succeeded: bool = False
+    bootstrap_attempt_count: int = 0
+    bootstrap_attempt_limit: int = 0
+    bootstrap_history: list[dict[str, Any]] = Field(default_factory=list)
     cancel_requested: bool = False
     stdout: str = ""
     stderr: str = ""
@@ -216,6 +232,14 @@ class SkillRunArtifactsResponse(BaseModel):
     repair_attempted: bool = False
     repair_succeeded: bool = False
     repaired_from_run_id: str | None = None
+    repair_attempt_count: int = 0
+    repair_attempt_limit: int = 0
+    repair_history: list[dict[str, Any]] = Field(default_factory=list)
+    bootstrap_attempted: bool = False
+    bootstrap_succeeded: bool = False
+    bootstrap_attempt_count: int = 0
+    bootstrap_attempt_limit: int = 0
+    bootstrap_history: list[dict[str, Any]] = Field(default_factory=list)
     cancel_requested: bool = False
     artifacts: list[SkillArtifactInfo] = Field(default_factory=list)
     summary: str | None = None

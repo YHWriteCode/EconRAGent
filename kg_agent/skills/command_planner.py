@@ -31,9 +31,32 @@ ENV_VAR_PATTERN = re.compile(
 )
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
 MAX_SCRIPT_PREVIEW_CHARS = 1400
-MAX_MARKDOWN_EXCERPT_CHARS = 7000
+MAX_MARKDOWN_EXCERPT_CHARS = 9000
 MAX_GENERATED_FILE_COUNT = 5
 MAX_GENERATED_FILE_BYTES = 64000
+MAX_BOOTSTRAP_COMMAND_COUNT = 4
+MAX_FREE_SHELL_EXAMPLE_COUNT = 8
+MAX_FREE_SHELL_EXAMPLE_CHARS = 2400
+MAX_FREE_SHELL_TOTAL_EXAMPLE_CHARS = 12000
+INLINE_PYTHON_SCRIPT_PROMOTION_MIN_EXAMPLES = 3
+INLINE_PYTHON_SCRIPT_PROMOTION_MIN_CHARS = 120
+PREFERRED_GENERATED_ENTRYPOINT_NAMES = ("main.py", "run.py", "app.py", "script.py")
+SCRIPT_FIRST_REQUEST_PATTERN = re.compile(
+    r"("
+    r"script\s+first|"
+    r"helper\s+script|"
+    r"write(?: a| the)? (?:helper |python )?script|"
+    r"generate(?: a| the)? (?:helper |python )?script|"
+    r"complex\s+(?:shell|command)|"
+    r"pipeline|"
+    r"\u5148\u5199\u811a\u672c\u518d\u6267\u884c|"
+    r"\u5148\u751f\u6210\u811a\u672c|"
+    r"\u5199(?:\u4e00\u4e2a|\u4e2a)?(?:helper|python)?\s*\u811a\u672c|"
+    r"\u590d\u6742\u547d\u4ee4|"
+    r"\u547d\u4ee4\u94fe"
+    r")",
+    re.IGNORECASE,
+)
 
 
 class SkillPlannerLLMClient(Protocol):
@@ -102,6 +125,7 @@ def select_relevant_examples(
     query_text: str,
     limit: int = 4,
     max_chars: int = 1800,
+    max_total_chars: int | None = None,
 ) -> list[dict[str, str]]:
     ranked = sorted(
         examples,
@@ -112,7 +136,26 @@ def select_relevant_examples(
         reverse=True,
     )
     selected: list[dict[str, str]] = []
-    for item in ranked[: max(1, limit)]:
+    total_chars = 0
+    for item in ranked:
+        if len(selected) >= max(1, limit):
+            break
+        truncated_code = _truncate_text(str(item.get("code", "")), max_chars=max_chars)
+        if (
+            max_total_chars is not None
+            and selected
+            and total_chars + len(truncated_code) > max_total_chars
+        ):
+            break
+        selected.append(
+            {
+                "language": str(item.get("language", "")).strip() or "text",
+                "code": truncated_code,
+            }
+        )
+        total_chars += len(truncated_code)
+    if not selected and ranked:
+        item = ranked[0]
         selected.append(
             {
                 "language": str(item.get("language", "")).strip() or "text",
@@ -205,13 +248,42 @@ def default_generated_file_command(
     generated_files: list[SkillGeneratedFile],
     *,
     runtime_target: SkillRuntimeTarget | None = None,
+    cli_args: list[str] | None = None,
 ) -> str | None:
-    if len(generated_files) != 1:
+    entrypoint = default_generated_file_entrypoint(generated_files)
+    if entrypoint is None:
         return None
     return build_portable_script_command(
-        generated_files[0].path,
+        entrypoint,
+        cli_args,
         runtime_target=runtime_target,
     )
+
+
+def default_generated_file_entrypoint(
+    generated_files: list[SkillGeneratedFile],
+) -> str | None:
+    if not generated_files:
+        return None
+
+    def _entrypoint_rank(item: SkillGeneratedFile) -> tuple[int, int, int, int, str]:
+        pure_path = PurePosixPath(item.path.replace("\\", "/").strip())
+        name = pure_path.name.lower()
+        suffix = pure_path.suffix.lower()
+        is_preferred_name = 0 if name in PREFERRED_GENERATED_ENTRYPOINT_NAMES else 1
+        suffix_rank = (
+            0
+            if suffix == ".py"
+            else 1
+            if suffix in {".sh", ".bash", ".ps1"}
+            else 2
+        )
+        workspace_hint_rank = 0 if ".skill_generated" in str(pure_path).lower() else 1
+        depth_rank = len(pure_path.parts)
+        return (is_preferred_name, suffix_rank, workspace_hint_rank, depth_rank, str(pure_path))
+
+    best = min(generated_files, key=_entrypoint_rank)
+    return best.path
 
 
 def normalize_generated_command(
@@ -252,7 +324,8 @@ def build_shell_hints(loaded_skill: LoadedSkill) -> dict[str, Any]:
             "Provide constraints.shell_command / constraints.command for an explicit shell task, "
             "or provide structured CLI args in constraints.args / constraints.cli_args when the skill "
             "has a single runnable entrypoint. Set constraints.shell_mode='free_shell' to enable "
-            "LLM-driven shell planning and optional generated scripts."
+            "LLM-driven shell planning, optional generated scripts, and optional bootstrap_commands "
+            "before the main command."
         ),
     }
 
@@ -264,6 +337,50 @@ def normalize_shell_command(value: Any) -> str | None:
         argv = [str(item) for item in value if isinstance(item, (str, int, float))]
         if argv:
             return shlex.join(argv)
+    return None
+
+
+def normalize_shell_commands(
+    value: Any,
+    *,
+    limit: int = MAX_BOOTSTRAP_COMMAND_COUNT,
+) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    commands: list[str] = []
+    for raw_item in value[: max(1, limit)]:
+        command = normalize_shell_command(raw_item)
+        if not command:
+            continue
+        commands.append(command)
+    return commands
+
+
+def _is_python_command_name(value: str) -> bool:
+    command_name = Path(str(value or "").strip()).name.lower()
+    return command_name in {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"} or (
+        command_name.startswith("python3.")
+        and all(part.isdigit() for part in command_name.removeprefix("python3.").split("."))
+    )
+
+
+def extract_inline_python_command(
+    command: str | None,
+) -> tuple[str, list[str]] | None:
+    normalized = normalize_shell_command(command)
+    if not normalized:
+        return None
+    for posix_mode in (True, False):
+        try:
+            argv = shlex.split(normalized, posix=posix_mode)
+        except ValueError:
+            continue
+        if len(argv) < 3 or not _is_python_command_name(argv[0]) or argv[1] != "-c":
+            continue
+        code = str(argv[2]).strip()
+        if not code:
+            continue
+        return code, [str(item) for item in argv[3:]]
     return None
 
 
@@ -490,6 +607,88 @@ def normalize_generated_files(value: Any) -> list[SkillGeneratedFile]:
     return generated_files
 
 
+def normalize_generated_entrypoint(
+    value: Any,
+    *,
+    generated_files: list[SkillGeneratedFile],
+) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized_path = value.replace("\\", "/").strip()
+    if not normalized_path:
+        return None
+    pure_path = PurePosixPath(normalized_path)
+    if pure_path.is_absolute() or any(part == ".." for part in pure_path.parts):
+        return None
+    generated_paths = {
+        item.path.replace("\\", "/").strip()
+        for item in generated_files
+        if item.path.strip()
+    }
+    normalized_entrypoint = str(pure_path)
+    if generated_paths and normalized_entrypoint not in generated_paths:
+        return None
+    return normalized_entrypoint
+
+
+def maybe_promote_inline_python_to_generated_script(
+    *,
+    command: str | None,
+    generated_files: list[SkillGeneratedFile],
+    entrypoint: str | None,
+    cli_args: list[str] | None,
+    runtime_target: SkillRuntimeTarget,
+    request_text: str,
+    python_example_count: int,
+) -> tuple[str | None, list[SkillGeneratedFile], str | None, list[str], bool]:
+    if generated_files or entrypoint:
+        return command, list(generated_files), entrypoint, list(cli_args or []), False
+
+    inline_python = extract_inline_python_command(command)
+    if inline_python is None:
+        return command, list(generated_files), entrypoint, list(cli_args or []), False
+
+    python_code, command_cli_args = inline_python
+    combined_request_text = request_text or ""
+    should_promote = (
+        python_example_count >= INLINE_PYTHON_SCRIPT_PROMOTION_MIN_EXAMPLES
+        or len(python_code) >= INLINE_PYTHON_SCRIPT_PROMOTION_MIN_CHARS
+        or bool(SCRIPT_FIRST_REQUEST_PATTERN.search(combined_request_text))
+    )
+    if not should_promote:
+        return command, list(generated_files), entrypoint, list(cli_args or []), False
+
+    normalized_code = python_code.rstrip() + "\n"
+    promoted_entrypoint = ".skill_generated/main.py"
+    promoted_cli_args = (
+        list(cli_args)
+        if cli_args
+        else [str(item) for item in command_cli_args]
+    )
+    promoted_generated_files = [
+        SkillGeneratedFile(
+            path=promoted_entrypoint,
+            content=normalized_code,
+            description=(
+                "Auto-generated from a free-shell inline Python command so the runtime can "
+                "write the script first and then execute it."
+            ),
+        )
+    ]
+    promoted_command = build_portable_script_command(
+        promoted_entrypoint,
+        promoted_cli_args,
+        runtime_target=runtime_target,
+    )
+    return (
+        promoted_command,
+        promoted_generated_files,
+        promoted_entrypoint,
+        promoted_cli_args,
+        True,
+    )
+
+
 def load_script_previews(
     loaded_skill: LoadedSkill,
     *,
@@ -594,17 +793,23 @@ class SkillCommandPlanner:
         )
         if shell_mode != "free_shell":
             return conservative_plan
-        if not conservative_plan.is_manual_required:
-            return _clone_plan_with_shell_mode(
-                conservative_plan,
-                shell_mode="free_shell",
-            )
-        return await self._plan_free_shell(
+        free_shell_plan = await self._plan_free_shell(
             loaded_skill=loaded_skill,
             request=normalized_request,
             shell_hints=shell_hints,
             fallback_plan=conservative_plan,
         )
+        if not free_shell_plan.is_manual_required:
+            return free_shell_plan
+        if (
+            not conservative_plan.is_manual_required
+            and free_shell_plan.failure_reason in {"llm_not_available", "llm_planning_failed"}
+        ):
+            return _clone_plan_with_shell_mode(
+                conservative_plan,
+                shell_mode="free_shell",
+            )
+        return free_shell_plan
 
     def _plan_conservative(
         self,
@@ -790,7 +995,9 @@ class SkillCommandPlanner:
         python_examples = select_relevant_examples(
             extract_python_examples(loaded_skill.skill_md),
             query_text=query_text,
-            limit=4,
+            limit=MAX_FREE_SHELL_EXAMPLE_COUNT,
+            max_chars=MAX_FREE_SHELL_EXAMPLE_CHARS,
+            max_total_chars=MAX_FREE_SHELL_TOTAL_EXAMPLE_CHARS,
         )
         script_previews = load_script_previews(
             loaded_skill,
@@ -812,6 +1019,7 @@ class SkillCommandPlanner:
             skill_md_excerpt=skill_md_excerpt,
             script_previews=script_previews,
             python_examples=python_examples,
+            conservative_plan=fallback_plan.to_dict(),
         )
         try:
             payload = await self.llm_client.complete_json(
@@ -840,15 +1048,63 @@ class SkillCommandPlanner:
         raw_mode = str(payload.get("mode", "")).strip().lower()
         if raw_mode not in {"free_shell", "generated_script", "manual_required"}:
             raw_mode = "generated_script" if generated_files else "free_shell"
+        cli_args = normalize_cli_args(payload.get("cli_args")) or []
+        bootstrap_commands = normalize_shell_commands(payload.get("bootstrap_commands"))
+        bootstrap_reason = str(payload.get("bootstrap_reason", "")).strip()
+        generated_entrypoint = normalize_generated_entrypoint(
+            payload.get("entrypoint"),
+            generated_files=generated_files,
+        )
+        warnings = [
+            str(item)
+            for item in (payload.get("warnings") if isinstance(payload.get("warnings"), list) else [])
+            if isinstance(item, (str, int, float))
+        ]
         command = normalize_shell_command(payload.get("command"))
         command = normalize_generated_command(command, generated_files)
+        if command is None and generated_entrypoint:
+            command = build_portable_script_command(
+                generated_entrypoint,
+                cli_args,
+                runtime_target=request.runtime_target,
+            )
+            if raw_mode != "manual_required":
+                raw_mode = "generated_script"
         if command is None and generated_files:
             command = default_generated_file_command(
                 generated_files,
                 runtime_target=request.runtime_target,
+                cli_args=cli_args,
             )
             if command and raw_mode != "manual_required":
                 raw_mode = "generated_script"
+                generated_entrypoint = generated_entrypoint or default_generated_file_entrypoint(
+                    generated_files
+                )
+        if generated_entrypoint is None and generated_files and raw_mode == "generated_script":
+            generated_entrypoint = default_generated_file_entrypoint(generated_files)
+
+        (
+            command,
+            generated_files,
+            generated_entrypoint,
+            cli_args,
+            promoted_inline_python,
+        ) = maybe_promote_inline_python_to_generated_script(
+            command=command,
+            generated_files=generated_files,
+            entrypoint=generated_entrypoint,
+            cli_args=cli_args,
+            runtime_target=request.runtime_target,
+            request_text=query_text,
+            python_example_count=len(python_examples),
+        )
+        if promoted_inline_python and raw_mode != "manual_required":
+            raw_mode = "generated_script"
+            warnings = [
+                *warnings,
+                "Promoted a free-shell inline Python command into a generated script bundle.",
+            ]
 
         missing_fields = [
             str(item)
@@ -869,11 +1125,6 @@ class SkillCommandPlanner:
             for item in (payload.get("required_tools") if isinstance(payload.get("required_tools"), list) else [])
             if isinstance(item, (str, int, float))
         ]
-        warnings = [
-            str(item)
-            for item in (payload.get("warnings") if isinstance(payload.get("warnings"), list) else [])
-            if isinstance(item, (str, int, float))
-        ]
         hints = {
             **shell_hints,
             "planner": "free_shell",
@@ -881,6 +1132,7 @@ class SkillCommandPlanner:
             "warnings": warnings,
             "script_previews": script_previews,
             "python_examples": python_examples,
+            "promoted_inline_python_to_generated_script": promoted_inline_python,
         }
 
         if raw_mode == "manual_required" or command is None:
@@ -922,7 +1174,11 @@ class SkillCommandPlanner:
             mode=("generated_script" if generated_files else "free_shell"),
             shell_mode="free_shell",
             rationale=rationale,
+            entrypoint=generated_entrypoint,
+            cli_args=cli_args,
             generated_files=generated_files,
+            bootstrap_commands=bootstrap_commands,
+            bootstrap_reason=bootstrap_reason,
             missing_fields=missing_fields,
             failure_reason=failure_reason,
             hints=hints,
@@ -1014,6 +1270,8 @@ class SkillCommandPlanner:
             mode="manual_required",
             shell_mode=request.shell_mode,
             rationale=rationale,
+            bootstrap_commands=[],
+            bootstrap_reason="",
             missing_fields=list(missing_fields),
             failure_reason=failure_reason,
             hints=dict(shell_hints),

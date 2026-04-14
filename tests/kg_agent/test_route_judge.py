@@ -411,3 +411,51 @@ async def test_route_judge_extracts_free_shell_mode_hint():
     assert route.skill_plan is not None
     assert route.skill_plan.skill_name == "pdf"
     assert route.skill_plan.constraints["shell_mode"] == "free_shell"
+
+
+@pytest.mark.asyncio
+async def test_route_judge_infers_free_shell_for_generate_script_request():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query="use pdf skill to write a helper script first and then execute it on these files",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pdf",
+                "description": "Process pdf files.",
+                "tags": ["pdf"],
+                "path": "/skills/pdf",
+            }
+        ],
+    )
+
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pdf"
+    assert route.skill_plan.constraints["shell_mode"] == "free_shell"
+
+
+@pytest.mark.asyncio
+async def test_route_judge_infers_free_shell_for_complex_command_request():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query="use pdf skill with a complex command pipeline to process these files",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pdf",
+                "description": "Process pdf files.",
+                "tags": ["pdf"],
+                "path": "/skills/pdf",
+            }
+        ],
+    )
+
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pdf"
+    assert route.skill_plan.constraints["shell_mode"] == "free_shell"

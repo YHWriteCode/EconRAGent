@@ -255,6 +255,8 @@ class SkillCommandPlan:
     entrypoint: str | None = None
     cli_args: list[str] = field(default_factory=list)
     generated_files: list[SkillGeneratedFile] = field(default_factory=list)
+    bootstrap_commands: list[str] = field(default_factory=list)
+    bootstrap_reason: str = ""
     missing_fields: list[str] = field(default_factory=list)
     failure_reason: str | None = None
     hints: dict[str, Any] = field(default_factory=dict)
@@ -281,6 +283,8 @@ class SkillCommandPlan:
             "entrypoint": self.entrypoint,
             "cli_args": list(self.cli_args),
             "generated_files": [item.to_dict() for item in self.generated_files],
+            "bootstrap_commands": list(self.bootstrap_commands),
+            "bootstrap_reason": self.bootstrap_reason,
             "missing_fields": list(self.missing_fields),
             "failure_reason": self.failure_reason,
             "hints": dict(self.hints),
@@ -323,6 +327,7 @@ class SkillCommandPlan:
         )
         cli_args = data.get("cli_args")
         generated_files = data.get("generated_files")
+        bootstrap_commands = data.get("bootstrap_commands")
         missing_fields = data.get("missing_fields")
         hints = data.get("hints")
         return cls(
@@ -358,6 +363,14 @@ class SkillCommandPlan:
                 )
                 if item is not None
             ],
+            bootstrap_commands=[
+                str(item).strip()
+                for item in (
+                    bootstrap_commands if isinstance(bootstrap_commands, list) else []
+                )
+                if isinstance(item, (str, int, float)) and str(item).strip()
+            ],
+            bootstrap_reason=str(data.get("bootstrap_reason", "")).strip(),
             missing_fields=[
                 str(item)
                 for item in (missing_fields if isinstance(missing_fields, list) else [])
@@ -396,6 +409,14 @@ class SkillRunRecord:
     repair_attempted: bool = False
     repair_succeeded: bool = False
     repaired_from_run_id: str | None = None
+    repair_attempt_count: int = 0
+    repair_attempt_limit: int = 0
+    repair_history: list[dict[str, Any]] = field(default_factory=list)
+    bootstrap_attempted: bool = False
+    bootstrap_succeeded: bool = False
+    bootstrap_attempt_count: int = 0
+    bootstrap_attempt_limit: int = 0
+    bootstrap_history: list[dict[str, Any]] = field(default_factory=list)
     cancel_requested: bool = False
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -425,6 +446,14 @@ class SkillRunRecord:
             "repair_attempted": self.repair_attempted,
             "repair_succeeded": self.repair_succeeded,
             "repaired_from_run_id": self.repaired_from_run_id,
+            "repair_attempt_count": self.repair_attempt_count,
+            "repair_attempt_limit": self.repair_attempt_limit,
+            "repair_history": [dict(item) for item in self.repair_history],
+            "bootstrap_attempted": self.bootstrap_attempted,
+            "bootstrap_succeeded": self.bootstrap_succeeded,
+            "bootstrap_attempt_count": self.bootstrap_attempt_count,
+            "bootstrap_attempt_limit": self.bootstrap_attempt_limit,
+            "bootstrap_history": [dict(item) for item in self.bootstrap_history],
             "cancel_requested": self.cancel_requested,
         }
         return payload
@@ -473,6 +502,26 @@ class SkillRunRecord:
         runtime = data.get("runtime")
         runtime_result = data.get("runtime_result")
         preflight = data.get("preflight")
+        raw_repair_attempt_count = data.get("repair_attempt_count", 0)
+        raw_repair_attempt_limit = data.get("repair_attempt_limit", 0)
+        raw_bootstrap_attempt_count = data.get("bootstrap_attempt_count", 0)
+        raw_bootstrap_attempt_limit = data.get("bootstrap_attempt_limit", 0)
+        try:
+            repair_attempt_count = max(0, int(raw_repair_attempt_count or 0))
+        except (TypeError, ValueError):
+            repair_attempt_count = 0
+        try:
+            repair_attempt_limit = max(0, int(raw_repair_attempt_limit or 0))
+        except (TypeError, ValueError):
+            repair_attempt_limit = 0
+        try:
+            bootstrap_attempt_count = max(0, int(raw_bootstrap_attempt_count or 0))
+        except (TypeError, ValueError):
+            bootstrap_attempt_count = 0
+        try:
+            bootstrap_attempt_limit = max(0, int(raw_bootstrap_attempt_limit or 0))
+        except (TypeError, ValueError):
+            bootstrap_attempt_limit = 0
         return cls(
             skill_name=skill_name,
             run_status=run_status,
@@ -534,5 +583,27 @@ class SkillRunRecord:
                 and data.get("repaired_from_run_id", "").strip()
                 else None
             ),
+            repair_attempt_count=repair_attempt_count,
+            repair_attempt_limit=repair_attempt_limit,
+            repair_history=[
+                dict(item)
+                for item in (
+                    data.get("repair_history") if isinstance(data.get("repair_history"), list) else []
+                )
+                if isinstance(item, dict)
+            ],
+            bootstrap_attempted=bool(data.get("bootstrap_attempted", False)),
+            bootstrap_succeeded=bool(data.get("bootstrap_succeeded", False)),
+            bootstrap_attempt_count=bootstrap_attempt_count,
+            bootstrap_attempt_limit=bootstrap_attempt_limit,
+            bootstrap_history=[
+                dict(item)
+                for item in (
+                    data.get("bootstrap_history")
+                    if isinstance(data.get("bootstrap_history"), list)
+                    else []
+                )
+                if isinstance(item, dict)
+            ],
             cancel_requested=bool(data.get("cancel_requested", False)),
         )

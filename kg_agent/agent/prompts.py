@@ -338,11 +338,12 @@ def build_skill_free_shell_planner_prompt(
     skill_md_excerpt: str,
     script_previews: list[dict[str, Any]],
     python_examples: list[dict[str, Any]],
+    conservative_plan: dict[str, Any],
 ) -> tuple[str, str]:
     system_prompt = (
-        "You are a shell-command planning module for local skills. "
+        "You are the free-shell planning module for local skills. "
         "Plan one runnable shell task from the skill docs, file inventory, and user intent. "
-        "You may either return a direct shell command or generate one or more files first and then return a shell command that executes them. "
+        "This is the pure free-shell path: you may return a direct shell command, or you may generate one or more files first and then execute them. "
         "Only use relative paths for generated files. Never rely on heredocs. "
         "If the task is still ambiguous or unsafe, return manual_required."
     )
@@ -351,7 +352,11 @@ def build_skill_free_shell_planner_prompt(
         "{"
         '"mode": "free_shell" | "generated_script" | "manual_required", '
         '"command": str | null, '
+        '"entrypoint": str | null, '
+        '"cli_args": [str], '
         '"generated_files": [{"path": str, "content": str, "description": str}] , '
+        '"bootstrap_commands": [str], '
+        '"bootstrap_reason": str | null, '
         '"rationale": str, '
         '"missing_fields": [str], '
         '"failure_reason": str | null, '
@@ -375,18 +380,25 @@ def build_skill_free_shell_planner_prompt(
         f"{json.dumps(script_previews, ensure_ascii=False, indent=2)}\n\n"
         "Relevant Python examples:\n"
         f"{json.dumps(python_examples, ensure_ascii=False, indent=2)}\n\n"
+        "Conservative fallback plan:\n"
+        f"{json.dumps(conservative_plan, ensure_ascii=False, indent=2)}\n\n"
         "Skill markdown excerpt:\n"
         f"{skill_md_excerpt}\n\n"
         "Rules:\n"
-        "1. Prefer reusing shipped skill scripts when possible.\n"
-        "2. If the docs only provide Python examples, you may convert them into generated_files and run them.\n"
+        "1. Prefer reusing shipped skill scripts when they already match the task, but you may produce a richer free-shell plan than the conservative fallback when the user intent is more complex.\n"
+        "2. If the docs provide Python examples, especially many examples, you may convert or combine them into generated_files and then execute a generated entrypoint.\n"
         "3. Generated files must stay under a relative workspace path such as .skill_generated/.\n"
-        "4. Match the command to the declared runtime target instead of the host machine you are running on.\n"
-        "5. The command may use pipelines, chaining, and shell features when justified by the task.\n"
-        "6. Respect runtime_target.network_allowed=false by avoiding downloads, package installs, or external network calls unless the task explicitly depends on network access and you therefore return manual_required.\n"
-        "7. Respect runtime_target.supports_python=false by avoiding generated Python scripts in that case.\n"
-        "8. Do not claim success; only return the plan.\n"
-        "9. If required inputs, credentials, or environment details are missing, return manual_required.\n"
+        "4. When you return generated_files, you may omit command and instead set entrypoint plus optional cli_args. The runtime can materialize the execution command from that entrypoint.\n"
+        "5. If multiple generated files are needed, make one generated file the clear executable entrypoint and put its path in entrypoint.\n"
+        "6. Match the command to the declared runtime target instead of the host machine you are running on.\n"
+        "7. The command may use pipelines, chaining, and shell features when justified by the task.\n"
+        "8. Respect runtime_target.network_allowed=false by avoiding downloads, package installs, or external network calls unless the task explicitly depends on network access and you therefore return manual_required.\n"
+        "9. Respect runtime_target.supports_python=false by avoiding generated Python scripts in that case.\n"
+        "10. If the task needs dependency setup before the main command can run, return bootstrap_commands for that setup and explain the need in bootstrap_reason.\n"
+        "11. For Python package bootstrap, prefer workspace-local commands such as python -m pip install --target ./.skill_bootstrap/site-packages <packages> instead of mutating global environments.\n"
+        "12. When the Python logic is longer than a short one-liner, prefer generated_files plus an entrypoint over python -c.\n"
+        "13. Do not claim success; only return the plan.\n"
+        "14. If required inputs, credentials, or environment details are missing, return manual_required.\n"
         "Keep JSON valid and do not include markdown fences."
     )
     return system_prompt, user_prompt

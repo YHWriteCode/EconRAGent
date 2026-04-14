@@ -294,6 +294,70 @@ async def test_runtime_service_can_execute_generated_script_from_command_plan(
 
 
 @pytest.mark.asyncio
+async def test_runtime_service_can_execute_multi_file_generated_bundle_via_entrypoint(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    result = await module.run_skill_task(
+        skill_name="pdf",
+        goal="Run a generated multi-file helper bundle",
+        user_query="write helper files first and then execute the generated entrypoint",
+        constraints={"shell_mode": "free_shell"},
+        wait_for_completion=True,
+        command_plan={
+            "skill_name": "pdf",
+            "goal": "Run a generated multi-file helper bundle",
+            "user_query": "write helper files first and then execute the generated entrypoint",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {"shell_mode": "free_shell"},
+            "command": None,
+            "mode": "generated_script",
+            "shell_mode": "free_shell",
+            "entrypoint": ".skill_generated/main.py",
+            "rationale": "Execute the generated main entrypoint after writing helper files.",
+            "generated_files": [
+                {
+                    "path": ".skill_generated/helpers.py",
+                    "content": (
+                        "from pathlib import Path\n"
+                        "def write_output():\n"
+                        "    Path('bundle.txt').write_text('bundle ok', encoding='utf-8')\n"
+                        "    return 'bundle ok'\n"
+                    ),
+                    "description": "Helper module",
+                },
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": (
+                        "from helpers import write_output\n"
+                        "print(write_output())\n"
+                    ),
+                    "description": "Generated entrypoint",
+                },
+            ],
+            "cli_args": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "free_shell", "required_tools": ["python"]},
+        },
+    )
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    assert result["command_plan"]["entrypoint"] == ".skill_generated/main.py"
+    assert (Path(result["workspace"]) / "bundle.txt").read_text(encoding="utf-8") == "bundle ok"
+
+
+@pytest.mark.asyncio
 async def test_runtime_service_starts_background_run_and_reports_running_status(
     tmp_path: Path,
     monkeypatch,
@@ -739,6 +803,74 @@ async def test_runtime_service_preflight_fails_when_required_tools_are_missing(
 
 
 @pytest.mark.asyncio
+async def test_runtime_service_bootstraps_missing_tool_before_execution(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    result = await module.run_skill_task(
+        skill_name="pdf",
+        goal="Bootstrap a local helper tool before execution",
+        user_query="free shell mode",
+        constraints={"shell_mode": "free_shell"},
+        wait_for_completion=True,
+        command_plan={
+            "skill_name": "pdf",
+            "goal": "Bootstrap a local helper tool before execution",
+            "user_query": "free shell mode",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {"shell_mode": "free_shell"},
+            "command": "tool-from-bootstrap",
+            "mode": "free_shell",
+            "shell_mode": "free_shell",
+            "rationale": "Create a local helper tool first, then execute it.",
+            "generated_files": [],
+                "bootstrap_commands": [
+                    (
+                        "python -c \"from pathlib import Path; import os; "
+                        "bootstrap_bin=Path(os.environ['SKILL_BOOTSTRAP_BIN']); "
+                        "bootstrap_bin.mkdir(parents=True, exist_ok=True); "
+                        "target=bootstrap_bin/'tool-from-bootstrap.cmd'; "
+                        "target.write_text('@echo off\\r\\necho bootstrapped tool>bootstrap.txt\\r\\n', encoding='utf-8')\""
+                    )
+                ],
+            "bootstrap_reason": "Provision a workspace-local command shim before execution.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "free_shell", "required_tools": ["tool-from-bootstrap"]},
+        },
+    )
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    assert result["bootstrap_attempted"] is True
+    assert result["bootstrap_succeeded"] is True
+    assert result["bootstrap_attempt_count"] == 1
+    assert result["bootstrap_attempt_limit"] >= 1
+    assert len(result["bootstrap_history"]) == 1
+    assert result["bootstrap_history"][0]["success"] is True
+    assert (Path(result["workspace"]) / "bootstrap.txt").read_text(encoding="utf-8").strip() == (
+        "bootstrapped tool"
+    )
+
+    status = module.get_run_status(result["run_id"])
+    logs = module.get_run_logs(result["run_id"])
+    artifacts = module.get_run_artifacts(result["run_id"])
+    assert status["bootstrap_attempt_count"] == 1
+    assert logs["bootstrap_attempt_count"] == 1
+    assert artifacts["bootstrap_attempt_count"] == 1
+    assert any(item.get("path") == "bootstrap.txt" for item in artifacts["artifacts"])
+
+
+@pytest.mark.asyncio
 async def test_runtime_service_preflight_checks_generated_python_syntax(
     tmp_path: Path,
     monkeypatch,
@@ -844,8 +976,190 @@ async def test_runtime_service_repairs_failed_free_shell_execution_successfully(
     assert result["run_status"] == "completed"
     assert result["repair_attempted"] is True
     assert result["repair_succeeded"] is True
+    assert result["repair_attempt_count"] == 1
+    assert result["repair_attempt_limit"] >= 1
+    assert len(result["repair_history"]) == 1
+    assert result["repair_history"][0]["stage"] == "execution"
     assert result["repaired_from_run_id"].endswith(":attempt-1")
     assert (Path(result["workspace"]) / "repaired.txt").read_text(encoding="utf-8") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_can_repair_failed_free_shell_preflight_before_execution(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    repair_llm = _StubLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/main.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": (
+                        "from pathlib import Path\n"
+                        "Path('preflight-repaired.txt').write_text('ok', encoding='utf-8')\n"
+                        "print('preflight repaired')\n"
+                    ),
+                    "description": "Fixed entry script.",
+                }
+            ],
+            "rationale": "Replace the invalid generated helper with a valid script bundle.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python"],
+            "warnings": [],
+        }
+    )
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", repair_llm)
+
+    result = await module.run_skill_task(
+        skill_name="pdf",
+        goal="Repair a generated script before execution",
+        user_query="free shell mode",
+        constraints={"shell_mode": "free_shell"},
+        wait_for_completion=True,
+        command_plan={
+            "skill_name": "pdf",
+            "goal": "Repair a generated script before execution",
+            "user_query": "free shell mode",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {"shell_mode": "free_shell"},
+            "command": None,
+            "mode": "generated_script",
+            "shell_mode": "free_shell",
+            "entrypoint": ".skill_generated/main.py",
+            "rationale": "Fail preflight first, then repair.",
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": "def broken(:\n    pass\n",
+                    "description": "Broken helper",
+                }
+            ],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "free_shell", "required_tools": ["python"]},
+        },
+    )
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    assert result["repair_attempted"] is True
+    assert result["repair_attempt_count"] == 1
+    assert result["repair_history"][0]["stage"] == "preflight"
+    assert (Path(result["workspace"]) / "preflight-repaired.txt").read_text(
+        encoding="utf-8"
+    ) == "ok"
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_can_complete_after_multiple_free_shell_repairs(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    repair_llm = _StubLLM(
+        [
+            {
+                "mode": "free_shell",
+                "command": "python -c \"import sys; print('still bad'); sys.exit(2)\"",
+                "generated_files": [],
+                "rationale": "First repair still fails.",
+                "missing_fields": [],
+                "failure_reason": None,
+                "required_tools": ["python"],
+                "warnings": [],
+            },
+            {
+                "mode": "generated_script",
+                "command": None,
+                "entrypoint": ".skill_generated/main.py",
+                "cli_args": [],
+                "generated_files": [
+                    {
+                        "path": ".skill_generated/main.py",
+                        "content": (
+                            "from pathlib import Path\n"
+                            "Path('final-repaired.txt').write_text('ok', encoding='utf-8')\n"
+                            "print('final repair worked')\n"
+                        ),
+                        "description": "Working repair entrypoint.",
+                    }
+                ],
+                "rationale": "Second repair writes a real helper script and succeeds.",
+                "missing_fields": [],
+                "failure_reason": None,
+                "required_tools": ["python"],
+                "warnings": [],
+            },
+        ]
+    )
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", repair_llm)
+
+    result = await module.run_skill_task(
+        skill_name="pdf",
+        goal="Repair a failed free shell command more than once",
+        user_query="free shell mode",
+        constraints={"shell_mode": "free_shell"},
+        wait_for_completion=True,
+        command_plan={
+            "skill_name": "pdf",
+            "goal": "Repair a failed free shell command more than once",
+            "user_query": "free shell mode",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {"shell_mode": "free_shell"},
+            "command": "python -c \"import sys; print('boom'); sys.exit(1)\"",
+            "mode": "free_shell",
+            "shell_mode": "free_shell",
+            "rationale": "Fail first, fail once more, then repair.",
+            "generated_files": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "free_shell", "required_tools": ["python"]},
+        },
+    )
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    assert result["repair_attempted"] is True
+    assert result["repair_succeeded"] is True
+    assert result["repair_attempt_count"] == 2
+    assert result["repair_attempt_limit"] >= 2
+    assert [item["stage"] for item in result["repair_history"]] == [
+        "execution",
+        "execution",
+    ]
+    assert result["repair_history"][0]["snapshot_run_id"].endswith(":attempt-1")
+    assert result["repair_history"][1]["snapshot_run_id"].endswith(":attempt-2")
+    assert (Path(result["workspace"]) / "final-repaired.txt").read_text(
+        encoding="utf-8"
+    ) == "ok"
+
+    status = module.get_run_status(result["run_id"])
+    logs = module.get_run_logs(result["run_id"])
+    artifacts = module.get_run_artifacts(result["run_id"])
+    assert status["repair_attempt_count"] == 2
+    assert logs["repair_attempt_count"] == 2
+    assert artifacts["repair_attempt_count"] == 2
+    assert len(status["repair_history"]) == 2
 
 
 @pytest.mark.asyncio
@@ -902,4 +1216,6 @@ async def test_runtime_service_reports_failed_repair_attempt(
     assert result["run_status"] == "failed"
     assert result["repair_attempted"] is True
     assert result["repair_succeeded"] is False
+    assert result["repair_attempt_count"] >= 1
+    assert len(result["repair_history"]) >= 1
     assert result["repaired_from_run_id"].endswith(":attempt-1")

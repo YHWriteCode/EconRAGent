@@ -164,7 +164,29 @@ DRY_RUN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 FREE_SHELL_PATTERN = re.compile(
-    r"(\u81ea\u7531\s*shell|\u81ea\u7531\u6a21\u5f0f|free\s+shell|shell\s+agent)",
+    r"("
+    r"\u81ea\u7531\s*shell|"
+    r"\u81ea\u7531\u6a21\u5f0f|"
+    r"\u590d\u6742\u547d\u4ee4|"
+    r"\u547d\u4ee4\u94fe|"
+    r"free\s+shell|"
+    r"shell\s+agent|"
+    r"complex\s+(?:shell|command)|"
+    r"command\s+chain|"
+    r"chain\s+commands|"
+    r"pipeline"
+    r")",
+    re.IGNORECASE,
+)
+GENERATED_SCRIPT_PATTERN = re.compile(
+    r"("
+    r"\u5148\u5199\u811a\u672c\u518d\u6267\u884c|"
+    r"\u5148\u751f\u6210\u811a\u672c|"
+    r"\u5199(?:\u4e00\u4e2a|\u4e2a)?(?:helper|python)?\s*\u811a\u672c|"
+    r"write(?: a| the)? (?:helper |python )?script|"
+    r"generate(?: a| the)? (?:helper |python )?script|"
+    r"script first|helper script"
+    r")",
     re.IGNORECASE,
 )
 CONSERVATIVE_SHELL_PATTERN = re.compile(
@@ -1257,7 +1279,9 @@ class RouteJudge:
 
     @staticmethod
     def _extract_shell_mode_hint(query: str) -> str | None:
-        if FREE_SHELL_PATTERN.search(query or ""):
+        if FREE_SHELL_PATTERN.search(query or "") or GENERATED_SCRIPT_PATTERN.search(
+            query or ""
+        ):
             return "free_shell"
         if CONSERVATIVE_SHELL_PATTERN.search(query or ""):
             return "conservative"
