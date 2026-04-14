@@ -1,2 +1,1 @@
-# FAA
-a finance analysis assistant
+《基于动态知识图谱增强RAG的经济领域智能体系统》

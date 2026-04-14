@@ -527,6 +527,8 @@ Runtime execution
 - `manual_required` is the canonical “cannot safely auto-run yet” state; legacy `status="needs_shell_command"` is only one compatibility surface for it
 - Live shell execution now uses a **durable queue-worker model** inside `mcp-server/server.py`: runtime-backed `run_skill_task` persists the run record plus worker job context to SQLite, ensures an independent queue-worker process is available, and returns `run_status="running"` once preflight passes
 - Durable queue progress is surfaced through `runtime.queue_state` (`queued`, `claimed`, `executing`, `cancelling`, terminal states), while the public lifecycle contract still uses canonical `run_status`
+- The durable queue now also tracks lease/attempt metadata in `runtime`: `lease_owner`, `lease_expires_at`, `attempt_count`, and `max_attempts`
+- Queue workers are now configurable as a small local pool via `MCP_QUEUE_WORKER_CONCURRENCY`; stale claimed/executing runs may be re-queued until `max_attempts` is exhausted, after which the run terminates as `worker_lost`
 - Running shell tasks now update `stdout` / `stderr` incrementally in the durable SQLite-backed run store, and the runtime also refreshes visible workspace artifacts while the task is still running
 - Runtime-backed shell runs can now be cancelled through `cancel_skill_run(run_id)`; cancellation marks the durable run row, terminates the active shell process when possible, and resolves to canonical `run_status="failed"` with `failure_reason="cancelled"` plus `cancel_requested=true`
 - For blocking or test-oriented flows, callers can still request synchronous completion with `wait_for_completion=true` (or `constraints.wait_for_completion=true`)
@@ -790,6 +792,9 @@ Optional lightweight utility model for internal routing/explanation work:
 | `KG_AGENT_SKILL_TARGET_NETWORK_ALLOWED` | `false` | Whether free-shell planning may assume outbound network access by default |
 | `KG_AGENT_SKILL_TARGET_SUPPORTS_PYTHON` | `true` | Whether the default runtime target may execute Python or generated Python helpers |
 | `MCP_RUN_STORE_SQLITE_PATH` | `${MCP_WORKSPACE_DIR}/skill_runtime_runs.sqlite3` | SQLite file used by the durable skill-runtime queue/store inside `mcp-server/server.py` |
+| `MCP_QUEUE_WORKER_CONCURRENCY` | `1` | Number of local queue-worker processes the runtime tries to keep available for durable shell runs |
+| `MCP_QUEUE_LEASE_TIMEOUT_S` | `45` | Lease expiration window used for claimed/executing durable shell runs |
+| `MCP_QUEUE_MAX_ATTEMPTS` | `2` | Maximum durable worker execution attempts before a stale/lost run becomes terminal `worker_lost` |
 | `KG_AGENT_MAX_ITERATIONS` | `3` | Maximum tool invocation rounds |
 | `KG_AGENT_ROUTE_JUDGE_PROMPT_VERSION` | `v1` | Version key for Route Judge LLM refinement prompt templates |
 | `KG_AGENT_MEMORY_WINDOW_TURNS` | `6` | Maximum number of conversation turns considered for the dynamic attention window |
@@ -1009,7 +1014,7 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
   - Explicit skill invocation remains on the skill plane; it does not go through `CapabilityRegistry`
 - `GET /agent/skill-runs/{run_id}`
   - Returns lifecycle state for one runtime-backed skill run
-  - Payload includes canonical `run_status`, compatibility `status`, `command_plan`, `command`, `shell_mode`, `runtime_target`, runtime delivery metadata, `preflight`, repair metadata, cancellation metadata, timing fields, exit code, and failure reason when available
+  - Payload includes canonical `run_status`, compatibility `status`, `command_plan`, `command`, `shell_mode`, `runtime_target`, runtime delivery metadata (including queue state / lease / attempts), `preflight`, repair metadata, cancellation metadata, timing fields, exit code, and failure reason when available
 - `POST /agent/skill-runs/{run_id}/cancel`
   - Requests cancellation for one runtime-backed skill run through the skill runtime client
   - For the current durable-worker shell runtime, this marks the SQLite-backed run row as cancel-requested, attempts to kill the active shell subprocess, and then returns the updated run status payload
@@ -1246,9 +1251,11 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 - **Configured `external_mcp` capabilities are hidden from auto-routing by default**; they execute correctly when explicitly invoked, and the Route Judge only sees them when `planner_exposed=true`
 - **Local skill execution is now architecturally separate from MCP and oriented around shell execution inside an isolated runtime**, but the default runtime is still conservative; `SkillExecutor` now has an explicit command-planning stage and canonical `run_status`, but it still does not implement a full free-form shell agent, dependency installation lifecycle, or multi-step planner-to-command synthesis
 - **Compatibility `status` is still exposed at the API / MCP boundary** for old clients (`manual_required -> needs_shell_command`), but internal logic must treat canonical `run_status` as the only source of truth
-- **Runtime-backed shell runs now use an independent queue-worker process plus a SQLite-backed durable queue/store**, so queued/running state and live-polled logs/artifacts survive MCP server restarts as long as the SQLite file remains available and a queue worker can be relaunched
-- **Skill runtime run persistence is now SQLite-backed inside `mcp-server/server.py`**, but it is still local-file durability only; there is no distributed queue, multi-node worker pool, or conversation-memory linkage yet
-- **Running shell tasks now expose incremental polled logs/artifacts and explicit cancellation through the durable store**, but this is still polling rather than SSE log streaming or a richer external job-control plane
+- **Runtime-backed shell runs now use an independent queue-worker process plus a SQLite-backed durable queue/store**, so queued/running state and live-polled logs/artifacts survive MCP server restarts as long as the SQLite file remains available and queue workers can be relaunched
+- **Skill runtime run persistence is now SQLite-backed inside `mcp-server/server.py`**, but it is still local-file durability only; there is no distributed queue, multi-node worker pool, or conversation-memory linkage yet. Replacing it with a shared Redis/Postgres-style durable queue remains an explicit lower-priority TODO after the current local-runtime hardening work
+- **Queue workers are still local process-pool workers on one host**; there is no cross-node worker coordination yet
+- **`worker_lost` recovery intentionally stops at bounded requeue via `max_attempts`**; there is still no richer backoff policy or dead-letter queue flow
+- **Running shell tasks now expose incremental polled logs/artifacts and explicit cancellation through the durable store**, with local lease/attempt bookkeeping and limited requeue on worker loss, but this is still polling rather than SSE log streaming or a richer external job-control plane
 - **The new `free_shell` repair loop is intentionally bounded to one retry**; there is still no multi-step autonomous shell agent loop or dependency bootstrap/install lifecycle
 - **`mcp-server/server.py` no longer owns a duplicate free-shell planner**, but compatibility wrappers such as `read_skill_docs` / `execute_skill_script` still exist for older callers
 - **Legacy script-level skill helper APIs still exist as a compatibility layer**; `read_skill_docs` / `execute_skill_script` and related binding transforms remain for old flows, but they are no longer the planner's primary skill surface

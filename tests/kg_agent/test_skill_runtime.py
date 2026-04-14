@@ -166,6 +166,8 @@ async def test_agent_core_can_fetch_skill_run_status_via_mcp_runtime_transport()
     assert status["shell_mode"] == "conservative"
     assert status["runtime_target"]["platform"] == "linux"
     assert status["runtime"]["delivery"] == "durable_worker"
+    assert status["runtime"]["log_streaming"] is False
+    assert status["runtime"]["log_transport"] == "poll"
     assert status["preflight"]["ok"] is True
     assert status["command_plan"]["mode"] == "explicit"
 
@@ -212,3 +214,4 @@ async def test_agent_core_can_cancel_skill_run_via_mcp_runtime_transport():
     assert status["failure_reason"] == "cancelled"
     assert status["cancel_requested"] is True
     assert status["runtime"]["delivery"] == "durable_worker"
+    assert status["runtime"]["log_transport"] == "poll"

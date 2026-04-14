@@ -119,8 +119,11 @@ def _build_completed_payload(*, arguments: dict, run_id: str) -> dict:
             "delivery": "durable_worker",
             "queue_state": "completed",
             "store_backend": "sqlite",
+            "attempt_count": 1,
+            "max_attempts": 2,
             "cancel_supported": True,
-            "log_streaming": True,
+            "log_streaming": False,
+            "log_transport": "poll",
         },
         "artifacts": [{"path": "report.md", "size_bytes": 128}],
         "logs_preview": {

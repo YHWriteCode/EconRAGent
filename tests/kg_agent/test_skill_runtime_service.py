@@ -312,6 +312,8 @@ async def test_runtime_service_starts_background_run_and_reports_running_status(
     assert result["status"] == "running"
     assert result["finished_at"] is None
     assert result["runtime"]["delivery"] == "durable_worker"
+    assert result["runtime"]["log_streaming"] is False
+    assert result["runtime"]["log_transport"] == "poll"
     assert result["logs"]["stdout"] == ""
     assert result["artifacts"] == []
 
@@ -322,6 +324,7 @@ async def test_runtime_service_starts_background_run_and_reports_running_status(
     assert status["run_status"] == "completed"
     assert logs["run_status"] == "completed"
     assert artifacts["run_status"] == "completed"
+    assert logs["runtime"]["log_transport"] == "poll"
     assert logs["stdout"]
     assert artifacts["artifacts"][0]["path"] == "report.md"
 
@@ -354,6 +357,182 @@ async def test_runtime_service_persists_run_state_outside_in_memory_cache(
     assert final_status["run_status"] == "completed"
     assert final_logs["run_status"] == "completed"
     assert final_logs["runtime"]["store_backend"] == "sqlite"
+
+
+def test_runtime_service_respects_queue_worker_concurrency(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MCP_QUEUE_WORKER_CONCURRENCY", "3")
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    class _FakeProcess:
+        def __init__(self, pid: int):
+            self.pid = pid
+
+        def poll(self):
+            return None
+
+    spawned = [3101, 3102, 3103]
+
+    def _fake_spawn():
+        return _FakeProcess(spawned.pop(0))
+
+    module.QUEUE_WORKER_PROCESSES.clear()
+    monkeypatch.setattr(module, "_spawn_queue_worker_process", _fake_spawn)
+
+    worker_pids = module._ensure_queue_worker_processes()
+
+    assert worker_pids == [3101, 3102, 3103]
+    assert sorted(module.QUEUE_WORKER_PROCESSES) == [3101, 3102, 3103]
+
+
+def _insert_stale_runtime_row(
+    module,
+    *,
+    run_id: str,
+    queue_state: str,
+    attempt_count: int,
+    max_attempts: int,
+):
+    record = {
+        "run_id": run_id,
+        "skill_name": "example-skill",
+        "run_status": "running",
+        "status": "running",
+        "success": True,
+        "summary": "stale worker test",
+        "command": "python -c \"print('x')\"",
+        "shell_mode": "conservative",
+        "runtime_target": {
+            "platform": "linux",
+            "shell": "/bin/sh",
+            "workspace_root": "/workspace",
+            "workdir": "/workspace",
+            "network_allowed": False,
+            "supports_python": True,
+        },
+        "workspace": str((Path(module.WORKSPACE_ROOT) / run_id).resolve()),
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "finished_at": None,
+        "failure_reason": None,
+        "command_plan": {
+            "skill_name": "example-skill",
+            "goal": "stale worker",
+            "user_query": "stale worker",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {},
+            "command": "python -c \"print('x')\"",
+            "mode": "explicit",
+            "shell_mode": "conservative",
+            "rationale": "stale worker test",
+            "entrypoint": None,
+            "cli_args": [],
+            "generated_files": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {},
+        },
+        "runtime": {
+            "executor": "shell",
+            "delivery": "durable_worker",
+            "queue_state": queue_state,
+            "store_backend": "sqlite",
+            "attempt_count": attempt_count,
+            "max_attempts": max_attempts,
+        },
+        "execution_mode": "shell",
+        "preflight": {"ok": True, "status": "ok", "failure_reason": None},
+        "repair_attempted": False,
+        "repair_succeeded": False,
+        "repaired_from_run_id": None,
+        "cancel_requested": False,
+        "logs": {"stdout": "", "stderr": ""},
+        "artifacts": [],
+    }
+    module._upsert_run_row(
+        run_id=run_id,
+        record=record,
+        job_context={"skill_name": "example-skill"},
+        queue_state=queue_state,
+        worker_pid=999998,
+        active_process_pid=999999,
+        cancel_requested=False,
+        lease_owner="pid:999998",
+        lease_expires_at="2020-01-01T00:00:00+00:00",
+        attempt_count=attempt_count,
+        max_attempts=max_attempts,
+        heartbeat=True,
+    )
+    with module._run_store_connect() as conn:
+        conn.execute(
+            """
+            UPDATE skill_runs
+            SET heartbeat_at = ?, lease_expires_at = ?, updated_at = ?
+            WHERE run_id = ?
+            """,
+            (
+                "2020-01-01T00:00:00+00:00",
+                "2020-01-01T00:00:00+00:00",
+                "2020-01-01T00:00:00+00:00",
+                run_id,
+            ),
+        )
+
+
+def test_runtime_service_requeues_worker_lost_run_before_max_attempts(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module, "_ensure_queue_worker_processes", lambda: [])
+    run_id = f"skill-run-{uuid.uuid4().hex}"
+    _insert_stale_runtime_row(
+        module,
+        run_id=run_id,
+        queue_state="executing",
+        attempt_count=1,
+        max_attempts=2,
+    )
+
+    status = module.get_run_status(run_id)
+
+    assert status["run_status"] == "running"
+    assert status["failure_reason"] is None
+    assert status["runtime"]["queue_state"] == "queued"
+    assert status["runtime"]["attempt_count"] == 1
+    assert status["runtime"]["max_attempts"] == 2
+
+
+def test_runtime_service_marks_worker_lost_after_max_attempts(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module, "_ensure_queue_worker_processes", lambda: [])
+    run_id = f"skill-run-{uuid.uuid4().hex}"
+    _insert_stale_runtime_row(
+        module,
+        run_id=run_id,
+        queue_state="executing",
+        attempt_count=2,
+        max_attempts=2,
+    )
+
+    status = module.get_run_status(run_id)
+
+    assert status["run_status"] == "failed"
+    assert status["failure_reason"] == "worker_lost"
+    assert status["runtime"]["queue_state"] == "failed"
+    assert status["runtime"]["attempt_count"] == 2
+    assert status["runtime"]["max_attempts"] == 2
 
 
 @pytest.mark.asyncio

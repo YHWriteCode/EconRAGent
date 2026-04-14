@@ -105,6 +105,17 @@ QUEUE_WORKER_POLL_INTERVAL_S = float(
 QUEUE_WORKER_STARTUP_WAIT_S = float(
     os.environ.get("MCP_QUEUE_WORKER_STARTUP_WAIT_S", "1.5")
 )
+QUEUE_WORKER_CONCURRENCY = max(
+    1,
+    int(os.environ.get("MCP_QUEUE_WORKER_CONCURRENCY", "1")),
+)
+QUEUE_LEASE_TIMEOUT_S = float(
+    os.environ.get("MCP_QUEUE_LEASE_TIMEOUT_S", "45.0")
+)
+QUEUE_MAX_ATTEMPTS = max(
+    1,
+    int(os.environ.get("MCP_QUEUE_MAX_ATTEMPTS", "2")),
+)
 
 SKILL_RUNTIME_CONFIG = SkillRuntimeConfig.from_env()
 DEFAULT_RUNTIME_TARGET = SkillRuntimeTarget.from_dict(
@@ -161,7 +172,7 @@ LIVE_RUN_POLL_INTERVAL_S = float(
 )
 CANCEL_WAIT_TIMEOUT_S = float(os.environ.get("MCP_CANCEL_WAIT_TIMEOUT_S", "5.0"))
 RUN_STORE_DB_INITIALIZED = False
-QUEUE_WORKER_PROCESS: subprocess.Popen | None = None
+QUEUE_WORKER_PROCESSES: dict[int, subprocess.Popen] = {}
 IS_QUEUE_WORKER_PROCESS = os.environ.get("MCP_RUNTIME_ROLE", "").strip() == "queue_worker"
 
 
@@ -198,6 +209,21 @@ def _ensure_run_store_initialized() -> None:
             )
             """
         )
+        existing_columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(skill_runs)").fetchall()
+        }
+        column_definitions = {
+            "lease_owner": "TEXT",
+            "lease_expires_at": "TEXT",
+            "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+            "max_attempts": f"INTEGER NOT NULL DEFAULT {QUEUE_MAX_ATTEMPTS}",
+        }
+        for column_name, definition in column_definitions.items():
+            if column_name not in existing_columns:
+                conn.execute(
+                    f"ALTER TABLE skill_runs ADD COLUMN {column_name} {definition}"
+                )
     RUN_STORE_DB_INITIALIZED = True
 
 
@@ -208,7 +234,8 @@ def _load_run_row(run_id: str) -> sqlite3.Row | None:
             """
             SELECT run_id, record_json, job_json, queue_state, worker_pid,
                    active_process_pid, cancel_requested, created_at, updated_at,
-                   heartbeat_at
+                   heartbeat_at, lease_owner, lease_expires_at, attempt_count,
+                   max_attempts
             FROM skill_runs
             WHERE run_id = ?
             """,
@@ -226,6 +253,12 @@ def _inflate_run_record(row: sqlite3.Row) -> dict[str, Any]:
     if not str(runtime.get("delivery", "")).strip() and row["job_json"] is not None:
         runtime["delivery"] = "durable_worker"
     runtime["store_backend"] = "sqlite"
+    runtime["attempt_count"] = int(row["attempt_count"] or 0)
+    runtime["max_attempts"] = int(row["max_attempts"] or QUEUE_MAX_ATTEMPTS)
+    if row["lease_owner"] is not None:
+        runtime["lease_owner"] = str(row["lease_owner"])
+    if row["lease_expires_at"] is not None:
+        runtime["lease_expires_at"] = str(row["lease_expires_at"])
     record["runtime"] = runtime
     record["cancel_requested"] = bool(row["cancel_requested"])
     return record
@@ -249,6 +282,10 @@ def _upsert_run_row(
     worker_pid: int | None = None,
     active_process_pid: int | None = None,
     cancel_requested: bool | None = None,
+    lease_owner: str | None = None,
+    lease_expires_at: str | None = None,
+    attempt_count: int | None = None,
+    max_attempts: int | None = None,
     heartbeat: bool = False,
 ) -> None:
     _ensure_run_store_initialized()
@@ -317,6 +354,61 @@ def _upsert_run_row(
         if existing is not None and existing["job_json"] is not None
         else None
     )
+    resolved_attempt_count = (
+        int(attempt_count)
+        if attempt_count is not None
+        else int(runtime.get("attempt_count", 0))
+        if runtime.get("attempt_count") is not None
+        else int(existing["attempt_count"])
+        if existing is not None and existing["attempt_count"] is not None
+        else 0
+    )
+    resolved_max_attempts = (
+        int(max_attempts)
+        if max_attempts is not None
+        else int(runtime.get("max_attempts", QUEUE_MAX_ATTEMPTS))
+        if runtime.get("max_attempts") is not None
+        else int(existing["max_attempts"])
+        if existing is not None and existing["max_attempts"] is not None
+        else QUEUE_MAX_ATTEMPTS
+    )
+    resolved_lease_owner = (
+        lease_owner
+        if lease_owner is not None
+        else str(runtime.get("lease_owner"))
+        if runtime.get("lease_owner") is not None
+        else str(existing["lease_owner"])
+        if existing is not None and existing["lease_owner"] is not None
+        else None
+    )
+    resolved_lease_expires_at = (
+        lease_expires_at
+        if lease_expires_at is not None
+        else str(runtime.get("lease_expires_at"))
+        if runtime.get("lease_expires_at") is not None
+        else str(existing["lease_expires_at"])
+        if existing is not None and existing["lease_expires_at"] is not None
+        else None
+    )
+    if resolved_queue_state in {"claimed", "worker_starting", "executing", "cancelling"}:
+        if not resolved_lease_owner:
+            resolved_lease_owner = _lease_owner_id()
+        if not resolved_lease_expires_at or heartbeat:
+            resolved_lease_expires_at = _lease_expires_at()
+    elif resolved_queue_state in {"queued", "completed", "failed", "manual_required", "planned"}:
+        resolved_lease_owner = None
+        resolved_lease_expires_at = None
+    runtime["attempt_count"] = resolved_attempt_count
+    runtime["max_attempts"] = resolved_max_attempts
+    if resolved_lease_owner:
+        runtime["lease_owner"] = resolved_lease_owner
+    else:
+        runtime.pop("lease_owner", None)
+    if resolved_lease_expires_at:
+        runtime["lease_expires_at"] = resolved_lease_expires_at
+    else:
+        runtime.pop("lease_expires_at", None)
+    record["runtime"] = runtime
 
     RUN_STORE[run_id] = dict(record)
     with _run_store_connect() as conn:
@@ -325,9 +417,10 @@ def _upsert_run_row(
             INSERT INTO skill_runs (
                 run_id, record_json, job_json, queue_state, worker_pid,
                 active_process_pid, cancel_requested, created_at, updated_at,
-                heartbeat_at
+                heartbeat_at, lease_owner, lease_expires_at, attempt_count,
+                max_attempts
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(run_id) DO UPDATE SET
                 record_json = excluded.record_json,
                 job_json = excluded.job_json,
@@ -336,7 +429,11 @@ def _upsert_run_row(
                 active_process_pid = excluded.active_process_pid,
                 cancel_requested = excluded.cancel_requested,
                 updated_at = excluded.updated_at,
-                heartbeat_at = excluded.heartbeat_at
+                heartbeat_at = excluded.heartbeat_at,
+                lease_owner = excluded.lease_owner,
+                lease_expires_at = excluded.lease_expires_at,
+                attempt_count = excluded.attempt_count,
+                max_attempts = excluded.max_attempts
             """,
             (
                 run_id,
@@ -349,6 +446,10 @@ def _upsert_run_row(
                 created_at,
                 updated_at,
                 heartbeat_at,
+                resolved_lease_owner,
+                resolved_lease_expires_at,
+                resolved_attempt_count,
+                resolved_max_attempts,
             ),
         )
 
@@ -367,6 +468,10 @@ def _update_run_metadata(
     worker_pid: int | None = None,
     active_process_pid: int | None = None,
     cancel_requested: bool | None = None,
+    lease_owner: str | None = None,
+    lease_expires_at: str | None = None,
+    attempt_count: int | None = None,
+    max_attempts: int | None = None,
     heartbeat: bool = False,
 ) -> None:
     record = _load_run_record(run_id)
@@ -379,6 +484,10 @@ def _update_run_metadata(
         worker_pid=worker_pid,
         active_process_pid=active_process_pid,
         cancel_requested=cancel_requested,
+        lease_owner=lease_owner,
+        lease_expires_at=lease_expires_at,
+        attempt_count=attempt_count,
+        max_attempts=max_attempts,
         heartbeat=heartbeat,
     )
 
@@ -386,6 +495,28 @@ def _update_run_metadata(
 def _is_cancel_requested(run_id: str) -> bool:
     row = _load_run_row(run_id)
     return bool(row["cancel_requested"]) if row is not None else False
+
+
+def _lease_owner_id() -> str:
+    return f"pid:{os.getpid()}"
+
+
+def _lease_expires_at() -> str:
+    now_ts = datetime.now(timezone.utc).timestamp()
+    return datetime.fromtimestamp(
+        now_ts + QUEUE_LEASE_TIMEOUT_S,
+        tz=timezone.utc,
+    ).isoformat()
+
+
+def _is_lease_expired(value: str | None) -> bool:
+    if not value or not str(value).strip():
+        return False
+    try:
+        expires_at = datetime.fromisoformat(str(value))
+    except ValueError:
+        return False
+    return datetime.now(timezone.utc) >= expires_at
 
 
 def _is_process_alive(pid: int | None) -> bool:
@@ -448,14 +579,22 @@ def _spawn_queue_worker_process() -> subprocess.Popen:
     return subprocess.Popen(_queue_worker_command(), **popen_kwargs)
 
 
-def _ensure_queue_worker_process() -> int | None:
-    global QUEUE_WORKER_PROCESS
+def _reap_queue_worker_processes() -> None:
+    stale_pids = [
+        pid for pid, process in QUEUE_WORKER_PROCESSES.items() if process.poll() is not None
+    ]
+    for pid in stale_pids:
+        QUEUE_WORKER_PROCESSES.pop(pid, None)
+
+
+def _ensure_queue_worker_processes() -> list[int]:
     if IS_QUEUE_WORKER_PROCESS:
-        return os.getpid()
-    if QUEUE_WORKER_PROCESS is not None and QUEUE_WORKER_PROCESS.poll() is None:
-        return int(QUEUE_WORKER_PROCESS.pid)
-    QUEUE_WORKER_PROCESS = _spawn_queue_worker_process()
-    return int(QUEUE_WORKER_PROCESS.pid)
+        return [os.getpid()]
+    _reap_queue_worker_processes()
+    while len(QUEUE_WORKER_PROCESSES) < max(1, QUEUE_WORKER_CONCURRENCY):
+        process = _spawn_queue_worker_process()
+        QUEUE_WORKER_PROCESSES[int(process.pid)] = process
+    return sorted(QUEUE_WORKER_PROCESSES)
 
 
 def _recover_stale_queued_runs() -> None:
@@ -464,7 +603,9 @@ def _recover_stale_queued_runs() -> None:
     with _run_store_connect() as conn:
         rows = conn.execute(
             """
-            SELECT run_id, record_json, queue_state, worker_pid, active_process_pid, heartbeat_at
+            SELECT run_id, record_json, queue_state, worker_pid, active_process_pid,
+                   heartbeat_at, lease_owner, lease_expires_at, attempt_count,
+                   max_attempts
             FROM skill_runs
             WHERE queue_state IN ('worker_starting', 'claimed', 'executing', 'cancelling')
             """
@@ -472,14 +613,17 @@ def _recover_stale_queued_runs() -> None:
     for row in rows:
         queue_state = str(row["queue_state"] or "").strip()
         heartbeat_at = str(row["heartbeat_at"] or "").strip()
-        if not heartbeat_at:
-            continue
-        try:
-            heartbeat_ts = datetime.fromisoformat(heartbeat_at)
-        except ValueError:
-            continue
-        age_s = (now - heartbeat_ts).total_seconds()
-        if age_s < max(5.0, WORKER_HEARTBEAT_TIMEOUT_S):
+        age_s: float | None = None
+        if heartbeat_at:
+            try:
+                heartbeat_ts = datetime.fromisoformat(heartbeat_at)
+                age_s = (now - heartbeat_ts).total_seconds()
+            except ValueError:
+                age_s = None
+        lease_expired = _is_lease_expired(
+            str(row["lease_expires_at"] or "").strip() or None
+        )
+        if (age_s is None or age_s < max(5.0, WORKER_HEARTBEAT_TIMEOUT_S)) and not lease_expired:
             continue
         worker_pid = int(row["worker_pid"]) if row["worker_pid"] is not None else None
         active_process_pid = (
@@ -487,13 +631,22 @@ def _recover_stale_queued_runs() -> None:
         )
         worker_alive = _is_process_alive(worker_pid)
         active_alive = _is_process_alive(active_process_pid)
+        attempt_count = int(row["attempt_count"] or 0)
+        max_attempts = int(row["max_attempts"] or QUEUE_MAX_ATTEMPTS)
         record = json.loads(str(row["record_json"]))
         runtime = dict(record.get("runtime", {}))
         runtime["delivery"] = "durable_worker"
         runtime["store_backend"] = "sqlite"
+        runtime["attempt_count"] = attempt_count
+        runtime["max_attempts"] = max_attempts
         record["runtime"] = runtime
-        if queue_state in {"worker_starting", "claimed"} and not worker_alive and not active_alive:
+        should_requeue_claim = queue_state in {"worker_starting", "claimed"} and (
+            lease_expired or (not worker_alive and not active_alive)
+        )
+        if should_requeue_claim:
             runtime["queue_state"] = "queued"
+            runtime.pop("lease_owner", None)
+            runtime.pop("lease_expires_at", None)
             record["runtime"] = runtime
             record["summary"] = (
                 f"Re-queued shell task for skill '{record.get('skill_name', '')}' after stale worker claim."
@@ -505,10 +658,39 @@ def _recover_stale_queued_runs() -> None:
                 worker_pid=None,
                 active_process_pid=None,
                 cancel_requested=bool(record.get("cancel_requested", False)),
+                lease_owner=None,
+                lease_expires_at=None,
+                attempt_count=attempt_count,
+                max_attempts=max_attempts,
                 heartbeat=False,
             )
             continue
-        if queue_state in {"executing", "cancelling"} and not worker_alive and not active_alive:
+        should_recover_execution = queue_state in {"executing", "cancelling"} and (
+            not active_alive and (lease_expired or not worker_alive)
+        )
+        if should_recover_execution:
+            if attempt_count < max_attempts:
+                runtime["queue_state"] = "queued"
+                runtime.pop("lease_owner", None)
+                runtime.pop("lease_expires_at", None)
+                record["runtime"] = runtime
+                record["summary"] = (
+                    f"Re-queued shell task for skill '{record.get('skill_name', '')}' after worker loss."
+                )
+                _upsert_run_row(
+                    run_id=str(row["run_id"]),
+                    record=record,
+                    queue_state="queued",
+                    worker_pid=None,
+                    active_process_pid=None,
+                    cancel_requested=bool(record.get("cancel_requested", False)),
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    attempt_count=attempt_count,
+                    max_attempts=max_attempts,
+                    heartbeat=False,
+                )
+                continue
             record["run_status"] = "failed"
             record["status"] = "failed"
             record["success"] = False
@@ -516,6 +698,8 @@ def _recover_stale_queued_runs() -> None:
             record["failure_reason"] = "worker_lost"
             record["summary"] = f"Worker for run '{row['run_id']}' exited unexpectedly."
             runtime["queue_state"] = "failed"
+            runtime.pop("lease_owner", None)
+            runtime.pop("lease_expires_at", None)
             record["runtime"] = runtime
             _upsert_run_row(
                 run_id=str(row["run_id"]),
@@ -524,6 +708,10 @@ def _recover_stale_queued_runs() -> None:
                 worker_pid=None,
                 active_process_pid=None,
                 cancel_requested=bool(record.get("cancel_requested", False)),
+                lease_owner=None,
+                lease_expires_at=None,
+                attempt_count=attempt_count,
+                max_attempts=max_attempts,
                 heartbeat=True,
             )
 
@@ -537,22 +725,35 @@ def _claim_next_queued_run() -> str | None:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """
-            SELECT run_id
+            SELECT run_id, attempt_count, max_attempts
             FROM skill_runs
-            WHERE queue_state = 'queued'
+            WHERE queue_state = 'queued' AND attempt_count < max_attempts
             ORDER BY created_at ASC
             LIMIT 1
             """
         ).fetchone()
         if row is not None:
             claimed_run_id = str(row["run_id"])
+            next_attempt_count = int(row["attempt_count"] or 0) + 1
+            max_attempts = int(row["max_attempts"] or QUEUE_MAX_ATTEMPTS)
             conn.execute(
                 """
                 UPDATE skill_runs
-                SET queue_state = ?, worker_pid = ?, heartbeat_at = ?, updated_at = ?
+                SET queue_state = ?, worker_pid = ?, heartbeat_at = ?, updated_at = ?,
+                    lease_owner = ?, lease_expires_at = ?, attempt_count = ?, max_attempts = ?
                 WHERE run_id = ? AND queue_state = 'queued'
                 """,
-                ("claimed", os.getpid(), now, now, claimed_run_id),
+                (
+                    "claimed",
+                    os.getpid(),
+                    now,
+                    now,
+                    _lease_owner_id(),
+                    _lease_expires_at(),
+                    next_attempt_count,
+                    max_attempts,
+                    claimed_run_id,
+                ),
             )
         conn.commit()
     return claimed_run_id
@@ -569,7 +770,7 @@ def _recover_stale_running_record(run_id: str) -> dict[str, Any] | None:
 
     queue_state = str(row["queue_state"] or "").strip()
     if queue_state in {"queued", "claimed", "worker_starting"}:
-        _ensure_queue_worker_process()
+        _ensure_queue_worker_processes()
         return _load_run_record(run_id)
 
     heartbeat_at = str(row["heartbeat_at"] or "").strip()
@@ -1504,7 +1705,8 @@ def _update_live_run_record(
     runtime["delivery"] = "durable_worker"
     runtime["store_backend"] = "sqlite"
     runtime["cancel_supported"] = True
-    runtime["log_streaming"] = True
+    runtime["log_streaming"] = False
+    runtime["log_transport"] = "poll"
     if cancel_requested is not None:
         runtime["cancel_requested"] = cancel_requested
     record["runtime"] = runtime
@@ -1515,6 +1717,19 @@ def _update_live_run_record(
         cancel_requested=record.get("cancel_requested"),
         heartbeat=True,
     )
+
+
+def _durable_runtime_metadata(**extra: Any) -> dict[str, Any]:
+    runtime = {
+        "executor": "shell",
+        "delivery": "durable_worker",
+        "store_backend": "sqlite",
+        "cancel_supported": True,
+        "log_streaming": False,
+        "log_transport": "poll",
+    }
+    runtime.update(extra)
+    return runtime
 
 
 def _mark_run_cancel_requested(run_id: str) -> None:
@@ -1771,9 +1986,12 @@ async def _complete_shell_run(
         repair_succeeded = False
         repaired_from_run_id: str | None = None
 
+        execution_cancelled = bool(
+            execution.get("cancelled") or execution.get("cancel_requested")
+        )
         can_repair = (
             not execution["success"]
-            and not execution.get("cancelled")
+            and not execution_cancelled
             and command_plan.shell_mode == "free_shell"
             and command_plan.mode in {"free_shell", "generated_script"}
         )
@@ -1794,7 +2012,7 @@ async def _complete_shell_run(
                 failure_reason=("timed_out" if execution["timed_out"] else "process_failed"),
                 artifacts=execution["artifacts"],
                 logs_preview=execution["logs_preview"],
-                runtime={"executor": "shell", "delivery": "durable_worker"},
+                runtime=_durable_runtime_metadata(),
                 preflight=preflight,
                 repair_attempted=True,
             )
@@ -1874,13 +2092,16 @@ async def _complete_shell_run(
                         "artifacts": _collect_workspace_artifacts(workspace_dir),
                     }
 
+        final_cancelled = bool(
+            final_execution.get("cancelled") or final_execution.get("cancel_requested")
+        )
         final_success = bool(final_execution["success"])
         final_run_status = "completed" if final_success else "failed"
         final_failure_reason = None
         if not final_success:
             if final_preflight.get("failure_reason"):
                 final_failure_reason = final_preflight["failure_reason"]
-            elif final_execution.get("cancelled"):
+            elif final_cancelled:
                 final_failure_reason = "cancelled"
             elif final_execution.get("timed_out"):
                 final_failure_reason = "timed_out"
@@ -1896,7 +2117,7 @@ async def _complete_shell_run(
                 if final_success
                 else (
                     f"Shell execution for skill '{request.skill_name}' was cancelled."
-                    if final_execution.get("cancelled")
+                    if final_cancelled
                     else f"Shell execution for skill '{request.skill_name}' failed."
                 )
             ),
@@ -1910,12 +2131,7 @@ async def _complete_shell_run(
             failure_reason=final_failure_reason,
             artifacts=final_execution["artifacts"],
             logs_preview=final_execution["logs_preview"],
-            runtime={
-                "executor": "shell",
-                "delivery": "durable_worker",
-                "cancel_supported": True,
-                "log_streaming": True,
-            },
+            runtime=_durable_runtime_metadata(),
             preflight=final_preflight,
             repair_attempted=repair_attempted,
             repair_succeeded=repair_succeeded,
@@ -1961,13 +2177,7 @@ async def _complete_shell_run(
             finished_at=_utc_now(),
             failure_reason="runtime_internal_error",
             artifacts=_collect_workspace_artifacts(workspace_dir),
-            runtime={
-                "executor": "shell",
-                "delivery": "durable_worker",
-                "cancel_supported": True,
-                "log_streaming": True,
-                "error": str(exc),
-            },
+            runtime=_durable_runtime_metadata(error=str(exc)),
             preflight=preflight,
             cancel_requested=_is_cancel_requested(run_id),
         )
@@ -2042,7 +2252,7 @@ async def _wait_for_terminal_run_record(
     run_id: str,
     timeout_s: float,
 ) -> dict[str, Any]:
-    _ensure_queue_worker_process()
+    _ensure_queue_worker_processes()
     deadline = asyncio.get_running_loop().time() + max(1.0, timeout_s)
     while True:
         record = _recover_stale_running_record(run_id)
@@ -2136,14 +2346,11 @@ async def _run_shell_task(
             command=shell_command,
             workspace=str(workspace_dir),
             started_at=started_at,
-            runtime={
-                "executor": "shell",
-                "delivery": "durable_worker",
-                "queue_state": "queued",
-                "store_backend": "sqlite",
-                "cancel_supported": True,
-                "log_streaming": True,
-            },
+            runtime=_durable_runtime_metadata(
+                queue_state="queued",
+                attempt_count=0,
+                max_attempts=QUEUE_MAX_ATTEMPTS,
+            ),
             preflight=preflight,
             cancel_requested=False,
         )
@@ -2182,7 +2389,7 @@ async def _run_shell_task(
         )
         cleanup_workspace_here = False
         try:
-            worker_pid = _ensure_queue_worker_process()
+            worker_pids = _ensure_queue_worker_processes()
         except Exception as exc:
             failed_record = SkillRunRecord(
                 skill_name=request.skill_name,
@@ -2196,15 +2403,10 @@ async def _run_shell_task(
                 started_at=started_at,
                 finished_at=_utc_now(),
                 failure_reason="worker_start_failed",
-                runtime={
-                    "executor": "shell",
-                    "delivery": "durable_worker",
-                    "queue_state": "failed",
-                    "store_backend": "sqlite",
-                    "cancel_supported": True,
-                    "log_streaming": True,
-                    "error": str(exc),
-                },
+                runtime=_durable_runtime_metadata(
+                    queue_state="failed",
+                    error=str(exc),
+                ),
                 preflight=preflight,
             )
             failed_payload = _build_run_record_payload(
@@ -2240,8 +2442,8 @@ async def _run_shell_task(
         )
         running_payload["runtime"] = dict(running_payload.get("runtime", {}))
         running_payload["runtime"]["queue_state"] = "queued"
-        if worker_pid is not None:
-            running_payload["runtime"]["queue_worker_pid"] = worker_pid
+        if worker_pids:
+            running_payload["runtime"]["queue_worker_pids"] = worker_pids
         return running_payload
     finally:
         if cleanup_workspace_here:
@@ -2339,14 +2541,7 @@ async def _run_durable_worker(run_id: str) -> int:
             exit_code=130,
             failure_reason="cancelled",
             artifacts=_collect_workspace_artifacts(workspace_dir),
-            runtime={
-                "executor": "shell",
-                "delivery": "durable_worker",
-                "queue_state": "failed",
-                "store_backend": "sqlite",
-                "cancel_supported": True,
-                "log_streaming": True,
-            },
+            runtime=_durable_runtime_metadata(queue_state="failed"),
             preflight=preflight,
             cancel_requested=True,
         )
@@ -2894,7 +3089,7 @@ def main() -> None:
         raise SystemExit(asyncio.run(_run_queue_worker_loop()))
     if str(args.worker_run_id).strip():
         raise SystemExit(asyncio.run(_run_durable_worker(str(args.worker_run_id).strip())))
-    _ensure_queue_worker_process()
+    _ensure_queue_worker_processes()
     mcp.run()
 
 
