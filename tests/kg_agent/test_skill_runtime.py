@@ -94,8 +94,16 @@ async def test_agent_core_can_execute_skill_plan_via_mcp_runtime_transport():
     assert response.tool_calls[0]["tool"] == "skill:example-skill"
     assert response.tool_calls[0]["metadata"]["executor"] == "skill"
     assert response.tool_calls[0]["data"]["execution_mode"] == "shell"
+    assert response.tool_calls[0]["data"]["run_status"] == "running"
+    assert response.tool_calls[0]["data"]["status"] == "running"
+    assert response.tool_calls[0]["data"]["shell_mode"] == "conservative"
+    assert response.tool_calls[0]["data"]["runtime_target"]["platform"] == "linux"
+    assert response.tool_calls[0]["data"]["preflight"]["ok"] is True
+    assert response.tool_calls[0]["data"]["repair_attempted"] is False
     assert response.tool_calls[0]["data"]["runtime"]["executor"] == "mcp"
     assert response.tool_calls[0]["data"]["runtime"]["server"] == "skill-runtime"
+    assert response.tool_calls[0]["data"]["runtime"]["status_tool_name"] == "get_run_status"
+    assert response.tool_calls[0]["data"]["runtime"]["cancel_tool_name"] == "cancel_skill_run"
     assert response.tool_calls[0]["data"]["runtime"]["logs_tool_name"] == "get_run_logs"
     assert response.tool_calls[0]["data"]["runtime"]["artifacts_tool_name"] == (
         "get_run_artifacts"
@@ -104,8 +112,9 @@ async def test_agent_core_can_execute_skill_plan_via_mcp_runtime_transport():
     assert response.tool_calls[0]["data"]["command"] == (
         "python scripts/run_report.py --topic 'example' --notes 'runtime test'"
     )
-    assert response.tool_calls[0]["data"]["artifacts"][0]["path"] == "report.md"
-    assert response.tool_calls[0]["data"]["logs_preview"]["stdout"] == "report generated"
+    assert response.tool_calls[0]["data"]["command_plan"]["mode"] == "explicit"
+    assert response.tool_calls[0]["data"]["artifacts"] == []
+    assert response.tool_calls[0]["data"]["logs_preview"]["stdout"] == ""
     assert response.tool_calls[0]["data"]["runtime_result"]["echo"]["skill_name"] == (
         "example-skill"
     )
@@ -113,3 +122,93 @@ async def test_agent_core_can_execute_skill_plan_via_mcp_runtime_transport():
         response.tool_calls[0]["data"]["runtime_result"]["echo"]["constraints"]["shell_command"]
         == "python scripts/run_report.py --topic 'example' --notes 'runtime test'"
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_core_can_fetch_skill_run_status_via_mcp_runtime_transport():
+    fixture_path = (
+        Path(__file__).resolve().parent / "fixtures" / "fake_skill_runtime_server.py"
+    )
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False),
+        mcp=MCPConfig(
+            servers=[
+                MCPServerConfig(
+                    name="skill-runtime",
+                    command=sys.executable,
+                    args=[str(fixture_path)],
+                    startup_timeout_s=5.0,
+                    tool_timeout_s=5.0,
+                    discover_tools=False,
+                )
+            ],
+            capabilities=[],
+        ),
+        skill_runtime=SkillRuntimeConfig(server="skill-runtime"),
+        runtime=AgentRuntimeConfig(default_workspace="", max_iterations=1),
+    )
+    adapter = MCPAdapter(config.mcp)
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=config,
+        mcp_adapter=adapter,
+    )
+
+    try:
+        status = await agent.get_skill_run_status(run_id="skill-run-123")
+    finally:
+        await adapter.close()
+
+    assert status["run_id"] == "skill-run-123"
+    assert status["run_status"] == "completed"
+    assert status["status"] == "completed"
+    assert status["shell_mode"] == "conservative"
+    assert status["runtime_target"]["platform"] == "linux"
+    assert status["runtime"]["delivery"] == "durable_worker"
+    assert status["preflight"]["ok"] is True
+    assert status["command_plan"]["mode"] == "explicit"
+
+
+@pytest.mark.asyncio
+async def test_agent_core_can_cancel_skill_run_via_mcp_runtime_transport():
+    fixture_path = (
+        Path(__file__).resolve().parent / "fixtures" / "fake_skill_runtime_server.py"
+    )
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False),
+        mcp=MCPConfig(
+            servers=[
+                MCPServerConfig(
+                    name="skill-runtime",
+                    command=sys.executable,
+                    args=[str(fixture_path)],
+                    startup_timeout_s=5.0,
+                    tool_timeout_s=5.0,
+                    discover_tools=False,
+                )
+            ],
+            capabilities=[],
+        ),
+        skill_runtime=SkillRuntimeConfig(server="skill-runtime"),
+        runtime=AgentRuntimeConfig(default_workspace="", max_iterations=1),
+    )
+    adapter = MCPAdapter(config.mcp)
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=config,
+        mcp_adapter=adapter,
+    )
+
+    try:
+        status = await agent.cancel_skill_run(run_id="skill-run-123")
+    finally:
+        await adapter.close()
+
+    assert status["run_id"] == "skill-run-123"
+    assert status["run_status"] == "failed"
+    assert status["status"] == "failed"
+    assert status["failure_reason"] == "cancelled"
+    assert status["cancel_requested"] is True
+    assert status["runtime"]["delivery"] == "durable_worker"

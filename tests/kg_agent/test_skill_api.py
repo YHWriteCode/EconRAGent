@@ -136,6 +136,10 @@ def test_skill_endpoints_list_read_file_and_invoke(tmp_path: Path):
     assert invoke_payload["skill"]["name"] == "xlsx-automation"
     assert invoke_payload["result"]["tool"] == "skill:xlsx-automation"
     assert invoke_payload["result"]["success"] is True
+    assert invoke_payload["result"]["data"]["run_status"] == "planned"
+    assert invoke_payload["result"]["data"]["status"] == "planned"
+    assert invoke_payload["result"]["data"]["command_plan"]["mode"] == "inferred"
+    assert invoke_payload["result"]["data"]["runtime_target"]["platform"] == "linux"
     assert invoke_payload["result"]["data"]["workspace"] == "finance"
     assert invoke_payload["metadata"]["kind"] == "skill"
     assert invoke_payload["metadata"]["executor"] == "skill"
@@ -164,6 +168,7 @@ def test_skill_run_endpoints_return_logs_and_artifacts(tmp_path: Path):
             },
         )
         run_id = invoke_response.json()["result"]["data"]["run_id"]
+        status_response = client.get(f"/agent/skill-runs/{run_id}")
         logs_response = client.get(f"/agent/skill-runs/{run_id}/logs")
         artifacts_response = client.get(f"/agent/skill-runs/{run_id}/artifacts")
 
@@ -171,25 +176,87 @@ def test_skill_run_endpoints_return_logs_and_artifacts(tmp_path: Path):
     invoke_payload = invoke_response.json()
     assert invoke_payload["result"]["data"]["execution_mode"] == "shell"
     assert invoke_payload["result"]["data"]["run_id"] == "skill-run-123"
+    assert invoke_payload["result"]["data"]["run_status"] == "running"
+    assert invoke_payload["result"]["data"]["status"] == "running"
+    assert invoke_payload["result"]["data"]["command_plan"]["mode"] == "explicit"
+    assert invoke_payload["result"]["data"]["shell_mode"] == "conservative"
+    assert invoke_payload["result"]["data"]["runtime_target"]["platform"] == "linux"
+    assert invoke_payload["result"]["data"]["preflight"]["ok"] is True
+
+    assert status_response.status_code == 200
+    status_payload = status_response.json()
+    assert status_payload["run_id"] == "skill-run-123"
+    assert status_payload["run_status"] == "completed"
+    assert status_payload["status"] == "completed"
+    assert status_payload["shell_mode"] == "conservative"
+    assert status_payload["runtime_target"]["platform"] == "linux"
+    assert status_payload["runtime"]["delivery"] == "durable_worker"
+    assert status_payload["preflight"]["ok"] is True
+    assert status_payload["command_plan"]["mode"] == "explicit"
+    assert status_payload["cancel_requested"] is False
 
     assert logs_response.status_code == 200
     logs_payload = logs_response.json()
     assert logs_payload["run_id"] == "skill-run-123"
+    assert logs_payload["run_status"] == "completed"
+    assert logs_payload["shell_mode"] == "conservative"
+    assert logs_payload["runtime_target"]["platform"] == "linux"
+    assert logs_payload["runtime"]["delivery"] == "durable_worker"
+    assert logs_payload["preflight"]["ok"] is True
     assert logs_payload["stdout"] == "report generated"
     assert logs_payload["success"] is True
+    assert logs_payload["cancel_requested"] is False
 
     assert artifacts_response.status_code == 200
     artifacts_payload = artifacts_response.json()
     assert artifacts_payload["run_id"] == "skill-run-123"
+    assert artifacts_payload["run_status"] == "completed"
+    assert artifacts_payload["shell_mode"] == "conservative"
+    assert artifacts_payload["runtime_target"]["platform"] == "linux"
+    assert artifacts_payload["runtime"]["delivery"] == "durable_worker"
+    assert artifacts_payload["preflight"]["ok"] is True
     assert artifacts_payload["artifacts"][0]["path"] == "report.md"
     assert artifacts_payload["workspace"] == "/workspace/skill-run-123"
+    assert artifacts_payload["cancel_requested"] is False
+
+
+def test_skill_run_cancel_endpoint_returns_cancelled_status(tmp_path: Path):
+    app = create_app(agent_core=_build_runtime_agent_for_skill_api(tmp_path))
+
+    with TestClient(app) as client:
+        invoke_response = client.post(
+            "/agent/skills/xlsx-automation/invoke",
+            json={
+                "session_id": "skill-run-api-session",
+                "goal": "Run spreadsheet shell workflow",
+                "query": "execute the runtime skill",
+                "constraints": {
+                    "shell_command": "python scripts/run_report.py --topic 'example'"
+                },
+            },
+        )
+        run_id = invoke_response.json()["result"]["data"]["run_id"]
+        cancel_response = client.post(f"/agent/skill-runs/{run_id}/cancel")
+
+    assert invoke_response.status_code == 200
+    assert cancel_response.status_code == 200
+    cancel_payload = cancel_response.json()
+    assert cancel_payload["run_id"] == "skill-run-123"
+    assert cancel_payload["run_status"] == "failed"
+    assert cancel_payload["status"] == "failed"
+    assert cancel_payload["failure_reason"] == "cancelled"
+    assert cancel_payload["cancel_requested"] is True
+    assert cancel_payload["runtime"]["delivery"] == "durable_worker"
 
 
 def test_skill_run_logs_endpoint_returns_404_for_unknown_run(tmp_path: Path):
     app = create_app(agent_core=_build_runtime_agent_for_skill_api(tmp_path))
 
     with TestClient(app) as client:
+        status_response = client.get("/agent/skill-runs/missing-run")
         response = client.get("/agent/skill-runs/missing-run/logs")
 
+    assert status_response.status_code == 404
+    assert "Unknown run_id: missing-run" in status_response.json()["detail"]
     assert response.status_code == 404
     assert "Unknown run_id: missing-run" in response.json()["detail"]

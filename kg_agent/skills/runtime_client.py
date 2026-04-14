@@ -4,7 +4,14 @@ from typing import Any
 
 from kg_agent.config import SkillRuntimeConfig
 from kg_agent.mcp.adapter import MCPAdapter
-from kg_agent.skills.models import LoadedSkill, SkillExecutionRequest
+from kg_agent.skills.models import (
+    LoadedSkill,
+    SkillCommandPlan,
+    SkillExecutionRequest,
+    SkillRunRecord,
+    legacy_status_for_run_status,
+    normalize_run_status,
+)
 
 
 class MCPBasedSkillRuntimeClient:
@@ -22,7 +29,8 @@ class MCPBasedSkillRuntimeClient:
         *,
         request: SkillExecutionRequest,
         loaded_skill: LoadedSkill,
-    ) -> dict[str, Any]:
+        command_plan: SkillCommandPlan,
+    ) -> SkillRunRecord:
         result = await self.adapter.invoke_remote_tool(
             server_name=self.config.server,
             remote_name=self.config.run_tool_name,
@@ -33,6 +41,7 @@ class MCPBasedSkillRuntimeClient:
                 "user_query": request.user_query,
                 "workspace": request.workspace,
                 "constraints": request.constraints,
+                "command_plan": command_plan.to_dict(),
             },
         )
         if not result.success:
@@ -44,45 +53,45 @@ class MCPBasedSkillRuntimeClient:
             if isinstance(data.get("structured_content"), dict)
             else {}
         )
-        runtime_success = bool(structured.get("success", result.success))
-        summary = (
-            structured.get("summary")
-            if isinstance(structured.get("summary"), str)
-            else result.summary()
+        payload = self._normalize_run_payload(
+            structured or data,
+            fallback_summary=result.summary(),
         )
-        return {
-            "status": structured.get("status", "completed"),
-            "success": runtime_success,
-            "summary": summary,
-            "execution_mode": structured.get("execution_mode", "shell"),
-            "run_id": structured.get("run_id"),
-            "command": structured.get("command"),
-            "workspace": structured.get("workspace"),
-            "artifacts": structured.get("artifacts", []),
-            "logs_preview": structured.get("logs_preview"),
-            "shell_plan": structured.get("shell_plan"),
-            "shell_hints": structured.get("shell_hints"),
-            "runtime": {
-                "executor": "mcp",
-                "server": self.config.server,
-                "remote_name": self.config.run_tool_name,
-                "logs_tool_name": self.config.logs_tool_name,
-                "artifacts_tool_name": self.config.artifacts_tool_name,
-            },
-            "runtime_result": structured or data,
-        }
+        payload["runtime"] = self._runtime_metadata(remote_name=self.config.run_tool_name)
+        payload["runtime_result"] = structured or data
+        return SkillRunRecord.from_dict(
+            payload,
+            default_skill_name=request.skill_name,
+            default_runtime=self._runtime_metadata(remote_name=self.config.run_tool_name),
+        )
+
+    async def get_run_status(self, *, run_id: str) -> dict[str, Any]:
+        payload = await self._invoke_structured_tool(
+            remote_name=self.config.status_tool_name,
+            arguments={"run_id": run_id},
+        )
+        return self._normalize_run_payload(payload)
+
+    async def cancel_skill_run(self, *, run_id: str) -> dict[str, Any]:
+        payload = await self._invoke_structured_tool(
+            remote_name=self.config.cancel_tool_name,
+            arguments={"run_id": run_id},
+        )
+        return self._normalize_run_payload(payload)
 
     async def get_run_logs(self, *, run_id: str) -> dict[str, Any]:
-        return await self._invoke_structured_tool(
+        payload = await self._invoke_structured_tool(
             remote_name=self.config.logs_tool_name,
             arguments={"run_id": run_id},
         )
+        return self._normalize_run_payload(payload)
 
     async def get_run_artifacts(self, *, run_id: str) -> dict[str, Any]:
-        return await self._invoke_structured_tool(
+        payload = await self._invoke_structured_tool(
             remote_name=self.config.artifacts_tool_name,
             arguments={"run_id": run_id},
         )
+        return self._normalize_run_payload(payload)
 
     async def _invoke_structured_tool(
         self,
@@ -110,3 +119,45 @@ class MCPBasedSkillRuntimeClient:
         if structured:
             return structured
         return data
+
+    def _runtime_metadata(self, *, remote_name: str) -> dict[str, Any]:
+        return {
+            "executor": "mcp",
+            "server": self.config.server,
+            "remote_name": remote_name,
+            "status_tool_name": self.config.status_tool_name,
+            "cancel_tool_name": self.config.cancel_tool_name,
+            "logs_tool_name": self.config.logs_tool_name,
+            "artifacts_tool_name": self.config.artifacts_tool_name,
+        }
+
+    @staticmethod
+    def _normalize_run_payload(
+        payload: dict[str, Any],
+        *,
+        fallback_summary: str | None = None,
+    ) -> dict[str, Any]:
+        normalized = dict(payload)
+        run_status = normalize_run_status(
+            normalized.get("run_status", normalized.get("status")),
+            success=bool(normalized.get("success")),
+        )
+        normalized["run_status"] = run_status
+        normalized["status"] = legacy_status_for_run_status(run_status)
+        if "summary" not in normalized and fallback_summary:
+            normalized["summary"] = fallback_summary
+        if "command_plan" not in normalized and isinstance(normalized.get("shell_plan"), dict):
+            normalized["command_plan"] = dict(normalized["shell_plan"])
+        command_plan = normalized.get("command_plan")
+        if isinstance(command_plan, dict):
+            normalized["planning_mode"] = str(command_plan.get("mode", "")).strip()
+            if "shell_mode" not in normalized:
+                normalized["shell_mode"] = str(command_plan.get("shell_mode", "")).strip()
+            if "runtime_target" not in normalized and isinstance(
+                command_plan.get("runtime_target"),
+                dict,
+            ):
+                normalized["runtime_target"] = dict(command_plan["runtime_target"])
+        elif "planning_mode" not in normalized:
+            normalized["planning_mode"] = ""
+        return normalized

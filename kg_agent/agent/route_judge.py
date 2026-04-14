@@ -137,6 +137,40 @@ FILE_PATH_PATTERN = re.compile(
     r"(?P<bare>(?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|/)?[^\s\"'<>|]+\.(?:xlsx|xlsm|xls|csv|tsv)))",
     re.IGNORECASE,
 )
+OUTPUT_PATH_PATTERN = re.compile(
+    r'(?:(?:save(?: it)? (?:as|to)|write(?: it)? to|output(?: it)? (?:as|to)|into)\s+)'
+    r'(?:"(?P<dq>[^"\r\n]+\.[A-Za-z0-9]{1,8})"|'
+    r"'(?P<sq>[^'\r\n]+\.[A-Za-z0-9]{1,8})'|"
+    r"(?P<bare>(?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|/)?[^\s\"'<>|]+\.[A-Za-z0-9]{1,8}))",
+    re.IGNORECASE,
+)
+CLI_ARG_PATTERN = re.compile(
+    r"(?<!\S)(?P<flag>--?[A-Za-z][A-Za-z0-9_-]*)(?:[=\s]+(?P<value>\"[^\"]+\"|'[^']+'|[^\s,;]+))?",
+    re.IGNORECASE,
+)
+FORMAT_HINT_PATTERN = re.compile(
+    r"\b(?:as|format(?:ted)? as|output format(?: is)?|in)\s+"
+    r"(?P<format>markdown|md|json|csv|xlsx|xlsm|xls|tsv|html|pdf)"
+    r"(?:\s+format)?\b",
+    re.IGNORECASE,
+)
+MODE_HINT_PATTERN = re.compile(
+    r"\b(?P<mode>strict|safe|fast|incremental|append|overwrite)\s+mode\b|"
+    r"\bmode\s+(?P<named>[a-z][a-z0-9_-]+)\b",
+    re.IGNORECASE,
+)
+DRY_RUN_PATTERN = re.compile(
+    r"(dry[- ]run|plan only|without execution|don'?t execute|do not execute)",
+    re.IGNORECASE,
+)
+FREE_SHELL_PATTERN = re.compile(
+    r"(\u81ea\u7531\s*shell|\u81ea\u7531\u6a21\u5f0f|free\s+shell|shell\s+agent)",
+    re.IGNORECASE,
+)
+CONSERVATIVE_SHELL_PATTERN = re.compile(
+    r"(\u4fdd\u5b88\u6a21\u5f0f|\u663e\u5f0f\u6307\u4ee4|conservative\s+mode|safe\s+shell)",
+    re.IGNORECASE,
+)
 FORMULA_RECALC_PATTERN = re.compile(
     r"("
     r"recalc|recalculate|recalculation|"
@@ -1047,17 +1081,59 @@ class RouteJudge:
         matched_skill: dict[str, Any],
     ) -> dict[str, Any]:
         constraints: dict[str, Any] = {}
+        cli_args = cls._extract_cli_args(query)
         file_paths = cls._extract_file_paths(query)
         if len(file_paths) == 1:
             constraints["input_path"] = file_paths[0]
         elif file_paths:
             constraints["input_paths"] = file_paths
 
+        cli_input_path = cls._extract_cli_arg_value(
+            cli_args,
+            {"--input", "--input-path", "--file", "--path"},
+        )
+        if cli_input_path and "input_path" not in constraints and "input_paths" not in constraints:
+            constraints["input_path"] = cli_input_path
+
+        output_path = cls._extract_output_path(query, cli_args)
+        if output_path:
+            constraints["output_path"] = output_path
+
+        format_hint = cls._extract_format_hint(query, cli_args)
+        if format_hint:
+            constraints["format"] = format_hint
+            constraints["output_format"] = format_hint
+
+        mode_hint = cls._extract_mode_hint(query, cli_args)
+        if mode_hint:
+            constraints["mode"] = mode_hint
+
+        if cls._extract_dry_run_hint(query, cli_args):
+            constraints["dry_run"] = True
+            constraints["plan_only"] = True
+
+        if cli_args:
+            constraints["cli_args"] = cli_args
+
+        if cls._has_cli_flag(cli_args, {"--overwrite"}):
+            constraints["overwrite"] = True
+        if cls._has_cli_flag(cli_args, {"--recursive"}):
+            constraints["recursive"] = True
+
+        shell_mode = cls._extract_shell_mode_hint(query)
+        if shell_mode:
+            constraints["shell_mode"] = shell_mode
+
         skill_name = str(matched_skill.get("name", "")).strip().lower()
         if skill_name == "xlsx":
             if FORMULA_RECALC_PATTERN.search(query or ""):
                 constraints["operation"] = "recalc"
             if PRESERVE_FORMULA_PATTERN.search(query or ""):
+                constraints["preserve_formulas"] = True
+            if cls._has_cli_flag(
+                cli_args,
+                {"--preserve-formulas", "--keep-formulas", "--retain-formulas"},
+            ):
                 constraints["preserve_formulas"] = True
         return constraints
 
@@ -1077,6 +1153,115 @@ class RouteJudge:
             seen.add(candidate)
             matches.append(candidate)
         return matches
+
+    @staticmethod
+    def _strip_quoted_value(value: str) -> str:
+        candidate = value.strip().rstrip(".,;")
+        if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in {'"', "'"}:
+            return candidate[1:-1]
+        return candidate
+
+    @classmethod
+    def _extract_cli_args(cls, query: str) -> list[str]:
+        cli_args: list[str] = []
+        for match in CLI_ARG_PATTERN.finditer(query or ""):
+            flag = match.group("flag")
+            if not flag:
+                continue
+            cli_args.append(flag.strip())
+            value = match.group("value")
+            if value:
+                cli_args.append(cls._strip_quoted_value(value))
+        return cli_args
+
+    @staticmethod
+    def _extract_cli_arg_value(
+        cli_args: list[str],
+        flag_names: set[str],
+    ) -> str | None:
+        for index, item in enumerate(cli_args):
+            if item not in flag_names:
+                continue
+            if index + 1 >= len(cli_args):
+                return None
+            candidate = cli_args[index + 1]
+            if candidate.startswith("-"):
+                return None
+            return candidate
+        return None
+
+    @staticmethod
+    def _has_cli_flag(cli_args: list[str], flag_names: set[str]) -> bool:
+        return any(item in flag_names for item in cli_args)
+
+    @classmethod
+    def _extract_output_path(
+        cls,
+        query: str,
+        cli_args: list[str],
+    ) -> str | None:
+        cli_output = cls._extract_cli_arg_value(
+            cli_args,
+            {"--output", "--output-path", "-o"},
+        )
+        if cli_output:
+            return cli_output
+        match = OUTPUT_PATH_PATTERN.search(query or "")
+        if match is None:
+            return None
+        candidate = match.group("dq") or match.group("sq") or match.group("bare") or ""
+        return candidate.strip() or None
+
+    @classmethod
+    def _extract_format_hint(
+        cls,
+        query: str,
+        cli_args: list[str],
+    ) -> str | None:
+        cli_value = cls._extract_cli_arg_value(
+            cli_args,
+            {"--format", "--output-format"},
+        )
+        if cli_value:
+            return cli_value.lower()
+        match = FORMAT_HINT_PATTERN.search(query or "")
+        if match is None:
+            return None
+        candidate = str(match.group("format") or "").strip().lower()
+        return candidate or None
+
+    @classmethod
+    def _extract_mode_hint(
+        cls,
+        query: str,
+        cli_args: list[str],
+    ) -> str | None:
+        cli_value = cls._extract_cli_arg_value(cli_args, {"--mode"})
+        if cli_value:
+            return cli_value.lower()
+        match = MODE_HINT_PATTERN.search(query or "")
+        if match is None:
+            return None
+        candidate = str(match.group("mode") or match.group("named") or "").strip().lower()
+        return candidate or None
+
+    @classmethod
+    def _extract_dry_run_hint(
+        cls,
+        query: str,
+        cli_args: list[str],
+    ) -> bool:
+        return cls._has_cli_flag(cli_args, {"--dry-run", "--plan-only"}) or bool(
+            DRY_RUN_PATTERN.search(query or "")
+        )
+
+    @staticmethod
+    def _extract_shell_mode_hint(query: str) -> str | None:
+        if FREE_SHELL_PATTERN.search(query or ""):
+            return "free_shell"
+        if CONSERVATIVE_SHELL_PATTERN.search(query or ""):
+            return "conservative"
+        return None
 
     @staticmethod
     def _parse_skill_plan_payload(

@@ -343,3 +343,71 @@ def test_route_judge_prompt_version_registry_and_fallback():
     assert "Available capabilities:" in user_prompt
     assert "Capability catalog:" in user_prompt
     assert "Available skills:" in user_prompt
+
+
+@pytest.mark.asyncio
+async def test_route_judge_extracts_cli_args_output_path_mode_format_and_dry_run():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query=(
+            'use report-skill --input "C:\\Reports\\input.csv" --output '
+            '"C:\\Reports\\out.md" --format markdown --mode strict --dry-run'
+        ),
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "report-skill",
+                "description": "Create a report workflow from structured inputs.",
+                "tags": ["report", "workflow"],
+                "path": "/skills/report-skill",
+            }
+        ],
+    )
+
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "report-skill"
+    assert route.skill_plan.constraints["input_path"] == "C:\\Reports\\input.csv"
+    assert route.skill_plan.constraints["output_path"] == "C:\\Reports\\out.md"
+    assert route.skill_plan.constraints["format"] == "markdown"
+    assert route.skill_plan.constraints["output_format"] == "markdown"
+    assert route.skill_plan.constraints["mode"] == "strict"
+    assert route.skill_plan.constraints["dry_run"] is True
+    assert route.skill_plan.constraints["plan_only"] is True
+    assert route.skill_plan.constraints["cli_args"] == [
+        "--input",
+        "C:\\Reports\\input.csv",
+        "--output",
+        "C:\\Reports\\out.md",
+        "--format",
+        "markdown",
+        "--mode",
+        "strict",
+        "--dry-run",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_route_judge_extracts_free_shell_mode_hint():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query="use pdf skill in free shell mode to merge the files",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pdf",
+                "description": "Process pdf files.",
+                "tags": ["pdf"],
+                "path": "/skills/pdf",
+            }
+        ],
+    )
+
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pdf"
+    assert route.skill_plan.constraints["shell_mode"] == "free_shell"

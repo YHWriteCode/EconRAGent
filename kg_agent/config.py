@@ -77,6 +77,12 @@ def _env_json(name: str, default: Any) -> Any:
         return default
 
 
+def _default_skill_runtime_target():
+    from kg_agent.skills.models import SkillRuntimeTarget
+
+    return SkillRuntimeTarget.linux_default()
+
+
 def _default_crawler_llm_provider() -> str:
     explicit_provider = _first_env_value(
         "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_PROVIDER",
@@ -299,16 +305,24 @@ class MCPConfig:
 class SkillRuntimeConfig:
     server: str = ""
     run_tool_name: str = "run_skill_task"
+    status_tool_name: str = "get_run_status"
+    cancel_tool_name: str = "cancel_skill_run"
     read_tool_name: str = "read_skill"
     read_file_tool_name: str = "read_skill_file"
     logs_tool_name: str = "get_run_logs"
     artifacts_tool_name: str = "get_run_artifacts"
+    default_shell_mode: str = "conservative"
+    default_runtime_target: SkillRuntimeTarget = field(
+        default_factory=_default_skill_runtime_target
+    )
 
     def is_configured(self) -> bool:
         return bool(self.server.strip())
 
     @classmethod
     def from_env(cls) -> "SkillRuntimeConfig":
+        from kg_agent.skills.models import SkillRuntimeTarget
+
         return cls(
             server=os.getenv("KG_AGENT_SKILL_RUNTIME_SERVER", "").strip(),
             run_tool_name=os.getenv(
@@ -316,6 +330,16 @@ class SkillRuntimeConfig:
                 "run_skill_task",
             ).strip()
             or "run_skill_task",
+            status_tool_name=os.getenv(
+                "KG_AGENT_SKILL_RUNTIME_STATUS_TOOL",
+                "get_run_status",
+            ).strip()
+            or "get_run_status",
+            cancel_tool_name=os.getenv(
+                "KG_AGENT_SKILL_RUNTIME_CANCEL_TOOL",
+                "cancel_skill_run",
+            ).strip()
+            or "cancel_skill_run",
             read_tool_name=os.getenv(
                 "KG_AGENT_SKILL_RUNTIME_READ_TOOL",
                 "read_skill",
@@ -336,6 +360,39 @@ class SkillRuntimeConfig:
                 "get_run_artifacts",
             ).strip()
             or "get_run_artifacts",
+            default_shell_mode=os.getenv(
+                "KG_AGENT_SKILL_DEFAULT_SHELL_MODE",
+                "conservative",
+            ).strip()
+            or "conservative",
+            default_runtime_target=SkillRuntimeTarget.from_dict(
+                {
+                    "platform": os.getenv(
+                        "KG_AGENT_SKILL_TARGET_PLATFORM",
+                        "linux",
+                    ),
+                    "shell": os.getenv(
+                        "KG_AGENT_SKILL_TARGET_SHELL",
+                        "/bin/sh",
+                    ),
+                    "workspace_root": os.getenv(
+                        "KG_AGENT_SKILL_TARGET_WORKSPACE_ROOT",
+                        "/workspace",
+                    ),
+                    "workdir": os.getenv(
+                        "KG_AGENT_SKILL_TARGET_WORKDIR",
+                        "/workspace",
+                    ),
+                    "network_allowed": _env_bool(
+                        "KG_AGENT_SKILL_TARGET_NETWORK_ALLOWED",
+                        False,
+                    ),
+                    "supports_python": _env_bool(
+                        "KG_AGENT_SKILL_TARGET_SUPPORTS_PYTHON",
+                        True,
+                    ),
+                }
+            ),
         )
 
 

@@ -28,6 +28,7 @@ from kg_agent.memory.cross_session_store import CrossSessionStore
 from kg_agent.memory.user_profile import UserProfileStore
 from kg_agent.skills import (
     MCPBasedSkillRuntimeClient,
+    SkillCommandPlanner,
     SkillExecutor,
     SkillLoader,
     SkillRegistry,
@@ -205,6 +206,11 @@ class AgentCore:
         self.skill_executor = skill_executor or SkillExecutor(
             registry=self.skill_registry,
             loader=self.skill_loader,
+            command_planner=SkillCommandPlanner(
+                llm_client=self.utility_llm_client,
+                default_shell_mode=self.config.skill_runtime.default_shell_mode,
+                default_runtime_target=self.config.skill_runtime.default_runtime_target,
+            ),
             runtime_client=runtime_client,
         )
         self.tool_registry = tool_registry or build_default_tool_registry(
@@ -427,6 +433,12 @@ class AgentCore:
 
     async def get_skill_run_artifacts(self, *, run_id: str) -> dict[str, Any]:
         return await self.skill_executor.get_run_artifacts(run_id=run_id)
+
+    async def get_skill_run_status(self, *, run_id: str) -> dict[str, Any]:
+        return await self.skill_executor.get_run_status(run_id=run_id)
+
+    async def cancel_skill_run(self, *, run_id: str) -> dict[str, Any]:
+        return await self.skill_executor.cancel_skill_run(run_id=run_id)
 
     async def chat_stream(
         self,
@@ -1522,9 +1534,26 @@ class AgentCore:
             summary["status"] = data["status"]
 
         if tool_name.startswith("skill:"):
-            for key in ("skill_name", "goal", "workspace"):
+            for key in (
+                "skill_name",
+                "goal",
+                "workspace",
+                "run_id",
+                "run_status",
+                "status",
+                "command",
+                "failure_reason",
+            ):
                 if key in data:
                     summary[key] = data[key]
+            command_plan = data.get("command_plan")
+            if isinstance(command_plan, dict):
+                summary["command_plan"] = {
+                    "mode": command_plan.get("mode"),
+                    "entrypoint": command_plan.get("entrypoint"),
+                    "missing_fields": command_plan.get("missing_fields"),
+                    "failure_reason": command_plan.get("failure_reason"),
+                }
             skill = data.get("skill")
             if isinstance(skill, dict):
                 summary["skill"] = {
@@ -1798,6 +1827,15 @@ class AgentCore:
             runtime = result_data.get("runtime")
             if isinstance(runtime, dict) and runtime:
                 metadata["runtime"] = runtime
+            run_id = result_data.get("run_id")
+            if isinstance(run_id, str) and run_id.strip():
+                metadata["run_id"] = run_id.strip()
+            run_status = result_data.get("run_status")
+            if isinstance(run_status, str) and run_status.strip():
+                metadata["run_status"] = run_status.strip()
+            status = result_data.get("status")
+            if isinstance(status, str) and status.strip():
+                metadata["status"] = status.strip()
         return metadata
 
     def _compact_tool_calls(

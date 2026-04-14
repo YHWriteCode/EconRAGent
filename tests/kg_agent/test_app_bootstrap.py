@@ -143,6 +143,8 @@ def test_create_app_bootstraps_rag_from_env(tmp_path, monkeypatch):
     assert app.state.agent_core is not None
     assert any(route.path == "/agent/chat" for route in app.router.routes)
     assert any(route.path == "/agent/skills" for route in app.router.routes)
+    assert any(route.path == "/agent/skill-runs/{run_id}" for route in app.router.routes)
+    assert any(route.path == "/agent/skill-runs/{run_id}/cancel" for route in app.router.routes)
     assert any(route.path == "/agent/skill-runs/{run_id}/logs" for route in app.router.routes)
 
 

@@ -146,12 +146,49 @@ class SkillInvokeResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class SkillRunStatusResponse(BaseModel):
+    run_id: str
+    skill_name: str | None = None
+    run_status: str
+    status: str
+    success: bool = False
+    command: str | None = None
+    shell_mode: str | None = None
+    runtime_target: dict[str, Any] = Field(default_factory=dict)
+    workspace: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    exit_code: int | None = None
+    failure_reason: str | None = None
+    summary: str | None = None
+    command_plan: dict[str, Any] = Field(default_factory=dict)
+    runtime: dict[str, Any] = Field(default_factory=dict)
+    execution_mode: str | None = None
+    preflight: dict[str, Any] = Field(default_factory=dict)
+    repair_attempted: bool = False
+    repair_succeeded: bool = False
+    repaired_from_run_id: str | None = None
+    cancel_requested: bool = False
+
+
 class SkillRunLogsResponse(BaseModel):
     run_id: str
     skill_name: str | None = None
+    run_status: str | None = None
     status: str | None = None
     success: bool = False
     command: str | None = None
+    shell_mode: str | None = None
+    runtime_target: dict[str, Any] = Field(default_factory=dict)
+    started_at: str | None = None
+    finished_at: str | None = None
+    failure_reason: str | None = None
+    runtime: dict[str, Any] = Field(default_factory=dict)
+    preflight: dict[str, Any] = Field(default_factory=dict)
+    repair_attempted: bool = False
+    repair_succeeded: bool = False
+    repaired_from_run_id: str | None = None
+    cancel_requested: bool = False
     stdout: str = ""
     stderr: str = ""
     summary: str | None = None
@@ -165,9 +202,21 @@ class SkillArtifactInfo(BaseModel):
 class SkillRunArtifactsResponse(BaseModel):
     run_id: str
     skill_name: str | None = None
+    run_status: str | None = None
     status: str | None = None
     success: bool = False
+    shell_mode: str | None = None
+    runtime_target: dict[str, Any] = Field(default_factory=dict)
     workspace: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    failure_reason: str | None = None
+    runtime: dict[str, Any] = Field(default_factory=dict)
+    preflight: dict[str, Any] = Field(default_factory=dict)
+    repair_attempted: bool = False
+    repair_succeeded: bool = False
+    repaired_from_run_id: str | None = None
+    cancel_requested: bool = False
     artifacts: list[SkillArtifactInfo] = Field(default_factory=list)
     summary: str | None = None
 
@@ -532,6 +581,34 @@ def create_agent_routes(agent_core, scheduler=None):
             return response.to_dict()
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @router.get(
+        "/agent/skill-runs/{run_id}",
+        response_model=SkillRunStatusResponse,
+    )
+    async def get_skill_run_status(run_id: str):
+        try:
+            return await agent_core.get_skill_run_status(run_id=run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @router.post(
+        "/agent/skill-runs/{run_id}/cancel",
+        response_model=SkillRunStatusResponse,
+    )
+    async def cancel_skill_run(run_id: str):
+        try:
+            return await agent_core.cancel_skill_run(run_id=run_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 

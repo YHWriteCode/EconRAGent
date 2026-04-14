@@ -44,7 +44,7 @@ _ROUTE_JUDGE_PROMPT_TEMPLATES: dict[str, RouteJudgePromptTemplate] = {
             "Use the capability catalog to understand each capability's description, tags, executor, and input contract. "
             "Use available_skills as a separate planning surface for local or VM-hosted skills. "
             "When a skill is a better fit than tools or external capabilities, emit skill_plan instead of decomposing the skill into helper tools. "
-            "When emitting skill_plan, include structured constraints when they are explicit in the user query, such as file paths, operation hints, or CLI-style args. "
+            "When emitting skill_plan, include structured constraints when they are explicit in the user query, such as file paths, output paths, mode or format hints, dry-run intent, operation hints, CLI-style args, or an explicit shell_mode request. "
             "Legacy skill helper tools may exist for compatibility, but they are not the primary planner abstraction."
         ),
     ),
@@ -66,7 +66,7 @@ _ROUTE_JUDGE_PROMPT_TEMPLATES: dict[str, RouteJudgePromptTemplate] = {
             "6. Use available_skills to evaluate local or VM-hosted skills independently from the capability plane.\n"
             "7. Prefer skill_plan when a matching skill is a more concrete fit than native KG/web/memory tools.\n"
             "8. Prefer a matching external capability when it is a more concrete fit than native tools and no better skill match exists.\n"
-            "9. When emitting skill_plan, include structured constraints when they are explicit in the user query, such as file paths, operation hints, or CLI-style args.\n"
+            "9. When emitting skill_plan, include structured constraints when they are explicit in the user query, such as file paths, output paths, mode or format hints, dry-run intent, operation hints, CLI-style args, or an explicit shell_mode request.\n"
             "10. Only provide tool args that fit the selected capability's input contract; omit framework-reserved fields unless the tool contract explicitly needs them.\n"
             "11. Never invent capabilities or skills outside the provided planner surfaces.\n"
         ),
@@ -322,6 +322,72 @@ def build_route_judge_prompt(
         '"max_iterations": int'
         "}\n"
         "Keep JSON valid. Do not include markdown fences."
+    )
+    return system_prompt, user_prompt
+
+
+def build_skill_free_shell_planner_prompt(
+    *,
+    skill_name: str,
+    goal: str,
+    user_query: str,
+    runtime_target: dict[str, Any],
+    constraints: dict[str, Any],
+    shell_hints: dict[str, Any],
+    file_inventory: list[dict[str, Any]],
+    skill_md_excerpt: str,
+    script_previews: list[dict[str, Any]],
+    python_examples: list[dict[str, Any]],
+) -> tuple[str, str]:
+    system_prompt = (
+        "You are a shell-command planning module for local skills. "
+        "Plan one runnable shell task from the skill docs, file inventory, and user intent. "
+        "You may either return a direct shell command or generate one or more files first and then return a shell command that executes them. "
+        "Only use relative paths for generated files. Never rely on heredocs. "
+        "If the task is still ambiguous or unsafe, return manual_required."
+    )
+    user_prompt = (
+        "Return strict JSON only with this schema:\n"
+        "{"
+        '"mode": "free_shell" | "generated_script" | "manual_required", '
+        '"command": str | null, '
+        '"generated_files": [{"path": str, "content": str, "description": str}] , '
+        '"rationale": str, '
+        '"missing_fields": [str], '
+        '"failure_reason": str | null, '
+        '"required_tools": [str], '
+        '"warnings": [str]'
+        "}\n\n"
+        f"Skill name: {skill_name}\n"
+        "Runtime target:\n"
+        f"{json.dumps(runtime_target, ensure_ascii=False, indent=2)}\n\n"
+        "User goal:\n"
+        f"{goal}\n\n"
+        "User query:\n"
+        f"{user_query}\n\n"
+        "Structured constraints:\n"
+        f"{json.dumps(constraints, ensure_ascii=False, indent=2)}\n\n"
+        "Skill shell hints:\n"
+        f"{json.dumps(shell_hints, ensure_ascii=False, indent=2)}\n\n"
+        "Skill file inventory:\n"
+        f"{json.dumps(file_inventory, ensure_ascii=False, indent=2)}\n\n"
+        "Relevant script previews:\n"
+        f"{json.dumps(script_previews, ensure_ascii=False, indent=2)}\n\n"
+        "Relevant Python examples:\n"
+        f"{json.dumps(python_examples, ensure_ascii=False, indent=2)}\n\n"
+        "Skill markdown excerpt:\n"
+        f"{skill_md_excerpt}\n\n"
+        "Rules:\n"
+        "1. Prefer reusing shipped skill scripts when possible.\n"
+        "2. If the docs only provide Python examples, you may convert them into generated_files and run them.\n"
+        "3. Generated files must stay under a relative workspace path such as .skill_generated/.\n"
+        "4. Match the command to the declared runtime target instead of the host machine you are running on.\n"
+        "5. The command may use pipelines, chaining, and shell features when justified by the task.\n"
+        "6. Respect runtime_target.network_allowed=false by avoiding downloads, package installs, or external network calls unless the task explicitly depends on network access and you therefore return manual_required.\n"
+        "7. Respect runtime_target.supports_python=false by avoiding generated Python scripts in that case.\n"
+        "8. Do not claim success; only return the plan.\n"
+        "9. If required inputs, credentials, or environment details are missing, return manual_required.\n"
+        "Keep JSON valid and do not include markdown fences."
     )
     return system_prompt, user_prompt
 

@@ -57,9 +57,10 @@ kg_agent/
 ├── skills/                        # Local skill layer
 │   ├── registry.py                # SkillRegistry: scan `skills/*/SKILL.md` into a lightweight catalog
 │   ├── loader.py                  # SkillLoader: progressive skill content loading + file reads
-│   ├── executor.py                # SkillExecutor: skill_plan execution path and runtime handoff
+│   ├── command_planner.py         # SkillCommandPlanner: LoadedSkill + request -> SkillCommandPlan
+│   ├── executor.py                # SkillExecutor: loader -> command planner -> runtime handoff
 │   ├── runtime_client.py          # Optional runtime transport clients (for example MCP-backed skill runtime)
-│   └── models.py                  # SkillDefinition / SkillPlan / LoadedSkill dataclasses
+│   └── models.py                  # SkillDefinition / SkillPlan / LoadedSkill / SkillCommandPlan / SkillRunRecord dataclasses
 │
 ├── mcp/                           # External capability transport layer
 │   ├── __init__.py
@@ -253,7 +254,8 @@ The complete flow of `AgentCore.chat()` is as follows (step 0 is new for provide
    └─ When `route.skill_plan` is present:
        └─ SkillExecutor.execute(skill_name, goal, user_query, workspace, constraints)
             ├─ SkillLoader loads `SKILL.md` + file inventory on demand
-            └─ Runtime handoff stays behind the skill executor boundary
+            ├─ SkillCommandPlanner derives a canonical `SkillCommandPlan`
+            └─ Runtime handoff stays behind the skill executor boundary and returns canonical `run_status`
 
 3c. Explicit capability invocation (API / direct execution path)
    └─ AgentCore.invoke_capability(capability_name, session_id, query, args, ...)
@@ -495,17 +497,44 @@ Runtime execution
 
 - `SkillRegistry` scans `./skills/*/SKILL.md` and exposes a lightweight catalog to the planner
 - `SkillLoader` supports progressive disclosure: load `SKILL.md` first, then read specific files on demand (`references/`, `scripts/`, `assets/`, other markdown)
+- Skill execution stages are now explicit: `registry -> loader -> command planner -> executor -> runtime`
+- `SkillCommandPlanner` is responsible for turning `LoadedSkill + SkillExecutionRequest` into a canonical `SkillCommandPlan`
+- `SkillCommandPlan` is the only place where planned command details live: `command`, `mode`, `shell_mode`, `entrypoint`, `cli_args`, optional `generated_files`, `missing_fields`, `failure_reason`, `hints`
 - `SkillExecutor` is the only skill execution entry in `AgentCore`; the planner no longer decomposes a skill into helper-tool chains
 - The runtime target is now **shell-oriented skill execution inside an isolated workspace / VM / container**, not planner-visible remote script calls
+- `SkillExecutionRequest` and `SkillCommandPlan` now both carry an explicit `runtime_target` with `platform`, `shell`, `workspace_root`, `workdir`, `network_allowed`, and `supports_python`
+- The default runtime target is now **Linux-first**: `platform="linux"` and `shell="/bin/sh"` unless overridden by skill-runtime config
 - Current default execution boundary is still conservative: the executor prepares the local shell-runtime context and can hand off to a runtime client, but it does not require `default_script` / `recommended_script` / `entrypoint` just to discover a skill
+- Skill shell planning now supports two runtime-facing modes:
+  - `shell_mode="conservative"`: current safe planner path (`explicit`, `structured_args`, `inferred`, or `manual_required`)
+  - `shell_mode="free_shell"`: utility-LLM-assisted shell planning that may synthesize complex shell commands or `generated_files` before execution
 - When `KG_AGENT_SKILL_RUNTIME_SERVER` is configured and `MCPAdapter` is available, `AgentCore` can auto-wire an internal `MCPBasedSkillRuntimeClient` so `skill_plan` execution uses MCP only as a transport layer behind `SkillExecutor`
-- The current coarse-grained runtime contract is shell-oriented: it accepts either an explicit shell task (`constraints.shell_command` / `constraints.command`) or structured CLI args (`constraints.args` / `constraints.cli_args`) when the skill has a single runnable entrypoint, and it returns run-oriented data such as `run_id`, `command`, `logs_preview`, and `artifacts`
+- The MCP skill runtime server now shares the same `SkillCommandPlanner` surface; when `run_skill_task` receives `constraints.shell_mode="free_shell"` without an explicit `command_plan`, `mcp-server/server.py` can independently plan the shell task if a utility LLM is configured
+- If no utility LLM is configured for that free-shell planning path, the runtime returns canonical `run_status="manual_required"` with `failure_reason="llm_not_available"` instead of falling back to duplicate server-local planning helpers
+- The current coarse-grained runtime contract is shell-oriented: it accepts either an explicit shell task (`constraints.shell_command` / `constraints.command`) or structured CLI args (`constraints.args` / `constraints.cli_args`) when the skill has a single runnable entrypoint, and it returns run-oriented data such as `run_id`, `command`, `logs_preview`, `artifacts`, and canonical `run_status`
+- In `free_shell` mode, `SkillCommandPlanner` may also return `generated_files`, which the runtime materializes inside the isolated workspace before executing the final shell command
+- Before execution, the runtime now performs a `preflight` phase for planned shell runs:
+  - validate `required_tools` from planner hints against the runtime PATH
+  - validate each `generated_file` path stays relative to the declared runtime workspace and remains within size limits
+  - run `py_compile` syntax checks for generated Python files when `runtime_target.supports_python=true`
+- Preflight failures no longer hard-crash the runtime; they are returned as structured `preflight` results with canonical `run_status="manual_required"` or `failed`, plus a concrete `failure_reason`
+- `free_shell` execution also has a bounded single repair loop: after one failed execution, the runtime may send the failed command, stdout/stderr, exit code, preflight result, and a skill-doc excerpt back to the utility LLM and retry once with a repaired `SkillCommandPlan`
+- Repair metadata is now part of the canonical run record: `repair_attempted`, `repair_succeeded`, and `repaired_from_run_id`
 - The runtime service executes those shell commands inside an isolated workspace, using `/bin/sh -lc` on POSIX runtimes and PowerShell on Windows for local development/testing
+- For local development/testing, the runtime prepends the active interpreter directory to `PATH` so planned `python ...` shell commands resolve inside the current environment
+- Canonical skill lifecycle is tracked via `run_status`: `planned`, `running`, `completed`, `failed`, `manual_required`
+- Compatibility-only outward `status` is derived at the API / MCP boundary. Internal code must branch only on canonical `run_status`
+- `manual_required` is the canonical “cannot safely auto-run yet” state; legacy `status="needs_shell_command"` is only one compatibility surface for it
+- Live shell execution now uses a **durable queue-worker model** inside `mcp-server/server.py`: runtime-backed `run_skill_task` persists the run record plus worker job context to SQLite, ensures an independent queue-worker process is available, and returns `run_status="running"` once preflight passes
+- Durable queue progress is surfaced through `runtime.queue_state` (`queued`, `claimed`, `executing`, `cancelling`, terminal states), while the public lifecycle contract still uses canonical `run_status`
+- Running shell tasks now update `stdout` / `stderr` incrementally in the durable SQLite-backed run store, and the runtime also refreshes visible workspace artifacts while the task is still running
+- Runtime-backed shell runs can now be cancelled through `cancel_skill_run(run_id)`; cancellation marks the durable run row, terminates the active shell process when possible, and resolves to canonical `run_status="failed"` with `failure_reason="cancelled"` plus `cancel_requested=true`
+- For blocking or test-oriented flows, callers can still request synchronous completion with `wait_for_completion=true` (or `constraints.wait_for_completion=true`)
 - `RouteJudge` now preserves and emits structured `skill_plan.constraints` when the user query makes them explicit; for example, spreadsheet queries can carry `input_path`, `operation="recalc"`, or `preserve_formulas=true`
 - When `RouteJudge` emits `skill_plan`, `AgentCore` runs it through `SkillExecutor` after any prerequisite tools (for example memory lookup) and before final answer generation
 - Skill execution records are serialized back into the same run result stream / memory metadata surface as tool calls, with `metadata.executor="skill"`
 - Skills also have an explicit API plane separate from capabilities: `GET /agent/skills`, `GET /agent/skills/{skill_name}`, `GET /agent/skills/{skill_name}/files/{relative_path}`, and `POST /agent/skills/{skill_name}/invoke`
-- When a runtime-backed skill invocation returns a `run_id`, the skill plane also supports follow-up run inspection through `GET /agent/skill-runs/{run_id}/logs` and `GET /agent/skill-runs/{run_id}/artifacts`
+- When a runtime-backed skill invocation returns a `run_id`, the skill plane also supports follow-up run inspection through `GET /agent/skill-runs/{run_id}`, `GET /agent/skill-runs/{run_id}/logs`, and `GET /agent/skill-runs/{run_id}/artifacts`
 - `AgentCore.invoke_skill(...)` bypasses `RouteJudge` and executes one local skill directly through `SkillExecutor`; this still does not make the skill appear as a planner-visible MCP tool
 
 ### 8.5 MCP External Capability Layer
@@ -748,10 +777,19 @@ Optional lightweight utility model for internal routing/explanation work:
 | `KG_AGENT_SKILLS_DIR` | `skills` | Local skill directory scanned by `SkillRegistry` |
 | `KG_AGENT_SKILL_RUNTIME_SERVER` | empty | Optional MCP server name used only as the internal skill-runtime transport |
 | `KG_AGENT_SKILL_RUNTIME_RUN_TOOL` | `run_skill_task` | Remote coarse-grained shell runtime tool used by `MCPBasedSkillRuntimeClient` |
+| `KG_AGENT_SKILL_RUNTIME_STATUS_TOOL` | `get_run_status` | Optional remote run-status retrieval tool name reserved for shell-based skill runs |
 | `KG_AGENT_SKILL_RUNTIME_READ_TOOL` | `read_skill` | Reserved remote read interface for coarse-grained runtime access |
 | `KG_AGENT_SKILL_RUNTIME_READ_FILE_TOOL` | `read_skill_file` | Reserved remote file-read interface for coarse-grained runtime access |
 | `KG_AGENT_SKILL_RUNTIME_LOGS_TOOL` | `get_run_logs` | Optional remote run-log retrieval tool name reserved for shell-based skill runs |
 | `KG_AGENT_SKILL_RUNTIME_ARTIFACTS_TOOL` | `get_run_artifacts` | Optional remote artifact listing tool name reserved for shell-based skill runs |
+| `KG_AGENT_SKILL_DEFAULT_SHELL_MODE` | `conservative` | Default skill shell-planning mode: `conservative` or `free_shell` |
+| `KG_AGENT_SKILL_TARGET_PLATFORM` | `linux` | Default skill runtime target platform (`linux` or `windows`) |
+| `KG_AGENT_SKILL_TARGET_SHELL` | `/bin/sh` | Default skill runtime target shell (`/bin/sh`, `bash`, or `powershell`) |
+| `KG_AGENT_SKILL_TARGET_WORKSPACE_ROOT` | `/workspace` | Default declared runtime workspace root passed into skill planning |
+| `KG_AGENT_SKILL_TARGET_WORKDIR` | `/workspace` | Default declared runtime working directory passed into skill planning |
+| `KG_AGENT_SKILL_TARGET_NETWORK_ALLOWED` | `false` | Whether free-shell planning may assume outbound network access by default |
+| `KG_AGENT_SKILL_TARGET_SUPPORTS_PYTHON` | `true` | Whether the default runtime target may execute Python or generated Python helpers |
+| `MCP_RUN_STORE_SQLITE_PATH` | `${MCP_WORKSPACE_DIR}/skill_runtime_runs.sqlite3` | SQLite file used by the durable skill-runtime queue/store inside `mcp-server/server.py` |
 | `KG_AGENT_MAX_ITERATIONS` | `3` | Maximum tool invocation rounds |
 | `KG_AGENT_ROUTE_JUDGE_PROMPT_VERSION` | `v1` | Version key for Route Judge LLM refinement prompt templates |
 | `KG_AGENT_MEMORY_WINDOW_TURNS` | `6` | Maximum number of conversation turns considered for the dynamic attention window |
@@ -894,6 +932,7 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 | GET | `/agent/skills/{skill_name}` | `agent_routes.py` | Read one skill's `SKILL.md` plus file inventory |
 | GET | `/agent/skills/{skill_name}/files/{relative_path}` | `agent_routes.py` | Read one file inside a skill directory on demand |
 | POST | `/agent/skills/{skill_name}/invoke` | `agent_routes.py` | Explicitly execute one local skill through `SkillExecutor` |
+| GET | `/agent/skill-runs/{run_id}` | `agent_routes.py` | Read lifecycle status for one runtime-backed shell skill run |
 | GET | `/agent/skill-runs/{run_id}/logs` | `agent_routes.py` | Read logs for one runtime-backed shell skill run |
 | GET | `/agent/skill-runs/{run_id}/artifacts` | `agent_routes.py` | Read artifact metadata for one runtime-backed shell skill run |
 | POST | `/agent/capabilities/{capability_name}/invoke` | `agent_routes.py` | Explicitly invoke one native or external capability without going through RouteJudge |
@@ -958,16 +997,30 @@ Per-source scheduler behavior is controlled through `MonitoredSource` rather tha
 - `POST /agent/skills/{skill_name}/invoke`
   - Bypasses `RouteJudge` and executes exactly one local skill through `AgentCore.invoke_skill(...)`
   - Request body includes `session_id`, `goal`, optional `query`, optional `workspace`, and optional `constraints`
+  - Execution path is now explicit: `SkillLoader -> SkillCommandPlanner -> runtime`
+  - `SkillCommandPlanner` returns a canonical `SkillCommandPlan` before runtime handoff; the command planner may return `mode="manual_required"` instead of guessing a command
   - For shell-oriented runtime execution, either pass a coarse-grained command through `constraints.shell_command` (or `constraints.command`), or pass structured CLI args through `constraints.args` / `constraints.cli_args` when the skill has a single runnable entrypoint
+  - You can also pass `constraints.shell_mode="free_shell"` to enable utility-LLM-assisted shell planning for complex skills; that mode may synthesize `generated_files` and then execute the resulting shell command inside the isolated runtime workspace
   - You can also pass `constraints.dry_run=true` (or `plan_only=true`) to ask the runtime to return the planned shell command without executing it
+  - Runtime-backed execution now starts asynchronously by default: after preflight succeeds, the invoke response may return `run_status="running"` and the client should poll `/agent/skill-runs/{run_id}` for terminal state
+  - If a caller explicitly needs a blocking result, pass `constraints.wait_for_completion=true`
   - The runtime service executes the resulting command inside the isolated skill workspace instead of exposing per-script MCP tools
-  - Response includes the public skill descriptor, one serialized `skill:<name>` execution record, and invocation metadata; when a runtime server is attached, the result can also include `run_id`, `command`, `logs_preview`, and `artifacts`
+  - Response includes the public skill descriptor, one serialized `skill:<name>` execution record, and invocation metadata; when a runtime server is attached, the result can also include `run_id`, canonical `run_status`, compatibility `status`, `command_plan`, `command`, `shell_mode`, `runtime_target`, `preflight`, repair metadata, `logs_preview`, and `artifacts`
   - Explicit skill invocation remains on the skill plane; it does not go through `CapabilityRegistry`
+- `GET /agent/skill-runs/{run_id}`
+  - Returns lifecycle state for one runtime-backed skill run
+  - Payload includes canonical `run_status`, compatibility `status`, `command_plan`, `command`, `shell_mode`, `runtime_target`, runtime delivery metadata, `preflight`, repair metadata, cancellation metadata, timing fields, exit code, and failure reason when available
+- `POST /agent/skill-runs/{run_id}/cancel`
+  - Requests cancellation for one runtime-backed skill run through the skill runtime client
+  - For the current durable-worker shell runtime, this marks the SQLite-backed run row as cancel-requested, attempts to kill the active shell subprocess, and then returns the updated run status payload
+  - Cancellation is represented as canonical `run_status="failed"` with `failure_reason="cancelled"` and `cancel_requested=true`
 - `GET /agent/skill-runs/{run_id}/logs`
-  - Returns the full stdout/stderr payload for a previously started runtime-backed skill run
+  - Returns the stdout/stderr payload for a previously started runtime-backed skill run, plus canonical `run_status`, `shell_mode`, `runtime_target`, `preflight`, repair metadata, and cancellation metadata
+  - For the current durable-worker shell runtime, this endpoint returns incrementally accumulated logs while `run_status="running"`
   - This endpoint requires a configured skill runtime client; otherwise the API returns service unavailable
 - `GET /agent/skill-runs/{run_id}/artifacts`
-  - Returns the isolated workspace path plus produced artifact metadata for a previously started runtime-backed skill run
+  - Returns the visible workspace artifact list for a previously started runtime-backed skill run, including incremental artifact refresh during `running` for the current durable-worker shell runtime
+  - Returns the isolated workspace path plus produced artifact metadata for a previously started runtime-backed skill run, plus canonical `run_status`, `shell_mode`, `runtime_target`, `preflight`, and repair metadata
   - This endpoint also stays on the skill plane and does not involve `CapabilityRegistry`
 
 ### 11.3 POST /agent/capabilities/{capability_name}/invoke
@@ -1155,8 +1208,13 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 | `ToolCallPlan` | `agent/route_judge.py` | Single-step tool invocation plan |
 | `SkillRegistry` | `skills/registry.py` | Scan local `skills/*/SKILL.md` into a lightweight catalog |
 | `SkillLoader` | `skills/loader.py` | Load `SKILL.md` and read skill files on demand |
+| `SkillCommandPlanner` | `skills/command_planner.py` | Convert `LoadedSkill + SkillExecutionRequest` into `SkillCommandPlan` |
 | `SkillExecutor` | `skills/executor.py` | Execute `skill_plan` through the local skill-runtime boundary |
 | `SkillPlan` | `skills/models.py` | High-level local skill execution plan |
+| `SkillCommandPlan` | `skills/models.py` | Canonical shell-command planning result for one skill request |
+| `SkillRuntimeTarget` | `skills/models.py` | Explicit runtime target/environment declaration carried through planning and execution |
+| `SkillRunRecord` | `skills/models.py` | Canonical skill run lifecycle record (`run_status`, command plan, timing, artifacts) |
+| `kg_agent.agent` package exports | `agent/__init__.py` | Lazy public re-exports used to keep prompt/planner imports cycle-safe |
 | `MCPBasedSkillRuntimeClient` | `skills/runtime_client.py` | Optional MCP-backed transport used internally by `SkillExecutor` |
 | `PathExplainer` | `agent/path_explainer.py` | Path Explainer: `.explain()` returns PathExplanation |
 | `PathExplanation` | `agent/path_explainer.py` | Path explanation result |
@@ -1186,7 +1244,13 @@ The adapter suppresses Crawl4AI run-time console logging because Rich console ou
 
 - **MCP integration is currently stdio-only**; optional dynamic `tools/list` discovery now exists, but there is still no SSE/HTTP transport or richer MCP server capability negotiation yet
 - **Configured `external_mcp` capabilities are hidden from auto-routing by default**; they execute correctly when explicitly invoked, and the Route Judge only sees them when `planner_exposed=true`
-- **Local skill execution is now architecturally separate from MCP and oriented around shell execution inside an isolated runtime**, but the default runtime is still conservative; `SkillExecutor` supports coarse-grained shell handoff and run-oriented results, but it does not yet implement a full free-form shell agent, dependency installation lifecycle, or multi-step planner-to-command synthesis
+- **Local skill execution is now architecturally separate from MCP and oriented around shell execution inside an isolated runtime**, but the default runtime is still conservative; `SkillExecutor` now has an explicit command-planning stage and canonical `run_status`, but it still does not implement a full free-form shell agent, dependency installation lifecycle, or multi-step planner-to-command synthesis
+- **Compatibility `status` is still exposed at the API / MCP boundary** for old clients (`manual_required -> needs_shell_command`), but internal logic must treat canonical `run_status` as the only source of truth
+- **Runtime-backed shell runs now use an independent queue-worker process plus a SQLite-backed durable queue/store**, so queued/running state and live-polled logs/artifacts survive MCP server restarts as long as the SQLite file remains available and a queue worker can be relaunched
+- **Skill runtime run persistence is now SQLite-backed inside `mcp-server/server.py`**, but it is still local-file durability only; there is no distributed queue, multi-node worker pool, or conversation-memory linkage yet
+- **Running shell tasks now expose incremental polled logs/artifacts and explicit cancellation through the durable store**, but this is still polling rather than SSE log streaming or a richer external job-control plane
+- **The new `free_shell` repair loop is intentionally bounded to one retry**; there is still no multi-step autonomous shell agent loop or dependency bootstrap/install lifecycle
+- **`mcp-server/server.py` no longer owns a duplicate free-shell planner**, but compatibility wrappers such as `read_skill_docs` / `execute_skill_script` still exist for older callers
 - **Legacy script-level skill helper APIs still exist as a compatibility layer**; `read_skill_docs` / `execute_skill_script` and related binding transforms remain for old flows, but they are no longer the planner's primary skill surface
 - **Scheduler** now supports optional loop leader election plus source-level coordination, but it still does not implement scheduler sharding or a richer distributed control plane
 - **Source persistence** now supports `json` and `sqlite`, but there is still no Redis/Mongo/Postgres-backed scheduler registry/state implementation

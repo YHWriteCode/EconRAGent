@@ -62,6 +62,8 @@ class _CapturingRouteJudge:
 class _StubSkillExecutor:
     def __init__(self):
         self.calls = []
+        self.status_calls = []
+        self.cancel_calls = []
 
     async def execute(self, **kwargs):
         self.calls.append(kwargs)
@@ -69,14 +71,40 @@ class _StubSkillExecutor:
             tool_name=f"skill:{kwargs['skill_name']}",
             success=True,
             data={
-                "status": "prepared",
+                "run_status": "planned",
+                "status": "planned",
                 "skill_name": kwargs["skill_name"],
                 "goal": kwargs["goal"],
                 "workspace": kwargs.get("workspace"),
+                "command_plan": {"mode": "inferred"},
                 "summary": f"Prepared skill {kwargs['skill_name']}",
             },
             metadata={"executor": "skill", "skill_name": kwargs["skill_name"]},
         )
+
+    async def get_run_status(self, *, run_id: str):
+        self.status_calls.append(run_id)
+        return {
+            "run_id": run_id,
+            "skill_name": "example-skill",
+            "run_status": "completed",
+            "status": "completed",
+            "success": True,
+            "command_plan": {"mode": "explicit"},
+        }
+
+    async def cancel_skill_run(self, *, run_id: str):
+        self.cancel_calls.append(run_id)
+        return {
+            "run_id": run_id,
+            "skill_name": "example-skill",
+            "run_status": "failed",
+            "status": "failed",
+            "success": False,
+            "failure_reason": "cancelled",
+            "cancel_requested": True,
+            "command_plan": {"mode": "explicit"},
+        }
 
 
 @pytest.mark.asyncio
@@ -603,6 +631,47 @@ async def test_agent_core_invoke_skill_executes_local_skill_directly(tmp_path: P
     assert response.metadata["kind"] == "skill"
     assert response.metadata["workspace"] == "ops"
     assert skill_executor.calls[0]["constraints"] == {"format": "xlsx"}
+
+
+@pytest.mark.asyncio
+async def test_agent_core_get_skill_run_status_delegates_to_skill_executor():
+    skill_executor = _StubSkillExecutor()
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        skill_executor=skill_executor,
+    )
+
+    status = await agent.get_skill_run_status(run_id="run-42")
+
+    assert skill_executor.status_calls == ["run-42"]
+    assert status["run_status"] == "completed"
+    assert status["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_agent_core_cancel_skill_run_delegates_to_skill_executor():
+    skill_executor = _StubSkillExecutor()
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        skill_executor=skill_executor,
+    )
+
+    status = await agent.cancel_skill_run(run_id="run-42")
+
+    assert skill_executor.cancel_calls == ["run-42"]
+    assert status["run_status"] == "failed"
+    assert status["failure_reason"] == "cancelled"
+    assert status["cancel_requested"] is True
 
 
 def test_agent_core_builds_route_judge_with_configured_prompt_version():
