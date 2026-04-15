@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 
-def _load_financial_skill_module(monkeypatch) -> object:
+def _install_financial_skill_stubs(monkeypatch) -> None:
     akshare_module = types.ModuleType("akshare")
     akshare_module.stock_zh_a_hist = lambda **_kwargs: pd.DataFrame()
     linearmodels_module = types.ModuleType("linearmodels")
@@ -37,7 +37,10 @@ def _load_financial_skill_module(monkeypatch) -> object:
     monkeypatch.setitem(sys.modules, "statsmodels.api", statsmodels_api_module)
     monkeypatch.setitem(sys.modules, "backtrader", backtrader_module)
 
-    module_path = Path("skills/financial-researching/scripts/fetch_model_backtest.py").resolve()
+
+def _load_financial_skill_script(monkeypatch, relative_path: str) -> object:
+    _install_financial_skill_stubs(monkeypatch)
+    module_path = Path(relative_path).resolve()
     module_name = f"financial_researching_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -45,6 +48,13 @@ def _load_financial_skill_module(monkeypatch) -> object:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_financial_skill_module(monkeypatch) -> object:
+    return _load_financial_skill_script(
+        monkeypatch,
+        "skills/financial-researching/scripts/fetch_model_backtest.py",
+    )
 
 
 def _akshare_frame(code: str) -> pd.DataFrame:
@@ -137,3 +147,41 @@ def test_fetch_data_exits_when_target_code_is_missing_after_fallback(
             "20230109",
             target_code="300750",
         )
+
+
+def test_analyze_stock_trend_reports_uptrend(monkeypatch):
+    module = _load_financial_skill_script(
+        monkeypatch,
+        "skills/financial-researching/scripts/analyze_stock_trend.py",
+    )
+
+    rising = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                [
+                    "2026-01-15",
+                    "2026-02-15",
+                    "2026-03-15",
+                    "2026-04-15",
+                ]
+            ),
+            "code": ["002594"] * 4,
+            "open": [300.0, 315.0, 330.0, 345.0],
+            "high": [305.0, 320.0, 335.0, 350.0],
+            "low": [295.0, 310.0, 325.0, 340.0],
+            "close": [302.0, 318.0, 336.0, 352.0],
+            "volume": [1_000_000, 1_050_000, 1_080_000, 1_100_000],
+            "amount": [3.02e8, 3.34e8, 3.63e8, 3.87e8],
+        }
+    )
+    standardized = module.standardize_stock_frame(rising)
+    result = module.analyze_stock(
+        standardized,
+        trend_start="20260115",
+        trend_end="20260415",
+    )
+    summary = module.build_summary(result)
+
+    assert result["trend"]["is_uptrend"] is True
+    assert result["trend"]["label"] == "uptrend"
+    assert "存在上涨趋势" in summary

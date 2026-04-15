@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import kg_agent.skills.command_planner as command_planner_module
 from kg_agent.skills import (
     SkillCommandPlanner,
     SkillExecutionRequest,
@@ -29,6 +30,14 @@ def _load_repo_skill(skill_name: str):
     registry = SkillRegistry(Path("skills"))
     loader = SkillLoader(registry)
     return loader.load_skill(skill_name)
+
+
+class _FixedDate:
+    @staticmethod
+    def today():
+        from datetime import date
+
+        return date(2026, 4, 15)
 
 
 @pytest.mark.asyncio
@@ -101,6 +110,24 @@ async def test_skill_command_planner_infers_single_entrypoint_command():
     assert plan.runtime_target.shell == "/bin/sh"
 
 
+def test_extract_relative_date_windows_supports_recent_year_and_three_months(monkeypatch):
+    monkeypatch.setattr(command_planner_module, "_current_date", _FixedDate.today)
+
+    windows = command_planner_module.extract_relative_date_windows(
+        "请分析最近一年比亚迪股票的波动情况，并判断近3个月是否上涨"
+    )
+
+    assert len(windows) == 2
+    primary = command_planner_module._select_primary_relative_date_window(windows)
+    secondary = command_planner_module._select_secondary_relative_date_window(windows)
+    assert primary is not None
+    assert secondary is not None
+    assert primary.start.strftime("%Y%m%d") == "20250415"
+    assert primary.end.strftime("%Y%m%d") == "20260415"
+    assert secondary.start.strftime("%Y%m%d") == "20260115"
+    assert secondary.end.strftime("%Y%m%d") == "20260415"
+
+
 @pytest.mark.asyncio
 async def test_skill_command_planner_supports_xlsx_recalc():
     loaded_skill = _load_repo_skill("xlsx")
@@ -122,6 +149,38 @@ async def test_skill_command_planner_supports_xlsx_recalc():
     assert plan.mode == "inferred"
     assert plan.entrypoint == "scripts/recalc.py"
     assert plan.cli_args == ["C:\\Reports\\model.xlsx"]
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_conservative_mode_can_lock_clear_financial_script(
+    monkeypatch,
+):
+    monkeypatch.setattr(command_planner_module, "_current_date", _FixedDate.today)
+    loaded_skill = _load_repo_skill("financial-researching")
+    planner = SkillCommandPlanner()
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="financial-researching",
+            goal="获取比亚迪股票（002594）最近一年的价格波动数据，并分析其最近三个月内是否存在上涨趋势。",
+            user_query="请帮我查找以下最近一年比亚迪002594股票的波动情况，3个月内是否有上涨趋势",
+            constraints={},
+        ),
+    )
+
+    assert plan.mode == "inferred"
+    assert plan.entrypoint == "scripts/analyze_stock_trend.py"
+    assert plan.shell_mode == "conservative"
+    assert "--code" in plan.cli_args
+    assert "002594" in plan.cli_args
+    assert "--start" in plan.cli_args
+    assert "20250415" in plan.cli_args
+    assert "--end" in plan.cli_args
+    assert "20260415" in plan.cli_args
+    assert "--trend-start" in plan.cli_args
+    assert "20260115" in plan.cli_args
+    assert "--trend-end" in plan.cli_args
 
 
 @pytest.mark.asyncio

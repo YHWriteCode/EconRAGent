@@ -75,6 +75,8 @@ kg_agent/
 - Keep the dependency direction one-way; `lightrag_fork/` must never import `kg_agent/`.
 - Do not introduce LangChain, LlamaIndex, or other heavy orchestration frameworks as core dependencies.
 - Keep planner-visible native capabilities, local skills, and external MCP capabilities as separate surfaces.
+- Keep skill catalog metadata explicit; planner matching depends on skill names, descriptions, and tags, so domain skills should publish strong bilingual keywords when needed.
+- Keep shipped skill script contracts inferable when possible; relative-date phrases and domain identifiers should resolve into explicit planner constraints without weakening execution safety.
 - Do not hardcode domain-specific placeholder tools into the native built-in registry; specialized integrations belong behind MCP or the skill runtime.
 - Prefer `rag_provider`-based dynamic workspace loading in API-facing flows instead of binding the app to one fixed `LightRAG` instance.
 

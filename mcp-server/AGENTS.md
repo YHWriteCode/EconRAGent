@@ -91,6 +91,7 @@ Environment defaults point the runtime at `/app/skills` for read-only skill cont
 - Keep shell execution bounded by explicit timeout, bootstrap, and repair limits. Do not turn this server into an unbounded autonomous shell agent.
 - Maintain compatibility wrappers such as `read_skill_docs` and `execute_skill_script` only as thin shims around the newer coarse-grained runtime APIs.
 - If you extend the container image, remember that the runtime depends on `kg_agent/` planner/runtime code as well as `skills/`.
+- If shipped skill files change, rebuild the runtime image even when `requirements.txt` is unchanged because `/app/skills` is baked into the container at build time.
 
 ---
 

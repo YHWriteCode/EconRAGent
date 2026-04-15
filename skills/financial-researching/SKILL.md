@@ -3,7 +3,7 @@ name: financial-researching
 description: >-
   该 skill 为 agent 提供金融数据获取、面板回归研究和策略回测的端到端能力。
   当用户需要拉取 A 股/基金/宏观等金融数据、执行面板回归或因子检验、
-  或将研究结论转化为量化策略并回测时，应触发此 skill。
+  分析股票行情、波动与趋势，或将研究结论转化为量化策略并回测时，应触发此 skill。
   覆盖"取数 → 清洗 → 建模 → 信号生成 → 回测 → 绩效评估"全链路。
 version: 0.1.0
 tags:
@@ -11,8 +11,16 @@ tags:
   - quantitative-research
   - panel-regression
   - backtesting
+  - A股
+  - 股票
+  - 行情
+  - 波动
+  - 趋势
+  - 金融数据
+  - 量化研究
 scripts:
   - scripts/fetch_market_data.py
+  - scripts/analyze_stock_trend.py
   - scripts/prepare_panel_data.py
   - scripts/run_panel_model.py
   - scripts/akshare_to_backtrader.py
@@ -40,6 +48,7 @@ references:
 | 任务类型 | 关键词信号 | 首要动作 |
 |----------|-----------|---------|
 | **数据获取** | "拉取数据""获取行情""下载K线""取宏观数据" | 确认标的、频率、时间范围，调用 AKShare |
+| **行情诊断** | "波动情况""趋势""上涨趋势""年化波动率""最大回撤" | 优先运行单标的行情分析脚本 |
 | **研究建模** | "面板回归""因子检验""显著性""固定效应""工具变量" | 确认因变量、自变量、面板结构，使用 linearmodels |
 | **策略回测** | "回测""策略""买入卖出信号""绩效""最大回撤" | 确认数据源、策略规则、评估指标，使用 backtrader |
 | **端到端流程** | "从取数到回测""完整研究""一条龙" | 按 取数→清洗→建模→信号→回测 顺序串联执行 |
@@ -80,6 +89,7 @@ references:
 ### 推荐脚本
 
 - `scripts/fetch_market_data.py`：获取行情数据并标准化输出
+- `scripts/analyze_stock_trend.py`：分析单只股票的区间波动率、最大回撤和最近窗口趋势
 - `scripts/prepare_panel_data.py`：将多标的数据整合为面板格式
 
 ---

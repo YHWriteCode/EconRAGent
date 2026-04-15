@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import calendar
 import os
 import re
 import shlex
+from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
@@ -47,7 +50,17 @@ DATE_TOKEN_PATTERN = re.compile(
 PAREN_SYMBOL_PATTERN = re.compile(
     r"\((?P<symbol>[A-Za-z]{1,5}|\d{6})\)",
 )
+DIGIT_SYMBOL_PATTERN = re.compile(r"(?<!\d)(?P<symbol>\d{6})(?!\d)")
 UPPERCASE_SYMBOL_PATTERN = re.compile(r"\b(?P<symbol>[A-Z]{1,5}|\d{6})\b")
+RELATIVE_DATE_WINDOW_PATTERN = re.compile(
+    r"(?:(?P<prefix>最近|近|过去|过去的|近来|last|past|previous)\s*"
+    r"(?P<quantity>[0-9]+|一|二|两|三|四|五|六|七|八|九|十|十一|十二)?\s*"
+    r"(?P<unit>年|个月|月|周|天|years?|year|months?|month|weeks?|week|days?|day))"
+    r"|(?:(?P<quantity_suffix>[0-9]+|一|二|两|三|四|五|六|七|八|九|十|十一|十二)\s*"
+    r"(?P<unit_suffix>年|个月|月|周|天|years?|year|months?|month|weeks?|week|days?|day)"
+    r"(?P<suffix>内|以来|之内))",
+    re.IGNORECASE,
+)
 UPPERCASE_SYMBOL_STOPWORDS = {
     "API",
     "CSV",
@@ -76,10 +89,14 @@ CODE_LIKE_FLAG_NAMES = {
 }
 START_DATE_FLAG_NAMES = {"start", "start_date", "from", "date_from"}
 END_DATE_FLAG_NAMES = {"end", "end_date", "to", "date_to"}
+TREND_START_DATE_FLAG_NAMES = {"trend_start", "trend_start_date", "window_start"}
+TREND_END_DATE_FLAG_NAMES = {"trend_end", "trend_end_date", "window_end"}
 OPTIONAL_INFERABLE_FLAG_NAMES = (
     CODE_LIKE_FLAG_NAMES
     | START_DATE_FLAG_NAMES
     | END_DATE_FLAG_NAMES
+    | TREND_START_DATE_FLAG_NAMES
+    | TREND_END_DATE_FLAG_NAMES
     | {"output", "output_path", "format", "mode", "dep", "indep", "notes", "note", "description"}
 )
 SCRIPT_FIRST_REQUEST_PATTERN = re.compile(
@@ -113,6 +130,135 @@ class SkillPlannerLLMClient(Protocol):
         max_tokens: int = 1200,
     ) -> dict[str, Any]:
         ...
+
+
+@dataclass(frozen=True)
+class RelativeDateWindow:
+    quantity: int
+    unit: str
+    start: date
+    end: date
+    matched_text: str
+
+
+def _current_date() -> date:
+    return date.today()
+
+
+def _parse_small_int(value: str | None) -> int:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return 1
+    if normalized.isdigit():
+        return max(1, int(normalized))
+    direct = {
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+        "十一": 11,
+        "十二": 12,
+    }
+    if normalized in direct:
+        return direct[normalized]
+    if "十" in normalized:
+        left, _, right = normalized.partition("十")
+        tens = direct.get(left, 1) if left else 1
+        ones = direct.get(right, 0) if right else 0
+        return max(1, tens * 10 + ones)
+    return 1
+
+
+def _normalize_relative_unit(raw_unit: str | None) -> str | None:
+    normalized = str(raw_unit or "").strip().lower()
+    if normalized in {"年", "year", "years"}:
+        return "years"
+    if normalized in {"个月", "月", "month", "months"}:
+        return "months"
+    if normalized in {"周", "week", "weeks"}:
+        return "weeks"
+    if normalized in {"天", "day", "days"}:
+        return "days"
+    return None
+
+
+def _shift_date_by_months(base: date, months: int) -> date:
+    absolute_month = base.year * 12 + (base.month - 1) + months
+    year = absolute_month // 12
+    month = absolute_month % 12 + 1
+    day = min(base.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _subtract_relative_window(reference_date: date, quantity: int, unit: str) -> date:
+    if unit == "years":
+        return _shift_date_by_months(reference_date, -(quantity * 12))
+    if unit == "months":
+        return _shift_date_by_months(reference_date, -quantity)
+    if unit == "weeks":
+        return reference_date - timedelta(weeks=quantity)
+    if unit == "days":
+        return reference_date - timedelta(days=quantity)
+    return reference_date
+
+
+def extract_relative_date_windows(
+    text: str,
+    *,
+    reference_date: date | None = None,
+) -> list[RelativeDateWindow]:
+    end_date = reference_date or _current_date()
+    windows: list[RelativeDateWindow] = []
+    seen: set[tuple[int, str, date, date]] = set()
+    for match in RELATIVE_DATE_WINDOW_PATTERN.finditer(text or ""):
+        quantity_text = match.group("quantity") or match.group("quantity_suffix")
+        unit_text = match.group("unit") or match.group("unit_suffix")
+        unit = _normalize_relative_unit(unit_text)
+        if unit is None:
+            continue
+        quantity = _parse_small_int(quantity_text)
+        start_date = _subtract_relative_window(end_date, quantity, unit)
+        window = RelativeDateWindow(
+            quantity=quantity,
+            unit=unit,
+            start=start_date,
+            end=end_date,
+            matched_text=match.group(0).strip(),
+        )
+        identity = (window.quantity, window.unit, window.start, window.end)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        windows.append(window)
+    return windows
+
+
+def _window_duration_days(window: RelativeDateWindow) -> int:
+    return max(0, (window.end - window.start).days)
+
+
+def _select_primary_relative_date_window(
+    windows: list[RelativeDateWindow],
+) -> RelativeDateWindow | None:
+    if not windows:
+        return None
+    return max(windows, key=_window_duration_days)
+
+
+def _select_secondary_relative_date_window(
+    windows: list[RelativeDateWindow],
+) -> RelativeDateWindow | None:
+    if len(windows) < 2:
+        return None
+    ranked = sorted(windows, key=_window_duration_days)
+    return ranked[0]
 
 
 def split_skill_markdown(raw: str) -> tuple[dict[str, Any], str]:
@@ -659,6 +805,14 @@ def extract_symbol_candidates(text: str) -> list[str]:
             continue
         candidates.append(normalized)
         seen.add(normalized)
+    for match in DIGIT_SYMBOL_PATTERN.finditer(text or ""):
+        symbol = str(match.group("symbol") or "").strip()
+        if not symbol:
+            continue
+        if symbol in seen:
+            continue
+        candidates.append(symbol)
+        seen.add(symbol)
     for match in UPPERCASE_SYMBOL_PATTERN.finditer(text or ""):
         symbol = str(match.group("symbol") or "").strip()
         if not symbol:
@@ -799,6 +953,7 @@ def infer_required_flag_value(
 ) -> str | None:
     normalized = flag.lstrip("-").replace("-", "_")
     combined_text = f"{goal}\n{user_query}"
+    relative_windows = extract_relative_date_windows(combined_text)
     candidate_keys = [normalized, flag, normalized.removesuffix("_path")]
     if normalized in CODE_LIKE_FLAG_NAMES:
         candidate_keys.extend(["target", "target_code", "code", "codes", "ticker", "symbol"])
@@ -810,6 +965,10 @@ def infer_required_flag_value(
         candidate_keys.extend(["format", "output_format"])
     elif normalized == "mode":
         candidate_keys.append("mode")
+    elif normalized in TREND_START_DATE_FLAG_NAMES:
+        candidate_keys.extend(["trend_start", "trend_start_date", "window_start"])
+    elif normalized in TREND_END_DATE_FLAG_NAMES:
+        candidate_keys.extend(["trend_end", "trend_end_date", "window_end"])
     for key in candidate_keys:
         value = constraints.get(key)
         if isinstance(value, str) and value.strip():
@@ -820,10 +979,26 @@ def infer_required_flag_value(
                 return ",".join(normalized_items)
     if normalized in START_DATE_FLAG_NAMES:
         dates = extract_date_candidates(combined_text)
-        return dates[0] if dates else None
+        if dates:
+            return dates[0]
+        primary_window = _select_primary_relative_date_window(relative_windows)
+        return primary_window.start.strftime("%Y%m%d") if primary_window else None
     if normalized in END_DATE_FLAG_NAMES:
         dates = extract_date_candidates(combined_text)
-        return dates[-1] if len(dates) >= 2 else None
+        if len(dates) >= 2:
+            return dates[-1]
+        primary_window = _select_primary_relative_date_window(relative_windows)
+        return primary_window.end.strftime("%Y%m%d") if primary_window else None
+    if normalized in TREND_START_DATE_FLAG_NAMES:
+        window = _select_secondary_relative_date_window(relative_windows) or _select_primary_relative_date_window(
+            relative_windows
+        )
+        return window.start.strftime("%Y%m%d") if window else None
+    if normalized in TREND_END_DATE_FLAG_NAMES:
+        window = _select_secondary_relative_date_window(relative_windows) or _select_primary_relative_date_window(
+            relative_windows
+        )
+        return window.end.strftime("%Y%m%d") if window else None
     if normalized in {"target", "target_code", "code", "ticker", "symbol"}:
         symbols = extract_symbol_candidates(combined_text)
         return symbols[0] if symbols else None
@@ -1021,6 +1196,7 @@ def _build_preferred_shipped_script_plan(
     loaded_skill: LoadedSkill,
     request: SkillExecutionRequest,
     shell_hints: dict[str, Any],
+    shell_mode: SkillShellMode,
 ) -> SkillCommandPlan | None:
     query_text = "\n".join(
         [
@@ -1104,10 +1280,10 @@ def _build_preferred_shipped_script_plan(
             runtime_target=request.runtime_target,
         ),
         mode="inferred",
-        shell_mode="free_shell",
+        shell_mode=shell_mode,
         rationale=(
-            "In free-shell mode, locked onto the documented shipped skill script whose CLI "
-            "could be inferred from the request, so no generated helper script was allowed."
+            "Locked onto the documented shipped skill script whose CLI could be inferred "
+            "from the request."
         ),
         entrypoint=best["entrypoint"],
         cli_args=list(best["cli_args"]),
@@ -1184,6 +1360,7 @@ class SkillCommandPlanner:
             loaded_skill=loaded_skill,
             request=normalized_request,
             shell_hints=shell_hints,
+            shell_mode=shell_mode,
         )
         if preferred_shipped_plan is not None:
             return preferred_shipped_plan
@@ -1249,6 +1426,15 @@ class SkillCommandPlanner:
             )
 
         runnable_scripts = list(shell_hints.get("runnable_scripts", []))
+        if len(runnable_scripts) > 1:
+            preferred_shipped_plan = _build_preferred_shipped_script_plan(
+                loaded_skill=loaded_skill,
+                request=request,
+                shell_hints=shell_hints,
+                shell_mode=request.shell_mode,
+            )
+            if preferred_shipped_plan is not None:
+                return preferred_shipped_plan
         if len(runnable_scripts) == 1:
             entrypoint = runnable_scripts[0]
             structured_cli_args = extract_structured_cli_args(constraints)

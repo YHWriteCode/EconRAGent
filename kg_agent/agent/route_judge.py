@@ -1023,7 +1023,7 @@ class RouteJudge:
             if isinstance(tag, str)
         ]
         for tag in tags:
-            if len(tag) < 3:
+            if not cls._is_searchable_keyword(tag):
                 continue
             if tag in query_lower:
                 score += 3
@@ -1034,6 +1034,15 @@ class RouteJudge:
                 if item_name and token in item_name:
                     score += 1
         return score
+
+    @staticmethod
+    def _is_searchable_keyword(keyword: str) -> bool:
+        normalized = (keyword or "").strip().lower()
+        if not normalized:
+            return False
+        if any(ord(char) > 127 for char in normalized):
+            return len(normalized) >= 2
+        return len(normalized) >= 3
 
     @staticmethod
     def _build_search_text(item: dict[str, Any]) -> str:

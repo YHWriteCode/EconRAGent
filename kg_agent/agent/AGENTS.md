@@ -67,6 +67,11 @@ Planner surfaces are intentionally split:
 - `CapabilityRegistry` is the planner and API-visible catalog of native and external capabilities.
 - `SkillRegistry` is a separate planner-facing catalog for local skills.
 
+Skill auto-routing quality depends on the catalog metadata the planner sees:
+
+- local skills should publish clear names, descriptions, and tags
+- domain skills should include strong bilingual keywords when the user may query in either Chinese or English
+
 Keep those layers distinct. A local skill is not a planner-visible MCP tool, and a native tool is not the same thing as a capability record.
 
 ---

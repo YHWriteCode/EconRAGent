@@ -6,6 +6,7 @@ from kg_agent.agent.prompts import (
     build_route_judge_prompt,
     list_route_judge_prompt_versions,
 )
+from kg_agent.skills.registry import SkillRegistry
 
 
 @pytest.mark.asyncio
@@ -135,6 +136,27 @@ async def test_route_judge_selects_local_skill_from_available_skills():
     assert route.skill_plan is not None
     assert route.skill_plan.skill_name == "xlsx"
     assert "xlsx" in route.skill_plan.goal.lower()
+
+
+@pytest.mark.asyncio
+async def test_route_judge_selects_financial_researching_skill_for_chinese_stock_analysis():
+    judge = RouteJudge(default_max_iterations=3)
+    skill_registry = SkillRegistry("skills")
+
+    route = await judge.plan(
+        query="请帮我查找以下最近一年比亚迪002594股票的波动情况，3个月内是否有上涨趋势",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            skill.to_catalog_dict() for skill in skill_registry.refresh()
+        ],
+    )
+
+    assert route.strategy == "skill_request"
+    assert route.need_tools is False
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "financial-researching"
 
 
 @pytest.mark.asyncio
