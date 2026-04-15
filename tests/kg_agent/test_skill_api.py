@@ -257,6 +257,10 @@ def test_skill_run_logs_endpoint_returns_404_for_unknown_run(tmp_path: Path):
         response = client.get("/agent/skill-runs/missing-run/logs")
 
     assert status_response.status_code == 404
-    assert "Unknown run_id: missing-run" in status_response.json()["detail"]
+    status_payload = status_response.json()
+    assert status_payload["error"]["code"] == "not_found"
+    assert "Unknown run_id: missing-run" in status_payload["error"]["message"]
     assert response.status_code == 404
-    assert "Unknown run_id: missing-run" in response.json()["detail"]
+    payload = response.json()
+    assert payload["error"]["code"] == "not_found"
+    assert "Unknown run_id: missing-run" in payload["error"]["message"]

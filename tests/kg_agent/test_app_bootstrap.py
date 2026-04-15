@@ -16,6 +16,7 @@ from kg_agent.api.app import (
 )
 from kg_agent.api.agent_routes import create_agent_routes
 from kg_agent.config import (
+    APIConfig,
     AgentModelConfig,
     AgentRuntimeConfig,
     KGAgentConfig,
@@ -209,6 +210,8 @@ def test_build_mcp_adapter_from_env_returns_adapter_for_runtime_only_server(monk
 def test_health_reports_default_workspace_and_active_workspace_count(
     tmp_path, monkeypatch
 ):
+    monkeypatch.delenv("KG_AGENT_MCP_SERVERS_JSON", raising=False)
+    monkeypatch.delenv("KG_AGENT_MCP_CAPABILITIES_JSON", raising=False)
     monkeypatch.setenv("WORKING_DIR", str(tmp_path / "rag_storage"))
     monkeypatch.setenv("LIGHTRAG_KV_STORAGE", "JsonKVStorage")
     monkeypatch.setenv("LIGHTRAG_GRAPH_STORAGE", "NetworkXStorage")
@@ -390,10 +393,201 @@ def test_agent_chat_stream_endpoint_returns_sse():
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    assert 'event: route\ndata: {"type": "route", "route": {"strategy": "factual_qa"}}' in body
     assert 'data: {"type": "route", "route": {"strategy": "factual_qa"}}' in body
     assert 'data: {"type": "tool_start", "tool": "kg_hybrid_search", "index": 1}' in body
     assert 'data: {"type": "delta", "content": "hello"}' in body
     assert '"type": "done"' in body
+
+
+def test_agent_chat_stream_endpoint_emits_structured_error_event():
+    class _StubAgentCore:
+        async def chat(self, **kwargs):
+            raise AssertionError("non-stream path should not be used")
+
+        async def chat_stream(self, **kwargs):
+            yield {"type": "meta", "metadata": {"streaming_supported": True}}
+            raise RuntimeError("stream exploded")
+
+    app = FastAPI()
+    app.include_router(create_agent_routes(_StubAgentCore()))
+
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/agent/chat",
+            json={
+                "query": "hello",
+                "session_id": "stream-session",
+                "stream": True,
+            },
+        ) as response:
+            body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert 'event: error\ndata: {"type": "error"' in body
+    assert '"code": "stream_error"' in body
+
+
+def test_create_app_enables_cors_for_configured_origin():
+    class _StubAgentCore:
+        async def chat(self, **kwargs):
+            return None
+
+        async def chat_stream(self, **kwargs):
+            if False:
+                yield None
+
+    app = create_app(
+        agent_core=_StubAgentCore(),
+        config=KGAgentConfig(
+            api=APIConfig(cors_origins=["http://localhost:3000"]),
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.options(
+            "/health",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
+def test_validation_errors_use_uniform_error_envelope():
+    class _StubAgentCore:
+        async def chat(self, **kwargs):
+            return None
+
+        async def chat_stream(self, **kwargs):
+            if False:
+                yield None
+
+    app = create_app(agent_core=_StubAgentCore())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/agent/chat",
+            json={"session_id": "missing-query"},
+        )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["error"]["code"] == "validation_error"
+    assert payload["error"]["status_code"] == 422
+    assert payload["error"]["details"]
+
+
+def test_unhandled_errors_use_internal_error_envelope():
+    class _StubAgentCore:
+        async def chat(self, **kwargs):
+            raise RuntimeError("secret stack detail")
+
+        async def chat_stream(self, **kwargs):
+            if False:
+                yield None
+
+    app = create_app(agent_core=_StubAgentCore())
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/agent/chat",
+            json={"query": "hello", "session_id": "err-session"},
+        )
+
+    assert response.status_code == 500
+    payload = response.json()
+    assert payload["error"]["code"] == "internal_error"
+    assert payload["error"]["message"] == "Internal server error."
+
+
+def test_value_error_routes_use_bad_request_envelope():
+    class _StubAgentCore:
+        def read_skill_file(self, skill_name: str, relative_path: str):
+            raise ValueError("relative_path must stay inside the skill directory")
+
+    app = create_app(agent_core=_StubAgentCore())
+
+    with TestClient(app) as client:
+        response = client.get("/agent/skills/demo/files/reference.md")
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["code"] == "bad_request"
+    assert "relative_path must stay inside the skill directory" in payload["error"]["message"]
+
+
+def test_runtime_error_routes_use_service_unavailable_envelope():
+    class _StubAgentCore:
+        async def get_skill_run_status(self, *, run_id: str):
+            raise RuntimeError("Skill runtime client is not configured")
+
+    app = create_app(agent_core=_StubAgentCore())
+
+    with TestClient(app) as client:
+        response = client.get("/agent/skill-runs/skill-run-123")
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["error"]["code"] == "service_unavailable"
+    assert "Skill runtime client is not configured" in payload["error"]["message"]
+
+
+def test_ready_reports_ready_when_agent_core_and_rag_provider_exist(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("WORKING_DIR", str(tmp_path / "rag_storage"))
+    monkeypatch.setenv("LIGHTRAG_KV_STORAGE", "JsonKVStorage")
+    monkeypatch.setenv("LIGHTRAG_GRAPH_STORAGE", "NetworkXStorage")
+    monkeypatch.setenv("LIGHTRAG_VECTOR_STORAGE", "NanoVectorDBStorage")
+    monkeypatch.setenv("LIGHTRAG_DOC_STATUS_STORAGE", "JsonDocStatusStorage")
+    monkeypatch.setenv("LLM_BINDING", "openai")
+    monkeypatch.setenv("EMBEDDING_BINDING", "openai")
+    monkeypatch.setenv("LLM_BINDING_HOST", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("EMBEDDING_BINDING_HOST", "http://127.0.0.1:8000/v1")
+    monkeypatch.setenv("LLM_BINDING_API_KEY", "test-key")
+    monkeypatch.setenv("EMBEDDING_BINDING_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_MODEL", "dummy-chat-model")
+    monkeypatch.setenv("EMBEDDING_MODEL", "dummy-embed-model")
+    monkeypatch.setenv("EMBEDDING_DIM", "1536")
+
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.get("/ready")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ready"
+    assert payload["checks"]["agent_core"] is True
+    assert payload["checks"]["rag"] is True
+
+
+def test_ready_reports_not_ready_without_rag_binding():
+    class _StubAgentCore:
+        async def chat(self, **kwargs):
+            return None
+
+        async def chat_stream(self, **kwargs):
+            if False:
+                yield None
+
+    app = create_app(agent_core=_StubAgentCore())
+
+    with TestClient(app) as client:
+        response = client.get("/ready")
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["status"] == "not_ready"
+    assert payload["checks"]["agent_core"] is True
+    assert payload["checks"]["rag"] is False
 
 
 def test_create_app_starts_cross_session_background_maintenance():

@@ -77,6 +77,19 @@ def _env_json(name: str, default: Any) -> Any:
         return default
 
 
+def _env_csv(name: str, default: list[str]) -> list[str]:
+    value = os.getenv(name)
+    if value is None:
+        return list(default)
+    normalized = value.strip()
+    if not normalized:
+        return list(default)
+    if normalized == "*":
+        return ["*"]
+    parts = [item.strip() for item in normalized.split(",") if item.strip()]
+    return parts or list(default)
+
+
 def _default_skill_runtime_target():
     from kg_agent.skills.models import SkillRuntimeTarget
 
@@ -678,6 +691,22 @@ class PersistenceConfig:
 
 
 @dataclass
+class APIConfig:
+    cors_origins: list[str] = field(default_factory=lambda: ["*"])
+    expose_internal_errors: bool = False
+
+    @classmethod
+    def from_env(cls) -> "APIConfig":
+        return cls(
+            cors_origins=_env_csv("KG_AGENT_CORS_ORIGINS", ["*"]),
+            expose_internal_errors=_env_bool(
+                "KG_AGENT_EXPOSE_INTERNAL_ERRORS",
+                False,
+            ),
+        )
+
+
+@dataclass
 class AgentRuntimeConfig:
     default_workspace: str = ""
     default_domain_schema: str = "general"
@@ -717,6 +746,7 @@ class KGAgentConfig:
     agent_model: AgentModelConfig = field(default_factory=AgentModelConfig)
     utility_model: AgentModelConfig = field(default_factory=AgentModelConfig)
     tool_config: ToolConfig = field(default_factory=ToolConfig)
+    api: APIConfig = field(default_factory=APIConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     skill_runtime: SkillRuntimeConfig = field(default_factory=SkillRuntimeConfig)
     crawler: CrawlerConfig = field(default_factory=CrawlerConfig)
@@ -734,6 +764,7 @@ class KGAgentConfig:
             agent_model=AgentModelConfig.from_env(),
             utility_model=AgentModelConfig.from_utility_env(),
             tool_config=ToolConfig.from_env(),
+            api=APIConfig.from_env(),
             mcp=MCPConfig.from_env(),
             skill_runtime=SkillRuntimeConfig.from_env(),
             crawler=CrawlerConfig.from_env(),

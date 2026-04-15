@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import os
 from contextlib import asynccontextmanager
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from lightrag_fork import LightRAG
 from lightrag_fork.api.config import get_default_host
@@ -23,7 +27,7 @@ from lightrag_fork.kg.shared_storage import finalize_share_data
 from lightrag_fork.utils import EmbeddingFunc, get_env_value
 
 from kg_agent.agent.agent_core import AgentCore
-from kg_agent.api.agent_routes import create_agent_routes
+from kg_agent.api.agent_routes import build_error_envelope, create_agent_routes
 from kg_agent.config import KGAgentConfig
 from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
 from kg_agent.crawler.crawl_state_store import build_crawl_state_store
@@ -35,6 +39,7 @@ from kg_agent.memory.cross_session_store import CrossSessionStore
 from kg_agent.memory.user_profile import UserProfileStore
 
 load_dotenv(dotenv_path=".env", override=False)
+logger = logging.getLogger(__name__)
 
 
 class EnvLightRAGProvider:
@@ -716,11 +721,32 @@ def create_app(
                 await rag_instance.finalize_storages()
                 finalize_share_data()
 
+    def _expose_internal_errors() -> bool:
+        return bool(
+            config_obj.api.expose_internal_errors or config_obj.runtime.debug
+        )
+
+    def _build_readiness_checks() -> dict[str, bool]:
+        return {
+            "agent_core": bool(agent_core is not None),
+            "rag": bool(rag_instance is not None or rag_provider is not None),
+            "dynamic_workspace": bool(rag_provider is not None),
+            "scheduler": bool(scheduler is not None),
+            "mcp": bool(mcp_adapter is not None),
+        }
+
     app = FastAPI(
         title="KG Agent API",
         description="Business-layer agent API on top of LightRAG backend",
         version="0.1.0",
         lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config_obj.api.cors_origins or ["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
     app.state.rag = rag_instance
     app.state.rag_provider = rag_provider
@@ -728,7 +754,58 @@ def create_app(
     app.state.mcp_adapter = mcp_adapter
     app.state.agent_core = agent_core
     app.state.scheduler = scheduler
-    app.include_router(create_agent_routes(agent_core, scheduler=scheduler))
+    app.state.config = config_obj
+    app.include_router(
+        create_agent_routes(
+            agent_core,
+            scheduler=scheduler,
+            expose_internal_errors=_expose_internal_errors(),
+        )
+    )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(
+        request: Request,
+        exc: RequestValidationError,
+    ):
+        return JSONResponse(
+            status_code=422,
+            content=build_error_envelope(
+                422,
+                code="validation_error",
+                detail="Request validation failed.",
+                details=exc.errors(),
+                expose_internal_errors=True,
+            ),
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=build_error_envelope(
+                exc.status_code,
+                detail=exc.detail,
+                expose_internal_errors=_expose_internal_errors(),
+            ),
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        logger.exception(
+            "Unhandled exception while serving %s %s",
+            request.method,
+            request.url.path,
+        )
+        return JSONResponse(
+            status_code=500,
+            content=build_error_envelope(
+                500,
+                code="internal_error",
+                detail=str(exc),
+                expose_internal_errors=_expose_internal_errors(),
+            ),
+        )
 
     @app.get("/health")
     async def health():
@@ -784,6 +861,19 @@ def create_app(
                 )
             ),
         }
+
+    @app.get("/ready")
+    async def ready():
+        checks = _build_readiness_checks()
+        is_ready = checks["agent_core"] and checks["rag"]
+        payload = {
+            "status": "ready" if is_ready else "not_ready",
+            "service": "kg_agent",
+            "checks": checks,
+        }
+        if is_ready:
+            return payload
+        return JSONResponse(status_code=503, content=payload)
 
     return app
 

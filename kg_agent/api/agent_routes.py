@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -8,6 +9,93 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from kg_agent.crawler.source_registry import MonitoredSource
+
+
+def _error_code_for_status(status_code: int) -> str:
+    if status_code == 422:
+        return "validation_error"
+    if status_code == 400:
+        return "bad_request"
+    if status_code == 404:
+        return "not_found"
+    if status_code == 503:
+        return "service_unavailable"
+    return "internal_error" if status_code >= 500 else "bad_request"
+
+
+def _default_error_message(code: str) -> str:
+    return {
+        "validation_error": "Request validation failed.",
+        "bad_request": "Bad request.",
+        "not_found": "Resource not found.",
+        "service_unavailable": "Service unavailable.",
+        "internal_error": "Internal server error.",
+        "stream_error": "Streaming request failed.",
+    }.get(code, "Request failed.")
+
+
+def _extract_error_message(detail: Any, *, fallback: str) -> str:
+    if isinstance(detail, str):
+        normalized = detail.strip()
+        if normalized:
+            return normalized
+    if isinstance(detail, dict):
+        value = detail.get("message")
+        if isinstance(value, str):
+            normalized = value.strip()
+            if normalized:
+                return normalized
+    return fallback
+
+
+def build_error_envelope(
+    status_code: int,
+    *,
+    detail: Any = None,
+    code: str | None = None,
+    details: list[Any] | None = None,
+    expose_internal_errors: bool = False,
+    public_message: str | None = None,
+) -> dict[str, Any]:
+    resolved_code = code or _error_code_for_status(status_code)
+    default_message = public_message or _default_error_message(resolved_code)
+    if resolved_code in {"internal_error", "stream_error"} and not expose_internal_errors:
+        message = default_message
+    else:
+        message = _extract_error_message(detail, fallback=default_message)
+    payload: dict[str, Any] = {
+        "error": {
+            "code": resolved_code,
+            "message": message,
+            "status_code": status_code,
+        }
+    }
+    if details is not None:
+        payload["error"]["details"] = details
+    return payload
+
+
+def _format_sse_event(payload: dict[str, Any]) -> str:
+    event_type = str(payload.get("type", "message")).strip() or "message"
+    serialized = json.dumps(payload, ensure_ascii=False)
+    return f"event: {event_type}\ndata: {serialized}\n\n"
+
+
+def _build_stream_error_payload(
+    exc: Exception,
+    *,
+    expose_internal_errors: bool,
+) -> dict[str, Any]:
+    return {
+        "type": "error",
+        **build_error_envelope(
+            500,
+            code="stream_error",
+            detail=str(exc),
+            expose_internal_errors=expose_internal_errors,
+            public_message="Streaming request failed.",
+        ),
+    }
 
 
 class ChatRequest(BaseModel):
@@ -491,32 +579,17 @@ class SchedulerTriggerResponse(BaseModel):
     summary: str = ""
 
 
-def create_agent_routes(agent_core, scheduler=None):
+def create_agent_routes(
+    agent_core,
+    scheduler=None,
+    *,
+    expose_internal_errors: bool = False,
+):
     router = APIRouter(tags=["agent"])
 
     async def _sse_stream(request: ChatRequest):
-        async for event in agent_core.chat_stream(
-            query=request.query,
-            session_id=request.session_id,
-            user_id=request.user_id,
-            workspace=request.workspace,
-            domain_schema=request.domain_schema,
-            max_iterations=request.max_iterations,
-            use_memory=request.use_memory,
-            debug=request.debug,
-        ):
-            payload = json.dumps(event, ensure_ascii=False)
-            yield f"data: {payload}\n\n"
-
-    @router.post("/agent/chat", response_model=ChatResponse)
-    async def agent_chat(request: ChatRequest):
         try:
-            if request.stream:
-                return StreamingResponse(
-                    _sse_stream(request),
-                    media_type="text/event-stream",
-                )
-            response = await agent_core.chat(
+            async for event in agent_core.chat_stream(
                 query=request.query,
                 session_id=request.session_id,
                 user_id=request.user_id,
@@ -525,34 +598,59 @@ def create_agent_routes(agent_core, scheduler=None):
                 max_iterations=request.max_iterations,
                 use_memory=request.use_memory,
                 debug=request.debug,
-                stream=request.stream,
-            )
-            return response.to_dict()
+            ):
+                yield _format_sse_event(event)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            yield _format_sse_event(
+                _build_stream_error_payload(
+                    exc,
+                    expose_internal_errors=expose_internal_errors,
+                )
+            )
+
+    @router.post("/agent/chat", response_model=ChatResponse)
+    async def agent_chat(request: ChatRequest):
+        if request.stream:
+            return StreamingResponse(
+                _sse_stream(request),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        response = await agent_core.chat(
+            query=request.query,
+            session_id=request.session_id,
+            user_id=request.user_id,
+            workspace=request.workspace,
+            domain_schema=request.domain_schema,
+            max_iterations=request.max_iterations,
+            use_memory=request.use_memory,
+            debug=request.debug,
+            stream=request.stream,
+        )
+        return response.to_dict()
 
     @router.post("/agent/ingest", response_model=IngestResponse)
     async def agent_ingest(request: IngestRequest):
-        try:
-            rag = await agent_core._resolve_rag(request.workspace)
-            docs = (
-                [request.content]
-                if isinstance(request.content, str)
-                else request.content
-            )
-            track_id = await rag.ainsert(
-                input=docs if len(docs) > 1 else docs[0],
-                file_paths=request.source,
-            )
-            return IngestResponse(
-                status="accepted",
-                track_id=track_id,
-                document_count=len(docs),
-                source=request.source,
-                message=f"Accepted {len(docs)} document(s) for ingestion",
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        rag = await agent_core._resolve_rag(request.workspace)
+        docs = (
+            [request.content]
+            if isinstance(request.content, str)
+            else request.content
+        )
+        track_id = await rag.ainsert(
+            input=docs if len(docs) > 1 else docs[0],
+            file_paths=request.source,
+        )
+        return IngestResponse(
+            status="accepted",
+            track_id=track_id,
+            document_count=len(docs),
+            source=request.source,
+            message=f"Accepted {len(docs)} document(s) for ingestion",
+        )
 
     @router.get("/agent/tools", response_model=ToolsResponse)
     async def list_agent_tools():
@@ -568,8 +666,6 @@ def create_agent_routes(agent_core, scheduler=None):
             return agent_core.read_skill(skill_name)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.get(
         "/agent/skills/{skill_name}/files/{relative_path:path}",
@@ -584,8 +680,6 @@ def create_agent_routes(agent_core, scheduler=None):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post(
         "/agent/skills/{skill_name}/invoke",
@@ -605,8 +699,6 @@ def create_agent_routes(agent_core, scheduler=None):
             return response.to_dict()
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.get(
         "/agent/skill-runs/{run_id}",
@@ -619,8 +711,6 @@ def create_agent_routes(agent_core, scheduler=None):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post(
         "/agent/skill-runs/{run_id}/cancel",
@@ -633,8 +723,6 @@ def create_agent_routes(agent_core, scheduler=None):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.get(
         "/agent/skill-runs/{run_id}/logs",
@@ -647,8 +735,6 @@ def create_agent_routes(agent_core, scheduler=None):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.get(
         "/agent/skill-runs/{run_id}/artifacts",
@@ -661,8 +747,6 @@ def create_agent_routes(agent_core, scheduler=None):
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post(
         "/agent/capabilities/{capability_name}/invoke",
@@ -683,23 +767,16 @@ def create_agent_routes(agent_core, scheduler=None):
             return response.to_dict()
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @router.post("/agent/route_preview", response_model=RoutePreviewResponse)
     async def route_preview(request: RoutePreviewRequest):
-        try:
-            route = await agent_core.preview_route(
-                query=request.query,
-                session_id=request.session_id,
-                user_id=request.user_id,
-                use_memory=request.use_memory,
-            )
-            from dataclasses import asdict
-
-            return {"route": asdict(route)}
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        route = await agent_core.preview_route(
+            query=request.query,
+            session_id=request.session_id,
+            user_id=request.user_id,
+            use_memory=request.use_memory,
+        )
+        return {"route": asdict(route)}
 
     @router.get("/agent/scheduler/status", response_model=SchedulerStatusResponse)
     async def scheduler_status():
