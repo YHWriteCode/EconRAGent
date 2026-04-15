@@ -248,6 +248,19 @@ def extract_python_examples(markdown: str) -> list[dict[str, str]]:
     return extract_code_examples(markdown, languages={"python", "py"})
 
 
+def extract_documented_script_paths(markdown: str) -> list[str]:
+    _, body = split_skill_markdown(markdown)
+    documented: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"(?P<path>scripts/[A-Za-z0-9_./-]+\.(?:py|sh|bash|ps1))", body):
+        path = str(match.group("path") or "").replace("\\", "/").strip()
+        if not path or path in seen:
+            continue
+        documented.append(path)
+        seen.add(path)
+    return documented
+
+
 def iter_runnable_scripts(loaded_skill: LoadedSkill) -> list[str]:
     runnable: list[str] = []
     for item in loaded_skill.file_inventory:
@@ -347,6 +360,7 @@ def normalize_generated_command(
 def build_shell_hints(loaded_skill: LoadedSkill) -> dict[str, Any]:
     example_commands = extract_shell_examples(loaded_skill.skill_md)
     runnable_scripts = iter_runnable_scripts(loaded_skill)
+    documented_scripts = extract_documented_script_paths(loaded_skill.skill_md)
     auto_generated_commands = [
         build_portable_script_command(relative_path) for relative_path in runnable_scripts[:3]
     ]
@@ -359,6 +373,7 @@ def build_shell_hints(loaded_skill: LoadedSkill) -> dict[str, Any]:
         "example_commands": example_commands[:5],
         "auto_generated_commands": auto_generated_commands,
         "runnable_scripts": runnable_scripts,
+        "documented_scripts": documented_scripts,
         "python_example_count": len(extract_python_examples(loaded_skill.skill_md)),
         "required_credentials": required_credentials,
         "notes": (
@@ -1014,6 +1029,11 @@ def _build_preferred_shipped_script_plan(
             " ".join(str(item) for item in request.constraints.values()),
         ]
     )
+    documented_scripts = {
+        item.replace("\\", "/").strip()
+        for item in shell_hints.get("documented_scripts", [])
+        if isinstance(item, str) and item.strip()
+    }
     previews_by_path = {
         str(item.get("path")): int(item.get("score", 0))
         for item in load_script_previews(loaded_skill, query_text=query_text, limit=8)
@@ -1021,6 +1041,8 @@ def _build_preferred_shipped_script_plan(
     }
     candidates: list[dict[str, Any]] = []
     for index, relative_path in enumerate(iter_runnable_scripts(loaded_skill)):
+        if documented_scripts and relative_path not in documented_scripts:
+            continue
         script_path = (loaded_skill.skill.path / relative_path).resolve()
         cli_args, missing_fields, inferred_flag_count = infer_script_cli_args(
             script_path=script_path,
@@ -1084,8 +1106,8 @@ def _build_preferred_shipped_script_plan(
         mode="inferred",
         shell_mode="free_shell",
         rationale=(
-            "In free-shell mode, reused the shipped skill script that most clearly matched "
-            "the request instead of generating a new helper script."
+            "In free-shell mode, locked onto the documented shipped skill script whose CLI "
+            "could be inferred from the request, so no generated helper script was allowed."
         ),
         entrypoint=best["entrypoint"],
         cli_args=list(best["cli_args"]),
@@ -1093,7 +1115,8 @@ def _build_preferred_shipped_script_plan(
         failure_reason=None,
         hints={
             **shell_hints,
-            "planner": "preferred_shipped_script",
+            "planner": "locked_shipped_script",
+            "shipped_script_locked": True,
             "preferred_shipped_entrypoint": best["entrypoint"],
             "preferred_shipped_relevance_score": best["relevance_score"],
             "preferred_shipped_inferred_flag_count": best["inferred_flag_count"],

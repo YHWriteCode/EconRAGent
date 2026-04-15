@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from kg_agent.config import AgentLLMClient, AgentModelConfig, SkillRuntimeConfig
+from kg_agent.config import (
+    AgentLLMClient,
+    AgentModelConfig,
+    FallbackLLMClient,
+    SkillRuntimeConfig,
+)
 from kg_agent.skills.command_planner import (
     SkillCommandPlanner,
     build_portable_script_command,
@@ -148,8 +153,8 @@ DEFAULT_RUNTIME_TARGET = SkillRuntimeTarget.from_dict(
 )
 
 
-def _build_utility_llm_client() -> AgentLLMClient:
-    config = AgentModelConfig.from_env_keys(
+def _build_utility_llm_client() -> FallbackLLMClient:
+    utility_config = AgentModelConfig.from_env_keys(
         provider_keys=(
             "KG_AGENT_UTILITY_MODEL_PROVIDER",
             "UTILITY_LLM_PROVIDER",
@@ -171,7 +176,18 @@ def _build_utility_llm_client() -> AgentLLMClient:
             "UTILITY_LLM_TIMEOUT",
         ),
     )
-    return AgentLLMClient(config)
+    primary_client = (
+        AgentLLMClient(utility_config) if utility_config.is_configured() else None
+    )
+    fallback_config = AgentModelConfig.from_env()
+    fallback_client = (
+        AgentLLMClient(fallback_config) if fallback_config.is_configured() else None
+    )
+    return FallbackLLMClient(
+        primary=primary_client,
+        fallback=fallback_client,
+        label="skill runtime free-shell planning",
+    )
 
 
 UTILITY_LLM_CLIENT = _build_utility_llm_client()

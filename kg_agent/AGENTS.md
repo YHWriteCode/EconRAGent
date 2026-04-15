@@ -123,6 +123,7 @@ kg_agent/
 - Planner-visible built-in capabilities are registered via `CapabilityRegistry`
 - `AgentCore` currently builds the native capability registry by mirroring the enabled/disabled built-in tool set
 - Configured MCP capabilities are also registered in `CapabilityRegistry` with `kind="external_mcp"` and `executor="mcp"`
+- MCP transport wiring is now decoupled from planner-visible capability exposure: a server-only `KG_AGENT_MCP_SERVERS_JSON` entry is enough for `build_mcp_adapter_from_env()` to attach an `MCPAdapter`, so `skill_request` can auto-wire `MCPBasedSkillRuntimeClient` and execute runtime-backed skills even when that server exposes no planner-visible MCP capabilities and discovery is disabled
 - `SkillRegistry` scans `./skills/*/SKILL.md` into an independent planner-facing skill catalog (`name`, `description`, optional `tags`, local path)
 - `AgentCore` passes both the capability catalog and the skill catalog into `RouteJudge`
 - Do not hardcode tool invocations in `agent_core.py`
@@ -510,10 +511,12 @@ Runtime execution
   - `shell_mode="conservative"`: current safe planner path (`explicit`, `structured_args`, `inferred`, or `manual_required`)
   - `shell_mode="free_shell"`: utility-LLM-assisted shell planning that, when explicitly requested, now tries the free-shell LLM path first and may synthesize richer shell commands or multi-file `generated_files` bundles before execution
 - When `KG_AGENT_SKILL_RUNTIME_SERVER` is configured and `MCPAdapter` is available, `AgentCore` can auto-wire an internal `MCPBasedSkillRuntimeClient` so `skill_plan` execution uses MCP only as a transport layer behind `SkillExecutor`
-- The MCP skill runtime server now shares the same `SkillCommandPlanner` surface; when `run_skill_task` receives `constraints.shell_mode="free_shell"` without an explicit `command_plan`, `mcp-server/server.py` can independently plan the shell task if a utility LLM is configured
-- If no utility LLM is configured for that free-shell planning path, the runtime returns canonical `run_status="manual_required"` with `failure_reason="llm_not_available"` instead of falling back to duplicate server-local planning helpers
+- The MCP skill runtime server now shares the same `SkillCommandPlanner` surface; when `run_skill_task` receives `constraints.shell_mode="free_shell"` without an explicit `command_plan`, `mcp-server/server.py` can independently plan the shell task using the same utility-to-main fallback shape as `AgentCore`
+- Runtime free-shell planning now resolves its LLM client in this order: `KG_AGENT_UTILITY_MODEL_* / UTILITY_LLM_*` first, then `KG_AGENT_MODEL_*`, then the legacy `LLM_*` / `OPENAI_*` keys through `AgentModelConfig.from_env()`
+- If neither the dedicated utility model nor the main agent model is configured for that free-shell planning path, the runtime returns canonical `run_status="manual_required"` with `failure_reason="llm_not_available"` instead of falling back to duplicate server-local planning helpers
 - Free-shell planning now gets a larger SKILL.md Python-example surface plus the conservative fallback plan as prompt context, so the planner can derive more complex commands from natural-language goals or dense script examples instead of only mirroring the conservative path
-- Free-shell planning now deterministically prefers shipped skill scripts when it can infer a clear runnable entrypoint plus CLI args from the request; only when the bundled scripts do not clearly cover the target/workflow does it fall back to LLM-generated `generated_files`
+- After a skill is selected, `SkillLoader.load_skill()` reads the full on-disk `SKILL.md` into `LoadedSkill.skill_md`; free-shell planning then derives shell examples, documented script paths, and runnable script previews from that full document
+- Free-shell planning now hard-locks onto documented shipped skill scripts when `SKILL.md` explicitly names runnable scripts and the planner can infer their CLI args from the request; in that case `free_shell` is not allowed to generate new helper code, and `generated_files` remain a last-resort fallback only when the documented scripts do not clearly cover the target/workflow
 - The current coarse-grained runtime contract is shell-oriented: it accepts either an explicit shell task (`constraints.shell_command` / `constraints.command`) or structured CLI args (`constraints.args` / `constraints.cli_args`) when the skill has a single runnable entrypoint, and it returns run-oriented data such as `run_id`, `command`, `logs_preview`, `artifacts`, and canonical `run_status`
 - In `free_shell` mode, `SkillCommandPlanner` may also return `generated_files`, which the runtime materializes inside the isolated workspace before executing the final shell command
 - Generated-script plans no longer require a single inline `command`: the planner may instead return `generated_files + entrypoint + cli_args`, and the runtime will materialize the whole bundle, choose/validate the generated entrypoint, and then execute that entrypoint inside the isolated workspace
@@ -809,6 +812,8 @@ Companion runtime setting:
 ```dotenv
 KG_AGENT_SKILL_RUNTIME_SERVER=skill-runtime
 ```
+
+A matching minimal root example file now exists at `.env.example`; it shows the same server-only docker runtime wiring shape (`KG_AGENT_MCP_SERVERS_JSON` as a JSON array, `discover_tools=false`, no planner-visible MCP capability declarations required) so `skill_request` can still auto-execute through the containerized skill runtime.
 
 Notes:
 

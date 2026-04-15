@@ -396,7 +396,8 @@ async def test_skill_command_planner_free_shell_prefers_shipped_single_entrypoin
     assert len(llm.calls) == 0
     assert plan.mode == "inferred"
     assert plan.entrypoint == "scripts/run_report.py"
-    assert plan.hints["planner"] == "preferred_shipped_script"
+    assert plan.hints["planner"] == "locked_shipped_script"
+    assert plan.hints["shipped_script_locked"] is True
 
 
 @pytest.mark.asyncio
@@ -598,7 +599,8 @@ async def test_skill_command_planner_free_shell_prefers_shipped_script_for_clear
     assert "20230103" in plan.cli_args
     assert "--end" in plan.cli_args
     assert "20260415" in plan.cli_args
-    assert plan.hints["planner"] == "preferred_shipped_script"
+    assert plan.hints["planner"] == "locked_shipped_script"
+    assert plan.hints["shipped_script_locked"] is True
 
 
 @pytest.mark.asyncio

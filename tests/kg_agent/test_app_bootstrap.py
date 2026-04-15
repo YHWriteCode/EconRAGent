@@ -21,6 +21,7 @@ from kg_agent.config import (
     KGAgentConfig,
     MCPConfig,
     MCPServerConfig,
+    SkillRuntimeConfig,
     ToolConfig,
 )
 
@@ -191,6 +192,20 @@ def test_build_mcp_adapter_from_env_returns_adapter_for_discovery_only(monkeypat
     assert adapter.has_capabilities() is True
 
 
+def test_build_mcp_adapter_from_env_returns_adapter_for_runtime_only_server(monkeypatch):
+    monkeypatch.setenv(
+        "KG_AGENT_MCP_SERVERS_JSON",
+        '[{"name":"skill-runtime","command":"docker","args":["run","--rm","skill-runtime"],"discover_tools":false}]',
+    )
+    monkeypatch.setenv("KG_AGENT_MCP_CAPABILITIES_JSON", "[]")
+
+    adapter = build_mcp_adapter_from_env()
+
+    assert adapter is not None
+    assert adapter.discovery_enabled() is False
+    assert adapter.has_capabilities() is False
+
+
 def test_health_reports_default_workspace_and_active_workspace_count(
     tmp_path, monkeypatch
 ):
@@ -258,6 +273,35 @@ def test_health_reports_discovered_mcp_capability_count():
     payload = response.json()
     assert payload["mcp_configured"] is True
     assert payload["mcp_capability_count"] == 2
+
+
+def test_agent_core_auto_wires_skill_runtime_client_with_runtime_only_mcp_server():
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False),
+        mcp=MCPConfig(
+            servers=[
+                MCPServerConfig(
+                    name="skill-runtime",
+                    command="docker",
+                    args=["run", "--rm", "fake-skill-runtime"],
+                    discover_tools=False,
+                )
+            ],
+            capabilities=[],
+        ),
+        skill_runtime=SkillRuntimeConfig(server="skill-runtime"),
+        runtime=AgentRuntimeConfig(default_workspace="", max_iterations=1),
+    )
+
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=config,
+        mcp_adapter=build_mcp_adapter_from_env(config=config),
+    )
+
+    assert agent.mcp_adapter is not None
+    assert agent.skill_executor.runtime_client is not None
 
 
 def test_normalize_ollama_host_strips_openai_style_suffix():

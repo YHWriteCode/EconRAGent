@@ -276,9 +276,7 @@ class MCPConfig:
         return any(server.discover_tools for server in self.servers)
 
     def is_configured(self) -> bool:
-        return bool(self.servers) and bool(
-            self.capabilities or self.discovery_enabled()
-        )
+        return bool(self.servers)
 
     @classmethod
     def from_env(cls) -> "MCPConfig":

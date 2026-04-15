@@ -44,6 +44,30 @@ class _StubLLM:
         return self.payloads.pop(0)
 
 
+def test_runtime_service_utility_llm_client_falls_back_to_main_model_env(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.delenv("KG_AGENT_UTILITY_MODEL_NAME", raising=False)
+    monkeypatch.delenv("KG_AGENT_UTILITY_MODEL_BASE_URL", raising=False)
+    monkeypatch.delenv("KG_AGENT_UTILITY_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("UTILITY_LLM_MODEL", raising=False)
+    monkeypatch.delenv("UTILITY_LLM_BINDING_HOST", raising=False)
+    monkeypatch.delenv("UTILITY_LLM_BINDING_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_MODEL", "fallback-main")
+    monkeypatch.setenv("LLM_BINDING_HOST", "http://main.local/v1")
+    monkeypatch.setenv("LLM_BINDING_API_KEY", "fallback-key")
+
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    client = module.UTILITY_LLM_CLIENT
+    assert client.is_available() is True
+    assert client.primary is None
+    assert client.fallback is not None
+    assert client.fallback.config.model_name == "fallback-main"
+    assert client.fallback.config.base_url == "http://main.local/v1"
+
+
 async def _wait_for_terminal_run(module, run_id: str, *, timeout_s: float = 3.0):
     deadline = asyncio.get_running_loop().time() + timeout_s
     while True:
