@@ -13,8 +13,9 @@ fetch_model_backtest.py
 
 import os
 import sys
+import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -50,6 +51,9 @@ import numpy as np
 OUTPUT_DIR = Path("output")
 INITIAL_CASH = 1_000_000
 COMMISSION = 0.001  # 0.1%
+FETCH_RETRIES = 3
+FETCH_RETRY_BASE_DELAY_S = 1.0
+YFINANCE_TIMEOUT_S = 20
 
 # AKShare 列名映射（待按环境调整）
 COLUMN_MAP = {
@@ -65,10 +69,158 @@ COLUMN_MAP = {
 }
 
 
+def _normalize_code(code: str) -> str:
+    return str(code).strip().zfill(6)
+
+
+def _normalize_akshare_frame(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    normalized = df.rename(columns=COLUMN_MAP).copy()
+    normalized["code"] = _normalize_code(code)
+    return normalized
+
+
+def _yfinance_symbol_for_code(code: str) -> str:
+    normalized = _normalize_code(code)
+    if normalized.startswith(("4", "8")):
+        return f"{normalized}.BJ"
+    if normalized.startswith(("5", "6", "9")):
+        return f"{normalized}.SS"
+    return f"{normalized}.SZ"
+
+
+def _normalize_yfinance_frame(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    normalized = df.copy()
+    if isinstance(normalized.columns, pd.MultiIndex):
+        normalized.columns = normalized.columns.get_level_values(0)
+    normalized = normalized.reset_index()
+    date_col = next(
+        (
+            column
+            for column in normalized.columns
+            if str(column).strip().lower() in {"date", "datetime"}
+        ),
+        None,
+    )
+    if date_col is None and len(normalized.columns) > 0:
+        first_column = normalized.columns[0]
+        first_series = normalized[first_column]
+        if str(first_column).strip().lower() == "index" or pd.api.types.is_datetime64_any_dtype(
+            first_series
+        ):
+            date_col = first_column
+    if date_col is None:
+        raise ValueError("yfinance result does not contain a date column")
+    normalized = normalized.rename(
+        columns={
+            date_col: "date",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+        }
+    )
+    missing = [
+        column
+        for column in ("date", "open", "high", "low", "close", "volume")
+        if column not in normalized.columns
+    ]
+    if missing:
+        raise ValueError(f"yfinance result is missing required columns: {missing}")
+    normalized["date"] = pd.to_datetime(normalized["date"], errors="coerce")
+    if getattr(normalized["date"].dt, "tz", None) is not None:
+        normalized["date"] = normalized["date"].dt.tz_localize(None)
+    normalized = normalized.dropna(subset=["date"]).copy()
+    normalized["amount"] = 0.0
+    normalized["code"] = _normalize_code(code)
+    return normalized
+
+
+def _fetch_from_akshare(code: str, start: str, end: str, adjust: str) -> pd.DataFrame:
+    return ak.stock_zh_a_hist(
+        symbol=_normalize_code(code),
+        period="daily",
+        start_date=start,
+        end_date=end,
+        adjust=adjust,
+    )
+
+
+def _fetch_from_yfinance(code: str, start: str, end: str) -> pd.DataFrame:
+    try:
+        import yfinance as yf
+    except ImportError as exc:
+        raise RuntimeError("yfinance is not installed") from exc
+
+    start_dt = datetime.strptime(start, "%Y%m%d")
+    end_dt = datetime.strptime(end, "%Y%m%d") + timedelta(days=1)
+    return yf.download(
+        _yfinance_symbol_for_code(code),
+        start=start_dt.strftime("%Y-%m-%d"),
+        end=end_dt.strftime("%Y-%m-%d"),
+        auto_adjust=True,
+        progress=False,
+        timeout=YFINANCE_TIMEOUT_S,
+        threads=False,
+    )
+
+
+def _fetch_single_stock_with_fallback(
+    code: str,
+    start: str,
+    end: str,
+    adjust: str,
+) -> tuple[pd.DataFrame, str | None, list[dict[str, str]]]:
+    normalized_code = _normalize_code(code)
+    attempts: list[dict[str, str]] = []
+    source_specs = (
+        ("akshare", lambda: _normalize_akshare_frame(_fetch_from_akshare(normalized_code, start, end, adjust), normalized_code)),
+        ("yfinance", lambda: _normalize_yfinance_frame(_fetch_from_yfinance(normalized_code, start, end), normalized_code)),
+    )
+
+    for source_name, fetcher in source_specs:
+        print(f"    尝试数据源: {source_name}")
+        last_error = None
+        for attempt in range(1, FETCH_RETRIES + 1):
+            try:
+                df = fetcher()
+                if df is not None and not df.empty:
+                    print(
+                        f"    ✓ 数据源 {source_name} 第 {attempt}/{FETCH_RETRIES} 次成功，{len(df)} 行"
+                    )
+                    return df, source_name, attempts
+                print(
+                    f"    ✗ 数据源 {source_name} 第 {attempt}/{FETCH_RETRIES} 次返回空数据"
+                )
+                last_error = RuntimeError("empty result")
+            except Exception as exc:
+                last_error = exc
+                print(
+                    f"    ✗ 数据源 {source_name} 第 {attempt}/{FETCH_RETRIES} 次失败: {exc}"
+                )
+            if attempt < FETCH_RETRIES:
+                time.sleep(FETCH_RETRY_BASE_DELAY_S * attempt)
+        attempts.append(
+            {
+                "source": source_name,
+                "error": str(last_error) if last_error is not None else "empty result",
+            }
+        )
+    return pd.DataFrame(), None, attempts
+
+
 # ══════════════════════════════════════════════
 # 第一步：数据获取与清洗
 # ══════════════════════════════════════════════
-def fetch_data(codes: list, start: str, end: str, adjust: str = "qfq") -> pd.DataFrame:
+def fetch_data(
+    codes: list,
+    start: str,
+    end: str,
+    adjust: str = "qfq",
+    target_code: str | None = None,
+) -> pd.DataFrame:
     """
     批量获取股票日线数据并执行标准化清洗。
 
@@ -82,23 +234,25 @@ def fetch_data(codes: list, start: str, end: str, adjust: str = "qfq") -> pd.Dat
     print("=" * 55)
 
     all_data = []
+    failed_codes = []
+    source_by_code: dict[str, str] = {}
+    failed_attempts: dict[str, list[dict[str, str]]] = {}
     for code in codes:
-        print(f"  获取 {code}...")
-        try:
-            df = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=start, end_date=end,
-                adjust=adjust,
-            )
-            if df is not None and not df.empty:
-                df = df.rename(columns=COLUMN_MAP)
-                df["code"] = code
-                all_data.append(df)
-                print(f"    ✓ {len(df)} 行")
-            else:
-                print(f"    ✗ 返回空数据")
-        except Exception as e:
-            print(f"    ✗ 获取失败: {e}")
+        normalized_code = _normalize_code(code)
+        print(f"  获取 {normalized_code}...")
+        df, source_name, attempts = _fetch_single_stock_with_fallback(
+            normalized_code,
+            start,
+            end,
+            adjust,
+        )
+        if df is None or df.empty:
+            failed_codes.append(normalized_code)
+            failed_attempts[normalized_code] = attempts
+            print(f"    ✗ 所有数据源均失败: {normalized_code}")
+            continue
+        source_by_code[normalized_code] = source_name or "unknown"
+        all_data.append(df)
 
     if not all_data:
         print("错误：无法获取任何数据")
@@ -136,6 +290,21 @@ def fetch_data(codes: list, start: str, end: str, adjust: str = "qfq") -> pd.Dat
     combined.to_csv(OUTPUT_DIR / "market_data.csv", index=False, encoding="utf-8-sig")
     print(f"\n  数据已保存: {OUTPUT_DIR / 'market_data.csv'}")
     print(f"  总行数: {len(combined)}, 股票数: {combined['code'].nunique()}")
+    if source_by_code:
+        print(f"  数据源分布: {source_by_code}")
+    if failed_codes:
+        print(f"  警告：以下股票抓取失败，后续流程将基于已获取的数据继续：{failed_codes}")
+    if target_code:
+        normalized_target = _normalize_code(target_code)
+        available_codes = set(combined["code"].astype(str).str.zfill(6).tolist())
+        if normalized_target not in available_codes:
+            print(
+                f"错误：目标标的 {normalized_target} 在 AKShare/yfinance 兜底后仍无法获取，"
+                "终止后续建模回测。"
+            )
+            if failed_attempts.get(normalized_target):
+                print(f"  目标标的失败详情: {failed_attempts[normalized_target]}")
+            sys.exit(1)
     return combined
 
 
@@ -228,9 +397,26 @@ def run_model(panel: pd.DataFrame,
     print(f"  因变量: {dep}")
     print(f"  自变量: {indep}")
     print(f"  有效观测: {len(subset)}")
+    entity_count = subset.index.get_level_values(0).nunique() if len(subset) else 0
 
     if len(subset) < 50:
         print("警告：观测数不足，回归结果可能不可靠")
+    if entity_count < 2:
+        fallback_reason = (
+            "有效面板个体数不足 2，无法稳定执行固定效应 PanelOLS；"
+            "回退为仅使用单标的因子/动量信号，不输出显著因子。"
+        )
+        print(f"  警告：{fallback_reason}")
+        with open(OUTPUT_DIR / "regression_summary.txt", "w", encoding="utf-8") as f:
+            f.write(fallback_reason + "\n")
+            f.write(f"entity_count={entity_count}, observation_count={len(subset)}\n")
+        return {
+            "result": None,
+            "significant_factors": [],
+            "fallback_reason": "insufficient_entities",
+            "entity_count": entity_count,
+            "observation_count": len(subset),
+        }
 
     y = subset[dep]
     X = sm.add_constant(subset[indep])
@@ -546,11 +732,17 @@ def main():
                         help="回归因变量，默认 return")
     parser.add_argument("--indep", type=str, default="momentum,volatility,size_factor",
                         help="回归自变量(逗号分隔)")
+    parser.add_argument("--output", type=str, default="output",
+                        help="输出目录，默认 output")
     args = parser.parse_args()
 
     codes = [c.strip() for c in args.codes.split(",")]
     indep = [v.strip() for v in args.indep.split(",")]
-    target_code = args.target or codes[0]
+    codes = [_normalize_code(code) for code in codes if code.strip()]
+    target_code = _normalize_code(args.target or codes[0])
+    global OUTPUT_DIR
+    OUTPUT_DIR = Path(args.output)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"\n{'#' * 55}")
     print(f"#  Financial Researching — 端到端流程")
@@ -560,7 +752,7 @@ def main():
     print(f"{'#' * 55}\n")
 
     # 执行流水线
-    market_df = fetch_data(codes, args.start, args.end)
+    market_df = fetch_data(codes, args.start, args.end, target_code=target_code)
     panel = prepare_panel(market_df)
     model_result = run_model(panel, dep=args.dep, indep=indep)
     signals = generate_signal(market_df, model_result, target_code)

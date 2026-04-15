@@ -14,6 +14,7 @@ import os
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -54,12 +55,12 @@ def compute_factors(df: pd.DataFrame) -> pd.DataFrame:
             lambda x: x.rolling(window=20, min_periods=5).mean()
         )
         df["size_factor"] = rolling_amount.apply(
-            lambda x: pd.np.log(x) if x > 0 else pd.np.nan
+            lambda x: np.log(x) if x > 0 else np.nan
         )
     else:
         # 如果没有成交额列，用收盘价的对数代替
         df["size_factor"] = df["close"].apply(
-            lambda x: pd.np.log(x) if x > 0 else pd.np.nan
+            lambda x: np.log(x) if x > 0 else np.nan
         )
 
     # 动量因子：过去 20 日累计收益

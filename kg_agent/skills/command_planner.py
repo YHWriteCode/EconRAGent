@@ -41,6 +41,47 @@ MAX_FREE_SHELL_TOTAL_EXAMPLE_CHARS = 12000
 INLINE_PYTHON_SCRIPT_PROMOTION_MIN_EXAMPLES = 3
 INLINE_PYTHON_SCRIPT_PROMOTION_MIN_CHARS = 120
 PREFERRED_GENERATED_ENTRYPOINT_NAMES = ("main.py", "run.py", "app.py", "script.py")
+DATE_TOKEN_PATTERN = re.compile(
+    r"\b(?P<year>20\d{2})(?:[-/.]?(?P<month>0[1-9]|1[0-2]))(?:[-/.]?(?P<day>0[1-9]|[12]\d|3[01]))\b"
+)
+PAREN_SYMBOL_PATTERN = re.compile(
+    r"\((?P<symbol>[A-Za-z]{1,5}|\d{6})\)",
+)
+UPPERCASE_SYMBOL_PATTERN = re.compile(r"\b(?P<symbol>[A-Z]{1,5}|\d{6})\b")
+UPPERCASE_SYMBOL_STOPWORDS = {
+    "API",
+    "CSV",
+    "JSON",
+    "HTTP",
+    "HTTPS",
+    "LLM",
+    "MCP",
+    "PDF",
+    "PNG",
+    "SQL",
+    "TSV",
+    "TXT",
+    "XML",
+    "YAML",
+}
+CODE_LIKE_FLAG_NAMES = {
+    "code",
+    "codes",
+    "symbol",
+    "symbols",
+    "ticker",
+    "tickers",
+    "target",
+    "target_code",
+}
+START_DATE_FLAG_NAMES = {"start", "start_date", "from", "date_from"}
+END_DATE_FLAG_NAMES = {"end", "end_date", "to", "date_to"}
+OPTIONAL_INFERABLE_FLAG_NAMES = (
+    CODE_LIKE_FLAG_NAMES
+    | START_DATE_FLAG_NAMES
+    | END_DATE_FLAG_NAMES
+    | {"output", "output_path", "format", "mode", "dep", "indep", "notes", "note", "description"}
+)
 SCRIPT_FIRST_REQUEST_PATTERN = re.compile(
     r"("
     r"script\s+first|"
@@ -434,6 +475,54 @@ def extract_structured_cli_args(constraints: dict[str, Any]) -> list[str] | None
     return None
 
 
+def _extract_add_argument_blocks(script_path: Path) -> list[str]:
+    try:
+        raw = script_path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    return [
+        match.group(1)
+        for match in re.finditer(r"add_argument\((.*?)\)", raw, re.DOTALL)
+    ]
+
+
+def extract_cli_flags(script_path: Path) -> list[str]:
+    flags: list[str] = []
+    seen: set[str] = set()
+    for block in _extract_add_argument_blocks(script_path):
+        for flag in re.findall(r"['\"](--[a-zA-Z0-9_-]+)['\"]", block):
+            if flag in seen:
+                continue
+            flags.append(flag)
+            seen.add(flag)
+    return flags
+
+
+def extract_cli_flag_defaults(script_path: Path) -> dict[str, str]:
+    defaults: dict[str, str] = {}
+    for block in _extract_add_argument_blocks(script_path):
+        flags = re.findall(r"['\"](--[a-zA-Z0-9_-]+)['\"]", block)
+        if not flags:
+            continue
+        match = re.search(
+            r"default\s*=\s*(?P<value>'[^']*'|\"[^\"]*\"|[A-Za-z0-9_./,:+-]+)",
+            block,
+        )
+        if match is None:
+            continue
+        raw_value = match.group("value").strip()
+        if (
+            len(raw_value) >= 2
+            and raw_value[0] == raw_value[-1]
+            and raw_value[0] in {"'", '"'}
+        ):
+            raw_value = raw_value[1:-1]
+        elif raw_value.endswith(","):
+            raw_value = raw_value[:-1]
+        defaults[flags[0]] = raw_value
+    return defaults
+
+
 def extract_required_credentials(
     *,
     markdown: str,
@@ -529,6 +618,163 @@ def extract_output_path(constraints: dict[str, Any]) -> str | None:
     return None
 
 
+def extract_date_candidates(text: str) -> list[str]:
+    dates: list[str] = []
+    seen: set[str] = set()
+    for match in DATE_TOKEN_PATTERN.finditer(text or ""):
+        candidate = (
+            f"{match.group('year')}{match.group('month')}{match.group('day')}"
+        )
+        if candidate in seen:
+            continue
+        dates.append(candidate)
+        seen.add(candidate)
+    return dates
+
+
+def extract_symbol_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for match in PAREN_SYMBOL_PATTERN.finditer(text or ""):
+        symbol = str(match.group("symbol") or "").strip()
+        if not symbol:
+            continue
+        normalized = symbol.upper() if symbol.isalpha() else symbol
+        if normalized in seen:
+            continue
+        candidates.append(normalized)
+        seen.add(normalized)
+    for match in UPPERCASE_SYMBOL_PATTERN.finditer(text or ""):
+        symbol = str(match.group("symbol") or "").strip()
+        if not symbol:
+            continue
+        normalized = symbol.upper() if symbol.isalpha() else symbol
+        if normalized in UPPERCASE_SYMBOL_STOPWORDS or normalized in seen:
+            continue
+        candidates.append(normalized)
+        seen.add(normalized)
+    return candidates
+
+
+def _split_code_like_values(value: str) -> list[str]:
+    return [item.strip() for item in re.split(r"[\s,]+", value) if item.strip()]
+
+
+def _is_numeric_code_value(value: str) -> bool:
+    values = _split_code_like_values(value)
+    return bool(values) and all(re.fullmatch(r"\d{6}", item) for item in values)
+
+
+def script_expects_numeric_codes(script_path: Path) -> bool:
+    try:
+        raw = script_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    lowered = raw.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "zfill(6)",
+            "6 位纯数字",
+            "6位纯数字",
+            "纯数字字符串",
+            "stock_zh_a_hist(",
+            "symbol=_normalize_code",
+        )
+    )
+
+
+def _merge_csv_values(existing: str, extra_value: str) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*existing.split(","), extra_value]:
+        normalized = item.strip()
+        if not normalized or normalized in seen:
+            continue
+        merged.append(normalized)
+        seen.add(normalized)
+    return ",".join(merged)
+
+
+def infer_script_cli_args(
+    *,
+    script_path: Path,
+    goal: str,
+    user_query: str,
+    constraints: dict[str, Any],
+) -> tuple[list[str], list[str], int]:
+    flags = extract_cli_flags(script_path)
+    if not flags:
+        return [], [], 0
+    required_flags = set(extract_required_cli_flags(script_path))
+    defaults = extract_cli_flag_defaults(script_path)
+    inferred: list[str] = []
+    missing_fields: list[str] = []
+    inferred_flag_count = 0
+    used_flags: set[str] = set()
+    inferred_values: dict[str, str] = {}
+    expects_numeric_codes = script_expects_numeric_codes(script_path)
+
+    for flag in flags:
+        normalized_flag = flag_to_field_name(flag)
+        should_attempt = flag in required_flags or normalized_flag in OPTIONAL_INFERABLE_FLAG_NAMES
+        if not should_attempt:
+            continue
+        value = infer_required_flag_value(
+            flag=flag,
+            goal=goal,
+            user_query=user_query,
+            constraints=constraints,
+        )
+        if value is None:
+            if flag in required_flags:
+                missing_fields.append(flag_to_field_name(flag))
+            continue
+        if normalized_flag in CODE_LIKE_FLAG_NAMES and expects_numeric_codes and not _is_numeric_code_value(value):
+            return [], ["unsupported_target_for_shipped_script"], 0
+        if (
+            flag == "--codes"
+            and expects_numeric_codes
+            and _is_numeric_code_value(value)
+            and defaults.get("--codes")
+        ):
+            value = _merge_csv_values(defaults["--codes"], value)
+        inferred.extend([flag, value])
+        inferred_flag_count += 1
+        used_flags.add(flag)
+        inferred_values[flag] = value
+
+    target_like_value = (
+        inferred_values.get("--target")
+        or inferred_values.get("--code")
+        or inferred_values.get("--symbol")
+        or inferred_values.get("--ticker")
+    )
+    if (
+        "--codes" in flags
+        and "--codes" not in used_flags
+        and target_like_value
+        and _is_numeric_code_value(target_like_value)
+    ):
+        existing_codes = defaults.get("--codes")
+        merged_codes = (
+            _merge_csv_values(existing_codes, target_like_value)
+            if existing_codes
+            else target_like_value
+        )
+        inferred.extend(["--codes", merged_codes])
+        inferred_flag_count += 1
+        used_flags.add("--codes")
+
+    output_path = extract_output_path(constraints)
+    if output_path and "--output" in flags and "--output" not in used_flags:
+        inferred.extend(["--output", output_path])
+        inferred_flag_count += 1
+        used_flags.add("--output")
+
+    return inferred, missing_fields, inferred_flag_count
+
+
 def infer_required_flag_value(
     *,
     flag: str,
@@ -537,24 +783,42 @@ def infer_required_flag_value(
     constraints: dict[str, Any],
 ) -> str | None:
     normalized = flag.lstrip("-").replace("-", "_")
-    candidate_keys = [
-        normalized,
-        flag,
-        normalized.removesuffix("_path"),
-        "input_path",
-        "input_file",
-        "file",
-        "path",
-        "output_path",
-        "output",
-        "format",
-        "output_format",
-        "mode",
-    ]
+    combined_text = f"{goal}\n{user_query}"
+    candidate_keys = [normalized, flag, normalized.removesuffix("_path")]
+    if normalized in CODE_LIKE_FLAG_NAMES:
+        candidate_keys.extend(["target", "target_code", "code", "codes", "ticker", "symbol"])
+    elif normalized in {"input", "input_path", "input_file", "file", "path"}:
+        candidate_keys.extend(["input_path", "input_file", "file", "path"])
+    elif normalized in {"output", "output_path", "destination_path"}:
+        candidate_keys.extend(["output_path", "output", "destination_path"])
+    elif normalized in {"format", "output_format"}:
+        candidate_keys.extend(["format", "output_format"])
+    elif normalized == "mode":
+        candidate_keys.append("mode")
     for key in candidate_keys:
         value = constraints.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+        if isinstance(value, list) and value:
+            normalized_items = [str(item).strip() for item in value if str(item).strip()]
+            if normalized_items and normalized in {"codes", "symbols", "tickers"}:
+                return ",".join(normalized_items)
+    if normalized in START_DATE_FLAG_NAMES:
+        dates = extract_date_candidates(combined_text)
+        return dates[0] if dates else None
+    if normalized in END_DATE_FLAG_NAMES:
+        dates = extract_date_candidates(combined_text)
+        return dates[-1] if len(dates) >= 2 else None
+    if normalized in {"target", "target_code", "code", "ticker", "symbol"}:
+        symbols = extract_symbol_candidates(combined_text)
+        return symbols[0] if symbols else None
+    if normalized in {"codes", "symbols", "tickers"}:
+        symbols = extract_symbol_candidates(combined_text)
+        numeric_symbols = [item for item in symbols if re.fullmatch(r"\d{6}", item)]
+        if numeric_symbols:
+            return ",".join(numeric_symbols)
+    if normalized in {"output", "output_path"}:
+        return extract_output_path(constraints)
     if normalized in {"topic", "title", "name"}:
         return goal.strip() or user_query.strip() or None
     if normalized in {"notes", "note", "description"}:
@@ -737,6 +1001,106 @@ def _clone_plan_with_shell_mode(
     )
 
 
+def _build_preferred_shipped_script_plan(
+    *,
+    loaded_skill: LoadedSkill,
+    request: SkillExecutionRequest,
+    shell_hints: dict[str, Any],
+) -> SkillCommandPlan | None:
+    query_text = "\n".join(
+        [
+            request.goal,
+            request.user_query,
+            " ".join(str(item) for item in request.constraints.values()),
+        ]
+    )
+    previews_by_path = {
+        str(item.get("path")): int(item.get("score", 0))
+        for item in load_script_previews(loaded_skill, query_text=query_text, limit=8)
+        if isinstance(item, dict) and item.get("path")
+    }
+    candidates: list[dict[str, Any]] = []
+    for index, relative_path in enumerate(iter_runnable_scripts(loaded_skill)):
+        script_path = (loaded_skill.skill.path / relative_path).resolve()
+        cli_args, missing_fields, inferred_flag_count = infer_script_cli_args(
+            script_path=script_path,
+            goal=request.goal,
+            user_query=request.user_query,
+            constraints=request.constraints,
+        )
+        if missing_fields:
+            continue
+        preview_score = previews_by_path.get(relative_path, 0)
+        relevance_score = _score_relevance(relative_path, query_text) + preview_score
+        if inferred_flag_count <= 0 and relevance_score <= 0:
+            continue
+        candidates.append(
+            {
+                "entrypoint": relative_path,
+                "cli_args": cli_args,
+                "missing_fields": missing_fields,
+                "inferred_flag_count": inferred_flag_count,
+                "relevance_score": relevance_score,
+                "index": index,
+            }
+        )
+
+    if not candidates:
+        return None
+
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            item["inferred_flag_count"],
+            item["relevance_score"],
+            -item["index"],
+        ),
+        reverse=True,
+    )
+    best = ranked[0]
+    second = ranked[1] if len(ranked) > 1 else None
+    is_clear_match = (
+        best["inferred_flag_count"] > 0
+        and (
+            second is None
+            or best["inferred_flag_count"] > second["inferred_flag_count"]
+            or best["relevance_score"] >= second["relevance_score"] + 2
+        )
+    )
+    if not is_clear_match:
+        return None
+
+    return SkillCommandPlan(
+        skill_name=request.skill_name,
+        goal=request.goal,
+        user_query=request.user_query,
+        runtime_target=request.runtime_target,
+        constraints=dict(request.constraints),
+        command=build_portable_script_command(
+            best["entrypoint"],
+            best["cli_args"],
+            runtime_target=request.runtime_target,
+        ),
+        mode="inferred",
+        shell_mode="free_shell",
+        rationale=(
+            "In free-shell mode, reused the shipped skill script that most clearly matched "
+            "the request instead of generating a new helper script."
+        ),
+        entrypoint=best["entrypoint"],
+        cli_args=list(best["cli_args"]),
+        missing_fields=[],
+        failure_reason=None,
+        hints={
+            **shell_hints,
+            "planner": "preferred_shipped_script",
+            "preferred_shipped_entrypoint": best["entrypoint"],
+            "preferred_shipped_relevance_score": best["relevance_score"],
+            "preferred_shipped_inferred_flag_count": best["inferred_flag_count"],
+        },
+    )
+
+
 class SkillCommandPlanner:
     def __init__(
         self,
@@ -793,6 +1157,13 @@ class SkillCommandPlanner:
         )
         if shell_mode != "free_shell":
             return conservative_plan
+        preferred_shipped_plan = _build_preferred_shipped_script_plan(
+            loaded_skill=loaded_skill,
+            request=normalized_request,
+            shell_hints=shell_hints,
+        )
+        if preferred_shipped_plan is not None:
+            return preferred_shipped_plan
         free_shell_plan = await self._plan_free_shell(
             loaded_skill=loaded_skill,
             request=normalized_request,

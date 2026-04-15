@@ -359,7 +359,7 @@ async def test_skill_command_planner_free_shell_preserves_bootstrap_commands():
 
 
 @pytest.mark.asyncio
-async def test_skill_command_planner_free_shell_prefers_llm_plan_over_conservative_path():
+async def test_skill_command_planner_free_shell_prefers_shipped_single_entrypoint_over_generated_helper():
     loaded_skill = _load_repo_skill("example-skill")
     llm = _StubPlannerLLM(
         {
@@ -393,10 +393,10 @@ async def test_skill_command_planner_free_shell_prefers_llm_plan_over_conservati
         ),
     )
 
-    assert len(llm.calls) == 1
-    assert plan.mode == "generated_script"
-    assert plan.entrypoint == ".skill_generated/main.py"
-    assert plan.command == "python ./.skill_generated/main.py"
+    assert len(llm.calls) == 0
+    assert plan.mode == "inferred"
+    assert plan.entrypoint == "scripts/run_report.py"
+    assert plan.hints["planner"] == "preferred_shipped_script"
 
 
 @pytest.mark.asyncio
@@ -546,6 +546,100 @@ async def test_skill_command_planner_free_shell_prompt_uses_linux_runtime_target
     assert '"platform": "linux"' in llm.calls[0]["user_prompt"]
     assert '"shell": "/bin/sh"' in llm.calls[0]["user_prompt"]
     assert '"workspace_root": "/workspace"' in llm.calls[0]["user_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_free_shell_prefers_shipped_script_for_clear_multi_script_match():
+    loaded_skill = _load_repo_skill("financial-researching")
+    llm = _StubPlannerLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/main.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": "print('should not be used')\n",
+                    "description": "Unwanted helper",
+                }
+            ],
+            "rationale": "Generate a fresh helper anyway.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python"],
+            "warnings": [],
+        }
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="financial-researching",
+            goal="抓取宁德时代(300750)从 2023-01-03 到 2026-04-15 的历史股票数据，并完成端到端建模与回测",
+            user_query="free shell 模式下直接用现有脚本完成，不要另写 helper script",
+            constraints={
+                "shell_mode": "free_shell",
+                "output_path": "output",
+            },
+        ),
+    )
+
+    assert len(llm.calls) == 0
+    assert plan.mode == "inferred"
+    assert plan.entrypoint == "scripts/fetch_model_backtest.py"
+    assert plan.shell_mode == "free_shell"
+    assert "--target" in plan.cli_args
+    assert "300750" in plan.cli_args
+    assert "--codes" in plan.cli_args
+    assert "000001,000002,600519,300750" in plan.cli_args
+    assert "--start" in plan.cli_args
+    assert "20230103" in plan.cli_args
+    assert "--end" in plan.cli_args
+    assert "20260415" in plan.cli_args
+    assert plan.hints["planner"] == "preferred_shipped_script"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_free_shell_allows_generated_script_when_shipped_script_cannot_cover_target():
+    loaded_skill = _load_repo_skill("financial-researching")
+    llm = _StubPlannerLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/main.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": "print('tsla workflow')\n",
+                    "description": "Custom TSLA workflow.",
+                }
+            ],
+            "rationale": "The shipped A-share scripts do not cover TSLA cleanly, so generate a custom workflow.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python"],
+            "warnings": [],
+        }
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="financial-researching",
+            goal="抓取 Tesla(TSLA) 从 2023-01-03 到 2026-04-15 的历史股票数据，并完成端到端建模与回测",
+            user_query="free shell 模式下完成 TSLA 的建模回测",
+            constraints={"shell_mode": "free_shell"},
+        ),
+    )
+
+    assert len(llm.calls) == 1
+    assert plan.mode == "generated_script"
+    assert plan.entrypoint == ".skill_generated/main.py"
+    assert plan.command == "python ./.skill_generated/main.py"
 
 
 @pytest.mark.asyncio

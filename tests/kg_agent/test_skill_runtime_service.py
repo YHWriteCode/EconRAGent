@@ -296,6 +296,71 @@ async def test_runtime_service_can_execute_generated_script_from_command_plan(
 
 
 @pytest.mark.asyncio
+async def test_runtime_service_generated_script_can_reference_skill_scripts_relative_to_workspace(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    result = await module.run_skill_task(
+        skill_name="example-skill",
+        goal="Run a generated script that shells out to a mirrored skill script",
+        user_query="write helper files first and then execute a generated entrypoint",
+        constraints={"shell_mode": "free_shell"},
+        wait_for_completion=True,
+        command_plan={
+            "skill_name": "example-skill",
+            "goal": "Run a generated script that shells out to a mirrored skill script",
+            "user_query": "write helper files first and then execute a generated entrypoint",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {"shell_mode": "free_shell"},
+            "command": "python ./.skill_generated/main.py",
+            "mode": "generated_script",
+            "shell_mode": "free_shell",
+            "entrypoint": ".skill_generated/main.py",
+            "rationale": "Use a generated wrapper that invokes scripts/run_report.py from the mirrored skill workspace.",
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": (
+                        "import subprocess\n"
+                        "import sys\n"
+                        "subprocess.run([\n"
+                        "    sys.executable,\n"
+                        "    'scripts/run_report.py',\n"
+                        "    '--topic', 'Workspace Mirror',\n"
+                        "    '--notes', 'relative script ok',\n"
+                        "], check=True)\n"
+                    ),
+                    "description": "Generated entrypoint that invokes a mirrored skill script.",
+                }
+            ],
+            "cli_args": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "free_shell", "required_tools": ["python"]},
+        },
+    )
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    mirrored_script = Path(result["workspace"]) / "scripts" / "run_report.py"
+    assert mirrored_script.is_file()
+    report_path = Path(result["workspace"]) / "report.md"
+    assert report_path.is_file()
+    report_text = report_path.read_text(encoding="utf-8")
+    assert "# Workspace Mirror" in report_text
+    assert "relative script ok" in report_text
+
+
+@pytest.mark.asyncio
 async def test_runtime_service_can_execute_multi_file_generated_bundle_via_entrypoint(
     tmp_path: Path,
     monkeypatch,

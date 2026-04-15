@@ -1131,6 +1131,29 @@ def _build_workspace_script_shell_command(
     return _shell_join(argv)
 
 
+def _rewrite_command_for_workspace(
+    *,
+    command: str | None,
+    loaded_skill: LoadedSkill,
+    workspace_dir: Path | None,
+) -> str | None:
+    if command is None or workspace_dir is None:
+        return command
+    rewritten = str(command)
+    skill_dir = loaded_skill.skill.path.resolve()
+    replacements = [
+        str(skill_dir),
+        str(skill_dir).replace("\\", "/"),
+    ]
+    workspace_text = str(workspace_dir)
+    workspace_posix = workspace_text.replace("\\", "/")
+    for candidate in replacements:
+        if candidate:
+            rewritten = rewritten.replace(candidate, workspace_text)
+            rewritten = rewritten.replace(candidate.replace("\\", "/"), workspace_posix)
+    return rewritten
+
+
 def _build_run_env(
     *,
     skill_dir: Path,
@@ -1218,12 +1241,40 @@ def _write_skill_request(
     return request_path
 
 
+def _materialize_skill_workspace_view(
+    *,
+    loaded_skill: LoadedSkill,
+    workspace_dir: Path,
+) -> list[str]:
+    mirrored_paths: list[str] = []
+    skill_root = loaded_skill.skill.path.resolve()
+    for item in loaded_skill.file_inventory:
+        relative_path = item.path.replace("\\", "/").strip()
+        if not relative_path:
+            continue
+        source = (skill_root / relative_path).resolve()
+        if not source.is_file():
+            continue
+        target = (workspace_dir / relative_path).resolve()
+        if target == workspace_dir or workspace_dir not in target.parents:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            shutil.copy2(source, target)
+        mirrored_paths.append(str(target.relative_to(workspace_dir)).replace("\\", "/"))
+    return mirrored_paths
+
+
 def _internal_runtime_dir(workspace_dir: Path) -> Path:
     return (workspace_dir / INTERNAL_RUNTIME_DIRNAME).resolve()
 
 
 def _terminal_snapshot_path(workspace_dir: Path) -> Path:
     return (_internal_runtime_dir(workspace_dir) / TERMINAL_SNAPSHOT_FILENAME).resolve()
+
+
+def _mirrored_skill_manifest_path(workspace_dir: Path) -> Path:
+    return (_internal_runtime_dir(workspace_dir) / "mirrored_skill_files.json").resolve()
 
 
 def _is_internal_workspace_artifact(relative_path: str) -> bool:
@@ -1254,6 +1305,37 @@ def _write_terminal_snapshot(*, workspace_dir: Path, record: dict[str, Any]) -> 
     )
 
 
+def _write_mirrored_skill_manifest(*, workspace_dir: Path, mirrored_paths: list[str]) -> None:
+    _write_json_atomic(
+        _mirrored_skill_manifest_path(workspace_dir),
+        {
+            "paths": [
+                str(item).replace("\\", "/").strip()
+                for item in mirrored_paths
+                if str(item).strip()
+            ]
+        },
+    )
+
+
+def _load_mirrored_skill_paths(*, workspace_dir: Path) -> set[str]:
+    manifest_path = _mirrored_skill_manifest_path(workspace_dir)
+    if not manifest_path.is_file():
+        return set()
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return set()
+    raw_paths = payload.get("paths") if isinstance(payload, dict) else None
+    if not isinstance(raw_paths, list):
+        return set()
+    return {
+        str(item).replace("\\", "/").strip()
+        for item in raw_paths
+        if str(item).strip()
+    }
+
+
 def _load_terminal_snapshot(
     *,
     workspace_dir: Path,
@@ -1281,6 +1363,7 @@ def _load_terminal_snapshot(
 
 def _collect_workspace_artifacts(workspace_dir: Path) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
+    mirrored_skill_paths = _load_mirrored_skill_paths(workspace_dir=workspace_dir)
     for path in sorted(workspace_dir.rglob("*")):
         if not path.is_file():
             continue
@@ -1288,6 +1371,8 @@ def _collect_workspace_artifacts(workspace_dir: Path) -> list[dict[str, Any]]:
         if _is_internal_workspace_artifact(relative_path):
             continue
         if _is_hidden_bootstrap_artifact(relative_path):
+            continue
+        if relative_path in mirrored_skill_paths:
             continue
         artifacts.append(
             {
@@ -1930,7 +2015,11 @@ def _materialize_shell_command(
     workspace_dir: Path | None = None,
 ) -> str | None:
     if command_plan.mode == "explicit":
-        return command_plan.command
+        return _rewrite_command_for_workspace(
+            command=command_plan.command,
+            loaded_skill=loaded_skill,
+            workspace_dir=workspace_dir,
+        )
     if command_plan.mode == "generated_script":
         relative_script = command_plan.entrypoint
         if not relative_script and command_plan.generated_files:
@@ -1949,14 +2038,28 @@ def _materialize_shell_command(
                 command_plan.cli_args,
                 runtime_target=command_plan.runtime_target,
             )
-        return command_plan.command
+        return _rewrite_command_for_workspace(
+            command=command_plan.command,
+            loaded_skill=loaded_skill,
+            workspace_dir=workspace_dir,
+        )
     if command_plan.entrypoint:
+        if workspace_dir is not None:
+            return _build_workspace_script_shell_command(
+                workspace_dir=workspace_dir,
+                relative_script=command_plan.entrypoint,
+                cli_args=command_plan.cli_args,
+            )
         return _build_script_shell_command(
             skill_dir=loaded_skill.skill.path,
             relative_script=command_plan.entrypoint,
             cli_args=command_plan.cli_args,
         )
-    return command_plan.command
+    return _rewrite_command_for_workspace(
+        command=command_plan.command,
+        loaded_skill=loaded_skill,
+        workspace_dir=workspace_dir,
+    )
 
 
 def _write_generated_files(
@@ -3252,6 +3355,14 @@ async def _run_shell_task(
 
     cleanup_workspace_here = cleanup_workspace
     try:
+        mirrored_skill_files = _materialize_skill_workspace_view(
+            loaded_skill=loaded_skill,
+            workspace_dir=workspace_dir,
+        )
+        _write_mirrored_skill_manifest(
+            workspace_dir=workspace_dir,
+            mirrored_paths=mirrored_skill_files,
+        )
         request_file = _write_skill_request(
             workspace_dir=workspace_dir,
             skill_payload=skill_payload,
@@ -3326,6 +3437,7 @@ async def _run_shell_task(
             )
             response["request_file"] = str(request_file)
             response["generated_files"] = generated_files
+            response["mirrored_skill_files"] = mirrored_skill_files
             response["logs"] = {"stdout": "", "stderr": ""}
             _store_run_record(response)
             return _prepare_transport_payload(response)
@@ -3371,6 +3483,7 @@ async def _run_shell_task(
         )
         running_payload["request_file"] = str(request_file)
         running_payload["generated_files"] = generated_files
+        running_payload["mirrored_skill_files"] = mirrored_skill_files
         running_payload["logs"] = {"stdout": "", "stderr": ""}
         _store_run_record(running_payload)
         job_context = _build_worker_job_context(
@@ -3426,6 +3539,7 @@ async def _run_shell_task(
             )
             failed_payload["request_file"] = str(request_file)
             failed_payload["generated_files"] = generated_files
+            failed_payload["mirrored_skill_files"] = mirrored_skill_files
             failed_payload["logs"] = {"stdout": "", "stderr": ""}
             _store_run_record(failed_payload)
             _update_run_metadata(
