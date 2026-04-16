@@ -77,6 +77,7 @@ kg_agent/
 - Keep planner-visible native capabilities, local skills, and external MCP capabilities as separate surfaces.
 - Keep skill catalog metadata explicit; planner matching depends on skill names, descriptions, and tags, so domain skills should publish strong bilingual keywords when needed.
 - Keep shipped skill script contracts inferable when possible; relative-date phrases and domain identifiers should resolve into explicit planner constraints without weakening execution safety.
+- Prefer schema-bounded LLM normalization for fuzzy skill parameters when a utility model is available; keep regex and hardcoded parsing as validation/fallback layers rather than the primary reasoning path.
 - Do not hardcode domain-specific placeholder tools into the native built-in registry; specialized integrations belong behind MCP or the skill runtime.
 - Prefer `rag_provider`-based dynamic workspace loading in API-facing flows instead of binding the app to one fixed `LightRAG` instance.
 

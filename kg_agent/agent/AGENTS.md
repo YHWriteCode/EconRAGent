@@ -35,7 +35,7 @@ agent/
 |-- capability_registry.py  # Planner-visible capability metadata and MCP/native registration
 |-- tool_registry.py        # Native tool registration and execution
 |-- builtin_tools.py        # Builds the default native tool set
-|-- prompts.py              # Route-judge, path-explainer, skill-planner, and final-answer prompts
+|-- prompts.py              # Route-judge, path-explainer, skill constraint inference, skill-planner, and final-answer prompts
 `-- tool_schemas.py         # JSON Schema payloads for native tools
 ```
 
@@ -82,6 +82,7 @@ Keep those layers distinct. A local skill is not a planner-visible MCP tool, and
 - Do not expose `RouteJudge` or `PathExplainer` as standalone chat endpoints.
 - Keep framework-reserved tool kwargs under framework control; tool-generated args must not override values such as `query`, `rag`, `session_id`, `user_id`, `session_context`, `user_profile`, `domain_schema`, or `memory_store`.
 - Keep prompt ownership centralized in `prompts.py`; do not scatter prompt templates across unrelated modules.
+- When adding LLM-assisted normalization for skills, keep it schema-bounded and prompt-driven; do not let planner prompts devolve into free-form command generation outside the skill runtime boundary.
 - Keep native capability exposure lightweight and metadata-driven. Domain-specific external systems should usually be surfaced through MCP rather than hardcoded into the native registry.
 - Keep path explanation optional and fallback-safe. Plain answers must still work when graph paths or evidence are weak.
 

@@ -184,6 +184,47 @@ async def test_skill_command_planner_conservative_mode_can_lock_clear_financial_
 
 
 @pytest.mark.asyncio
+async def test_skill_command_planner_llm_constraint_inference_handles_fuzzy_dates():
+    loaded_skill = _load_repo_skill("financial-researching")
+    llm = _StubPlannerLLM(
+        {
+            "constraints": {
+                "code": "002594",
+                "start": "20250416",
+                "end": "20260416",
+                "trend_start": "20260116",
+                "trend_end": "20260416",
+            },
+            "reason": "Normalized fuzzy dates relative to the provided reference date.",
+            "confidence": "high",
+        }
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="financial-researching",
+            goal="分析比亚迪 002594 从去年同期到现在的波动情况，并判断最近一个季度是否还在上行",
+            user_query="请看一下比亚迪002594从去年同期到现在的波动情况，并判断最近一个季度是否还在上行",
+            constraints={},
+        ),
+    )
+
+    assert len(llm.calls) == 1
+    assert plan.mode == "inferred"
+    assert plan.entrypoint == "scripts/analyze_stock_trend.py"
+    assert "--code" in plan.cli_args
+    assert "002594" in plan.cli_args
+    assert "--start" in plan.cli_args
+    assert "20250416" in plan.cli_args
+    assert "--end" in plan.cli_args
+    assert "20260416" in plan.cli_args
+    assert "--trend-start" in plan.cli_args
+    assert "20260116" in plan.cli_args
+
+
+@pytest.mark.asyncio
 async def test_skill_command_planner_returns_manual_required_for_ambiguous_target():
     loaded_skill = _load_repo_skill("example-skill")
     planner = SkillCommandPlanner()

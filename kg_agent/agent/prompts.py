@@ -405,6 +405,64 @@ def build_skill_free_shell_planner_prompt(
     return system_prompt, user_prompt
 
 
+def build_skill_constraint_inference_prompt(
+    *,
+    skill_name: str,
+    goal: str,
+    user_query: str,
+    reference_date: str,
+    runtime_target: dict[str, Any],
+    current_constraints: dict[str, Any],
+    allowed_constraint_keys: list[str],
+    skill_md_excerpt: str,
+    script_previews: list[dict[str, Any]],
+    file_inventory: list[dict[str, Any]],
+) -> tuple[str, str]:
+    system_prompt = (
+        "You infer structured skill constraints from natural-language requests. "
+        "Return only conservative, schema-bounded JSON. "
+        "Normalize fuzzy temporal language relative to the provided reference date when it is low-risk to do so. "
+        "Do not invent shell commands, files, URLs, or credentials."
+    )
+    user_prompt = (
+        "Return strict JSON only with this schema:\n"
+        "{"
+        '"constraints": {str: str | bool | [str]}, '
+        '"reason": str, '
+        '"confidence": "low" | "medium" | "high"'
+        "}\n\n"
+        f"Skill name: {skill_name}\n"
+        "Reference date:\n"
+        f"{reference_date}\n\n"
+        "Runtime target:\n"
+        f"{json.dumps(runtime_target, ensure_ascii=False, indent=2)}\n\n"
+        "User goal:\n"
+        f"{goal}\n\n"
+        "User query:\n"
+        f"{user_query}\n\n"
+        "Current constraints:\n"
+        f"{json.dumps(current_constraints, ensure_ascii=False, indent=2)}\n\n"
+        "Allowed constraint keys:\n"
+        f"{json.dumps(allowed_constraint_keys, ensure_ascii=False, indent=2)}\n\n"
+        "Relevant script previews:\n"
+        f"{json.dumps(script_previews, ensure_ascii=False, indent=2)}\n\n"
+        "Skill file inventory:\n"
+        f"{json.dumps(file_inventory, ensure_ascii=False, indent=2)}\n\n"
+        "Skill markdown excerpt:\n"
+        f"{skill_md_excerpt}\n\n"
+        "Rules:\n"
+        "1. Only emit keys from allowed_constraint_keys.\n"
+        "2. Fill missing or fuzzy-but-low-risk values; do not restate values that are already clear in current_constraints unless you are normalizing them into a safer explicit form.\n"
+        "3. Normalize relative dates into YYYYMMDD.\n"
+        "4. If a time expression is ambiguous, omit it instead of guessing.\n"
+        "5. Prefer executable parameter values over prose.\n"
+        "6. Do not emit shell commands, generated files, or free-form plans.\n"
+        "7. If confidence is low, keep constraints sparse.\n"
+        "Keep JSON valid and do not include markdown fences."
+    )
+    return system_prompt, user_prompt
+
+
 def build_path_explainer_prompt(
     *,
     query: str,

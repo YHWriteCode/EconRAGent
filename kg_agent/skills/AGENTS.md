@@ -60,6 +60,7 @@ This layer is shell-oriented by design:
 - inline shell or Python can be promoted into generated files
 - generated scripts can declare entrypoints and CLI args
 - bounded bootstrap commands can prepare a workspace when needed
+- when a utility LLM is available, the planner may first infer missing structured constraints from fuzzy user language before conservative command synthesis
 - relative date phrases in user requests can be normalized into explicit CLI dates for shipped scripts when the mapping is unambiguous
 - multi-script skills may still auto-lock to one documented shipped script when the inferred CLI contract is clear enough for conservative execution
 
@@ -73,6 +74,7 @@ This layer is shell-oriented by design:
 - Keep generated-script support bounded and transport-aware; avoid pushing large multi-file payloads through public transport surfaces when workspace staging is better.
 - Keep runtime-target and shell-mode logic explicit in the models rather than inferring them from arbitrary strings at the last minute.
 - When improving shipped scripts, prefer making the script contract more inferable rather than weakening planner safety checks.
+- Treat regex/date heuristics as fallback normalization only; the preferred path for fuzzy-but-low-risk parameter inference is schema-bounded LLM output validated back into typed constraints.
 
 ---
 
@@ -82,4 +84,4 @@ This layer is shell-oriented by design:
 - Large generated-script payloads are transport-compacted; very large multi-file bundles are still better staged in the runtime workspace than round-tripped through MCP or API payloads.
 - Compatibility `status` is still exposed at some boundaries for older clients, but internal logic should treat canonical `run_status` as authoritative.
 - Runtime-backed bootstrap and repair behavior is intentionally bounded. Automatic dependency classification and richer environment recovery remain lower-priority improvements.
-- Relative date parsing is intentionally pragmatic and phrase-based; very domain-specific time semantics still need explicit constraints or richer planner guidance.
+- Relative date parsing still has a deterministic fallback path, but richer business semantics such as fiscal periods, market-specific calendars, or vague anchor phrases still depend on LLM inference quality and validation rules.

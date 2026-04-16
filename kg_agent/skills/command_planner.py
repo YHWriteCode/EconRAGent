@@ -9,7 +9,10 @@ from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
-from kg_agent.agent.prompts import build_skill_free_shell_planner_prompt
+from kg_agent.agent.prompts import (
+    build_skill_constraint_inference_prompt,
+    build_skill_free_shell_planner_prompt,
+)
 from kg_agent.skills.models import (
     LoadedSkill,
     SkillCommandPlan,
@@ -99,6 +102,43 @@ OPTIONAL_INFERABLE_FLAG_NAMES = (
     | TREND_END_DATE_FLAG_NAMES
     | {"output", "output_path", "format", "mode", "dep", "indep", "notes", "note", "description"}
 )
+DATE_LIKE_CONSTRAINT_NAMES = (
+    START_DATE_FLAG_NAMES | END_DATE_FLAG_NAMES | TREND_START_DATE_FLAG_NAMES | TREND_END_DATE_FLAG_NAMES
+)
+BOOL_LIKE_CONSTRAINT_NAMES = {
+    "dry_run",
+    "plan_only",
+    "overwrite",
+    "recursive",
+    "preserve_formulas",
+}
+PATH_LIKE_CONSTRAINT_NAMES = {
+    "input_path",
+    "output_path",
+    "output",
+    "destination_path",
+    "file",
+    "path",
+    "input_file",
+}
+GENERIC_INFERABLE_CONSTRAINT_KEYS = {
+    "input_path",
+    "input_paths",
+    "output_path",
+    "output",
+    "destination_path",
+    "format",
+    "output_format",
+    "mode",
+    "dry_run",
+    "plan_only",
+    "shell_mode",
+    "notes",
+    "note",
+    "description",
+    "operation",
+    "preserve_formulas",
+}
 SCRIPT_FIRST_REQUEST_PATTERN = re.compile(
     r"("
     r"script\s+first|"
@@ -259,6 +299,138 @@ def _select_secondary_relative_date_window(
         return None
     ranked = sorted(windows, key=_window_duration_days)
     return ranked[0]
+
+
+def _normalize_bool_like(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().lower()
+    if normalized in {"true", "1", "yes", "y"}:
+        return True
+    if normalized in {"false", "0", "no", "n"}:
+        return False
+    return None
+
+
+def _normalize_code_like_value(value: Any) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    if re.fullmatch(r"\d{6}", normalized):
+        return normalized
+    if re.fullmatch(r"[A-Za-z]{1,5}", normalized):
+        return normalized.upper()
+    return None
+
+
+def _normalize_multi_code_like_value(value: Any) -> str | None:
+    if isinstance(value, list):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        parts = [item.strip() for item in str(value or "").split(",") if item.strip()]
+    normalized_parts: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        normalized = _normalize_code_like_value(part)
+        if normalized is None or normalized in seen:
+            continue
+        normalized_parts.append(normalized)
+        seen.add(normalized)
+    if not normalized_parts:
+        return None
+    return ",".join(normalized_parts)
+
+
+def _normalize_simple_string(value: Any, *, upper: bool = False) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    return normalized.upper() if upper else normalized
+
+
+def _build_allowed_constraint_keys(
+    loaded_skill: LoadedSkill,
+    shell_hints: dict[str, Any],
+) -> list[str]:
+    allowed: set[str] = set(GENERIC_INFERABLE_CONSTRAINT_KEYS)
+    for relative_path in shell_hints.get("runnable_scripts", []):
+        if not isinstance(relative_path, str) or not relative_path.strip():
+            continue
+        script_path = (loaded_skill.skill.path / relative_path).resolve()
+        for flag in extract_cli_flags(script_path):
+            normalized = flag_to_field_name(flag)
+            if not normalized:
+                continue
+            allowed.add(normalized)
+            if normalized in {"input", "file", "path"}:
+                allowed.add("input_path")
+            if normalized == "output":
+                allowed.add("output_path")
+    return sorted(allowed)
+
+
+def _sanitize_inferred_constraint_value(key: str, value: Any) -> Any:
+    normalized_key = str(key or "").strip().lower()
+    if not normalized_key:
+        return None
+    if normalized_key in DATE_LIKE_CONSTRAINT_NAMES:
+        candidate = str(value or "").strip()
+        return candidate if re.fullmatch(r"20\d{6}", candidate) else None
+    if normalized_key in {"code", "target", "target_code", "ticker", "symbol"}:
+        return _normalize_code_like_value(value)
+    if normalized_key in {"codes", "symbols", "tickers"}:
+        return _normalize_multi_code_like_value(value)
+    if normalized_key in BOOL_LIKE_CONSTRAINT_NAMES:
+        return _normalize_bool_like(value)
+    if normalized_key == "shell_mode":
+        return normalize_shell_mode(value)
+    if normalized_key == "cli_args":
+        return normalize_cli_args(value)
+    if normalized_key == "input_paths":
+        if not isinstance(value, list):
+            return None
+        normalized_items = [
+            item
+            for item in (_normalize_simple_string(item) for item in value[:8])
+            if item is not None
+        ]
+        return normalized_items or None
+    if normalized_key in PATH_LIKE_CONSTRAINT_NAMES:
+        return _normalize_simple_string(value)
+    if normalized_key in {
+        "format",
+        "output_format",
+        "mode",
+        "dep",
+        "indep",
+        "notes",
+        "note",
+        "description",
+        "operation",
+    }:
+        return _normalize_simple_string(value)
+    if isinstance(value, str):
+        return _normalize_simple_string(value)
+    return None
+
+
+def _sanitize_inferred_constraints(
+    raw_constraints: Any,
+    *,
+    allowed_keys: set[str],
+) -> dict[str, Any]:
+    if not isinstance(raw_constraints, dict):
+        return {}
+    sanitized: dict[str, Any] = {}
+    for raw_key, raw_value in raw_constraints.items():
+        key = str(raw_key or "").strip()
+        if not key or key not in allowed_keys:
+            continue
+        normalized_value = _sanitize_inferred_constraint_value(key, raw_value)
+        if normalized_value is None:
+            continue
+        sanitized[key] = normalized_value
+    return sanitized
 
 
 def split_skill_markdown(raw: str) -> tuple[dict[str, Any], str]:
@@ -1312,6 +1484,89 @@ class SkillCommandPlanner:
         self.default_shell_mode = normalize_shell_mode(default_shell_mode)
         self.default_runtime_target = default_runtime_target or SkillRuntimeTarget.linux_default()
 
+    async def _maybe_infer_constraints_with_llm(
+        self,
+        *,
+        loaded_skill: LoadedSkill,
+        request: SkillExecutionRequest,
+        shell_hints: dict[str, Any],
+        runtime_target: SkillRuntimeTarget,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        if self.llm_client is None or not self.llm_client.is_available():
+            return dict(request.constraints or {}), None
+
+        allowed_keys = _build_allowed_constraint_keys(loaded_skill, shell_hints)
+        if not allowed_keys:
+            return dict(request.constraints or {}), None
+
+        _, body = split_skill_markdown(loaded_skill.skill_md)
+        skill_md_excerpt = _truncate_text(body, max_chars=MAX_MARKDOWN_EXCERPT_CHARS)
+        script_previews = load_script_previews(
+            loaded_skill,
+            query_text="\n".join(
+                [
+                    request.goal,
+                    request.user_query,
+                    " ".join(str(item) for item in request.constraints.values()),
+                ]
+            ),
+            limit=4,
+        )
+        system_prompt, user_prompt = build_skill_constraint_inference_prompt(
+            skill_name=request.skill_name,
+            goal=request.goal,
+            user_query=request.user_query,
+            reference_date=_current_date().isoformat(),
+            runtime_target=runtime_target.to_dict(),
+            current_constraints=dict(request.constraints or {}),
+            allowed_constraint_keys=allowed_keys,
+            skill_md_excerpt=skill_md_excerpt,
+            script_previews=script_previews,
+            file_inventory=[item.to_dict() for item in loaded_skill.file_inventory],
+        )
+        try:
+            payload = await self.llm_client.complete_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=0.0,
+                max_tokens=800,
+            )
+        except Exception:
+            return dict(request.constraints or {}), {
+                "planner": "constraint_inference",
+                "status": "failed",
+            }
+
+        sanitized = _sanitize_inferred_constraints(
+            payload.get("constraints") if isinstance(payload, dict) else None,
+            allowed_keys=set(allowed_keys),
+        )
+        merged = dict(request.constraints or {})
+        applied: dict[str, Any] = {}
+        for key, value in sanitized.items():
+            existing = merged.get(key)
+            if existing is not None and existing != "" and existing != [] and existing != {}:
+                continue
+            merged[key] = value
+            applied[key] = value
+
+        metadata = {
+            "planner": "constraint_inference",
+            "status": "applied" if applied else "no_change",
+            "confidence": (
+                str(payload.get("confidence", "")).strip().lower()
+                if isinstance(payload, dict)
+                else ""
+            ),
+            "reason": (
+                str(payload.get("reason", "")).strip()
+                if isinstance(payload, dict)
+                else ""
+            ),
+            "applied": applied,
+        }
+        return merged, metadata
+
     async def plan(
         self,
         *,
@@ -1324,6 +1579,17 @@ class SkillCommandPlanner:
             request.runtime_target.to_dict(),
             default=self.default_runtime_target,
         )
+        shell_hints = build_shell_hints(loaded_skill)
+        explicit_command = extract_requested_shell_command(constraints)
+        constraint_inference_metadata: dict[str, Any] | None = None
+        if shell_mode != "free_shell" and explicit_command is None:
+            constraints, constraint_inference_metadata = await self._maybe_infer_constraints_with_llm(
+                loaded_skill=loaded_skill,
+                request=request,
+                shell_hints=shell_hints,
+                runtime_target=runtime_target,
+            )
+            shell_mode = resolve_shell_mode(constraints, default=self.default_shell_mode)
         normalized_request = SkillExecutionRequest(
             skill_name=request.skill_name,
             goal=request.goal,
@@ -1333,8 +1599,11 @@ class SkillCommandPlanner:
             runtime_target=runtime_target,
             constraints=constraints,
         )
-        shell_hints = build_shell_hints(loaded_skill)
-        explicit_command = extract_requested_shell_command(constraints)
+        if constraint_inference_metadata:
+            shell_hints = {
+                **shell_hints,
+                "constraint_inference": constraint_inference_metadata,
+            }
         if explicit_command:
             return SkillCommandPlan(
                 skill_name=normalized_request.skill_name,
