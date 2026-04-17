@@ -269,6 +269,98 @@ python -m lightrag_fork.api.lightrag_server
 docker build -f mcp-server/Dockerfile -t lightrag-mcp-skill-service:latest .
 ```
 
+### 11.2.1 Skill Runtime 持久化与依赖预热
+
+当前 `mcp-server` 已改为：
+
+- Skill 依赖写在各自目录下的 `requirements.lock`
+- 运行时按 `env_hash` 复用 `/workspace/envs/<hash>`
+- `runs/state/envs/wheelhouse/pip-cache/locks` 建议分别持久化挂载
+
+仓库内已经提供可直接在 Windows PowerShell 上使用的宿主脚本：
+
+```powershell
+# 初始化宿主持久化目录，并输出 KG_AGENT_MCP_SERVERS_JSON
+powershell -ExecutionPolicy Bypass -File .\mcp-server\scripts\init-skill-runtime-host.ps1 `
+  -RuntimeRoot D:\skill-runtime `
+  -ConfigOutputPath D:\skill-runtime\kg-agent-mcp-servers.json
+
+# 预热全部 skill 的 wheel 包到宿主 wheelhouse（只下载，不安装）
+powershell -ExecutionPolicy Bypass -File .\mcp-server\scripts\prefetch-skill-wheels.ps1 `
+  -RuntimeRoot D:\skill-runtime `
+  -All
+
+# 只预热单个 skill
+powershell -ExecutionPolicy Bypass -File .\mcp-server\scripts\prefetch-skill-wheels.ps1 `
+  -RuntimeRoot D:\skill-runtime `
+  -SkillName pdf
+```
+
+`init-skill-runtime-host.ps1` 默认会在仓库根目录创建 `.skill-runtime/`，也可以通过 `-RuntimeRoot` 指到独立磁盘目录。脚本会输出可直接设置到 `KG_AGENT_MCP_SERVERS_JSON` 的 JSON，并可选写入文件。
+
+如果是本地开发调试，不想每次都重建镜像，可以追加 `-SourceRoot D:\AllForLearning\lightrag`。这样容器会直接挂载当前仓库源码，执行 `/src/mcp-server/server.py`，镜像只负责提供基础运行时环境。
+
+首次部署后，建议先预热 wheel 缓存：
+
+```bash
+# 预热全部 skill 的 wheel 包到 /workspace/wheelhouse（不安装）
+docker run --rm \
+  -v /your/skill-runtime/wheelhouse:/workspace/wheelhouse \
+  -v /your/skill-runtime/pip-cache:/workspace/pip-cache \
+  lightrag-mcp-skill-service:latest \
+  python /app/server.py --prefetch-all-skill-wheels
+```
+
+`KG_AGENT_MCP_SERVERS_JSON` 可按下面方式配置，将运行产物、状态、venv 和 wheel 缓存分别挂载：
+
+```json
+[
+  {
+    "name": "skill-runtime",
+    "command": "docker",
+    "stdio_framing": "json_lines",
+    "args": [
+      "run",
+      "--rm",
+      "-i",
+      "-e", "MCP_SKILLS_DIR=/app/skills",
+      "-e", "MCP_WORKSPACE_DIR=/workspace",
+      "-e", "MCP_RUNS_DIR=/workspace/runs",
+      "-e", "MCP_STATE_DIR=/workspace/state",
+      "-e", "MCP_ENVS_DIR=/workspace/envs",
+      "-e", "MCP_WHEELHOUSE_DIR=/workspace/wheelhouse",
+      "-e", "MCP_PIP_CACHE_DIR=/workspace/pip-cache",
+      "-e", "MCP_LOCKS_DIR=/workspace/locks",
+      "-v", "/your/skill-runtime/runs:/workspace/runs",
+      "-v", "/your/skill-runtime/state:/workspace/state",
+      "-v", "/your/skill-runtime/envs:/workspace/envs",
+      "-v", "/your/skill-runtime/wheelhouse:/workspace/wheelhouse",
+      "-v", "/your/skill-runtime/pip-cache:/workspace/pip-cache",
+      "-v", "/your/skill-runtime/locks:/workspace/locks",
+      "lightrag-mcp-skill-service:latest",
+      "python",
+      "/app/server.py"
+    ],
+    "discover_tools": false
+  }
+]
+```
+
+推荐顺序：
+
+1. `docker build -f mcp-server/Dockerfile -t lightrag-mcp-skill-service:latest .`
+2. 运行 `init-skill-runtime-host.ps1`
+3. 运行 `prefetch-skill-wheels.ps1`
+4. 将脚本输出的 JSON 设置到 `KG_AGENT_MCP_SERVERS_JSON`
+
+如果当前机器无法访问 Docker Hub，但本地已经有旧版 `lightrag-mcp-skill-service:latest`，可以改用离线 fallback：
+
+```bash
+docker build -f mcp-server/Dockerfile.local-rebuild -t lightrag-mcp-skill-service:latest .
+```
+
+这个 fallback 会基于本机现有镜像重建，覆盖最新的 `server.py`、`kg_agent/` 和 `skills/`，并补齐新的 `MCP_*_DIR` 默认环境变量与持久化目录。它的目标是本地开发/测试可继续推进，不用于替代正式的全量基础镜像构建。
+
 ### 11.3 主要 API 端点
 
 | 方法 | 路径 | 描述 |

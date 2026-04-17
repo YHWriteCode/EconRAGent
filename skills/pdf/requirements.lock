@@ -1,0 +1,4 @@
+Pillow>=10,<12
+pdf2image>=1.17,<2
+pdfplumber>=0.11,<1
+pypdf>=6.1,<7

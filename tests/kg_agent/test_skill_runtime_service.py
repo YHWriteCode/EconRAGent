@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
 import uuid
 from pathlib import Path
 
@@ -24,6 +25,32 @@ def _load_runtime_service_module(*, tmp_path: Path, monkeypatch) -> object:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _materialize_ready_skill_env(module, *, skill_name: str) -> dict:
+    loaded_skill = module._build_loaded_skill(skill_name)
+    env_spec = module._build_skill_env_spec(loaded_skill)
+    assert env_spec is not None
+    env_dir = Path(env_spec["env_path"])
+    bin_dir = Path(env_spec["bin_dir"])
+    python_path = Path(env_spec["python_path"])
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("", encoding="utf-8")
+    module._write_json_atomic(
+        module._skill_env_metadata_path(env_dir),
+        {
+            "format_version": module.ENV_HASH_FORMAT_VERSION,
+            "env_hash": env_spec["env_hash"],
+            "env_name": env_spec["env_name"],
+            "dependency_file": env_spec["dependency_file"],
+            "dependency_hash": env_spec["dependency_hash"],
+            "created_at": module._utc_now(),
+            "python_version": f"{module.sys.version_info.major}.{module.sys.version_info.minor}",
+            "platform": module.platform.system().lower(),
+            "machine": module.platform.machine().lower(),
+        },
+    )
+    return env_spec
 
 
 class _StubLLM:
@@ -66,6 +93,46 @@ def test_runtime_service_utility_llm_client_falls_back_to_main_model_env(
     assert client.fallback is not None
     assert client.fallback.config.model_name == "fallback-main"
     assert client.fallback.config.base_url == "http://main.local/v1"
+
+
+def test_runtime_service_build_run_env_reuses_cached_skill_env_for_shipped_script(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    loaded_skill = module._build_loaded_skill("xlsx")
+    env_spec = _materialize_ready_skill_env(module, skill_name="xlsx")
+    workspace_dir = (tmp_path / "workspace-for-env").resolve()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    env, resolved_spec = module._build_run_env(
+        skill_dir=loaded_skill.skill.path.resolve(),
+        workspace_dir=workspace_dir,
+        goal="Recalculate workbook",
+        user_query="recalc workbook",
+        constraints={},
+        runtime_target=module.DEFAULT_RUNTIME_TARGET,
+        request_file=workspace_dir / "skill_request.json",
+        loaded_skill=loaded_skill,
+        command_plan=module.SkillCommandPlan(
+            skill_name="xlsx",
+            goal="Recalculate workbook",
+            user_query="recalc workbook",
+            runtime_target=module.DEFAULT_RUNTIME_TARGET,
+            entrypoint="scripts/recalc.py",
+            mode="inferred",
+        ),
+        materialize_skill_env=False,
+    )
+
+    assert resolved_spec is not None
+    assert resolved_spec["env_hash"] == env_spec["env_hash"]
+    assert resolved_spec["ready"] is True
+    assert resolved_spec["reused"] is True
+    assert env["VIRTUAL_ENV"] == env_spec["env_path"]
+    assert env["SKILL_PYTHON_BIN"] == env_spec["python_path"]
+    assert env["PATH"].split(os.pathsep)[0] == env_spec["bin_dir"]
+    assert '"ready": true' in env["SKILL_ENVIRONMENT_JSON"].lower()
 
 
 async def _wait_for_terminal_run(module, run_id: str, *, timeout_s: float = 3.0):
@@ -259,6 +326,52 @@ async def test_runtime_service_can_plan_xlsx_recalc_without_execution(
     assert status["run_status"] == "planned"
     assert status["status"] == "planned"
     assert status["command_plan"]["entrypoint"] == "scripts/recalc.py"
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_fails_cleanly_when_skill_env_wheelhouse_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    result = await module.run_skill_task(
+        skill_name="financial-researching",
+        goal="Show financial skill help",
+        user_query="show the bundled script help",
+        constraints={},
+        wait_for_completion=True,
+        command_plan={
+            "skill_name": "financial-researching",
+            "goal": "Show financial skill help",
+            "user_query": "show the bundled script help",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {},
+            "command": "python scripts/analyze_stock_trend.py --help",
+            "mode": "explicit",
+            "shell_mode": "conservative",
+            "rationale": "Run a shipped skill script that requires the managed skill env.",
+            "generated_files": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"required_tools": ["python"]},
+        },
+    )
+
+    assert result["success"] is False
+    assert result["run_status"] == "failed"
+    assert result["failure_reason"] == "skill_env_unavailable"
+    assert "wheelhouse" in result["logs"]["stderr"].lower()
+    assert result["runtime"]["skill_environment"]["enabled"] is True
+    assert result["runtime"]["skill_environment"]["requires_materialization"] is True
+    assert result["runtime"]["skill_environment"]["dependency_file"] == "requirements.lock"
 
 
 @pytest.mark.asyncio

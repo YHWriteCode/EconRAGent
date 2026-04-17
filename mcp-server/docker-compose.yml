@@ -11,8 +11,19 @@ services:
     environment:
       MCP_SKILLS_DIR: /app/skills
       MCP_WORKSPACE_DIR: /workspace
+      MCP_RUNS_DIR: /workspace/runs
+      MCP_STATE_DIR: /workspace/state
+      MCP_ENVS_DIR: /workspace/envs
+      MCP_WHEELHOUSE_DIR: /workspace/wheelhouse
+      MCP_PIP_CACHE_DIR: /workspace/pip-cache
+      MCP_LOCKS_DIR: /workspace/locks
     volumes:
-      - mcp_skill_workspace:/workspace
+      - mcp_skill_runs:/workspace/runs
+      - mcp_skill_state:/workspace/state
+      - mcp_skill_envs:/workspace/envs
+      - mcp_skill_wheelhouse:/workspace/wheelhouse
+      - mcp_skill_pip_cache:/workspace/pip-cache
+      - mcp_skill_locks:/workspace/locks
     # Local development hot reload for skill definitions:
     # volumes:
     #   - ../skills:/app/skills:ro
@@ -22,4 +33,9 @@ services:
     #   docker compose -f mcp-server/docker-compose.yml run --rm mcp-skill-service
 
 volumes:
-  mcp_skill_workspace:
+  mcp_skill_runs:
+  mcp_skill_state:
+  mcp_skill_envs:
+  mcp_skill_wheelhouse:
+  mcp_skill_pip_cache:
+  mcp_skill_locks:

@@ -34,8 +34,8 @@ class _StubRouteJudge:
 
 
 class _FallbackArtifactsAdapter:
-    def __init__(self, workspace_root: Path):
-        self.workspace_root = workspace_root.resolve()
+    def __init__(self, runs_root: Path):
+        self.runs_root = runs_root.resolve()
         self.server_config = MCPServerConfig(
             name="skill-runtime",
             command="docker",
@@ -44,7 +44,7 @@ class _FallbackArtifactsAdapter:
                 "--rm",
                 "-i",
                 "-v",
-                f"{self.workspace_root.as_posix()}:/workspace",
+                f"{self.runs_root.as_posix()}:/workspace/runs",
                 "fake-image",
                 "python",
                 "/app/server.py",
@@ -73,7 +73,7 @@ class _FallbackArtifactsAdapter:
                             "network_allowed": True,
                             "supports_python": True,
                         },
-                        "workspace": "/workspace/run-42",
+                        "workspace": "/workspace/runs/run-42",
                         "started_at": "2026-01-01T00:00:00+00:00",
                         "finished_at": "2026-01-01T00:05:00+00:00",
                         "failure_reason": None,
@@ -296,8 +296,8 @@ async def test_agent_core_can_cancel_skill_run_via_mcp_runtime_transport():
 async def test_runtime_client_falls_back_to_host_workspace_for_artifacts_on_transport_overflow(
     tmp_path: Path,
 ):
-    workspace_root = (tmp_path / "mounted-workspace").resolve()
-    run_workspace = workspace_root / "run-42"
+    runs_root = (tmp_path / "mounted-workspace" / "runs").resolve()
+    run_workspace = runs_root / "run-42"
     output_dir = run_workspace / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "report.json").write_text('{"ok":true}', encoding="utf-8")
@@ -308,7 +308,7 @@ async def test_runtime_client_falls_back_to_host_workspace_for_artifacts_on_tran
     )
 
     client = MCPBasedSkillRuntimeClient(
-        adapter=_FallbackArtifactsAdapter(workspace_root),
+        adapter=_FallbackArtifactsAdapter(runs_root),
         config=SkillRuntimeConfig(server="skill-runtime"),
     )
 
@@ -317,5 +317,5 @@ async def test_runtime_client_falls_back_to_host_workspace_for_artifacts_on_tran
     assert artifacts["run_status"] == "completed"
     assert artifacts["workspace"] == str(run_workspace)
     assert artifacts["runtime"]["artifacts_host_fallback"] is True
-    assert artifacts["runtime"]["container_workspace"] == "/workspace/run-42"
+    assert artifacts["runtime"]["container_workspace"] == "/workspace/runs/run-42"
     assert artifacts["artifacts"] == [{"path": "output/report.json", "size_bytes": 11}]

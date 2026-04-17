@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
+import platform
 import py_compile
 import re
 import shlex
@@ -12,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,10 +97,28 @@ except ImportError:  # pragma: no cover - fallback for local tests without MCP p
 
 SKILLS_ROOT = Path(os.environ.get("MCP_SKILLS_DIR", "/app/skills")).resolve()
 WORKSPACE_ROOT = Path(os.environ.get("MCP_WORKSPACE_DIR", "/workspace")).resolve()
+RUNS_ROOT = Path(
+    os.environ.get("MCP_RUNS_DIR", str(WORKSPACE_ROOT / "runs"))
+).resolve()
+STATE_ROOT = Path(
+    os.environ.get("MCP_STATE_DIR", str(WORKSPACE_ROOT / "state"))
+).resolve()
+ENVS_ROOT = Path(
+    os.environ.get("MCP_ENVS_DIR", str(WORKSPACE_ROOT / "envs"))
+).resolve()
+WHEELHOUSE_ROOT = Path(
+    os.environ.get("MCP_WHEELHOUSE_DIR", str(WORKSPACE_ROOT / "wheelhouse"))
+).resolve()
+PIP_CACHE_ROOT = Path(
+    os.environ.get("MCP_PIP_CACHE_DIR", str(WORKSPACE_ROOT / "pip-cache"))
+).resolve()
+LOCKS_ROOT = Path(
+    os.environ.get("MCP_LOCKS_DIR", str(WORKSPACE_ROOT / "locks"))
+).resolve()
 RUN_STORE_DB_PATH = Path(
     os.environ.get(
         "MCP_RUN_STORE_SQLITE_PATH",
-        str(WORKSPACE_ROOT / "skill_runtime_runs.sqlite3"),
+        str(STATE_ROOT / "skill_runtime_runs.sqlite3"),
     )
 ).resolve()
 DEFAULT_SCRIPT_TIMEOUT_S = int(os.environ.get("MCP_SCRIPT_TIMEOUT_S", "120"))
@@ -144,6 +165,23 @@ QUEUE_LEASE_TIMEOUT_S = float(
 QUEUE_MAX_ATTEMPTS = max(
     1,
     int(os.environ.get("MCP_QUEUE_MAX_ATTEMPTS", "2")),
+)
+ENV_HASH_FORMAT_VERSION = "skill-env-v1"
+ENV_BUILD_TIMEOUT_S = max(
+    30,
+    int(os.environ.get("MCP_ENV_BUILD_TIMEOUT_S", "600")),
+)
+ENV_LOCK_TIMEOUT_S = max(
+    5.0,
+    float(os.environ.get("MCP_ENV_LOCK_TIMEOUT_S", "300.0")),
+)
+ENV_LOCK_STALE_S = max(
+    ENV_LOCK_TIMEOUT_S,
+    float(os.environ.get("MCP_ENV_LOCK_STALE_S", "1800.0")),
+)
+ENV_LOCK_POLL_INTERVAL_S = max(
+    0.05,
+    float(os.environ.get("MCP_ENV_LOCK_POLL_INTERVAL_S", "0.2")),
 )
 
 SKILL_RUNTIME_CONFIG = SkillRuntimeConfig.from_env()
@@ -1030,6 +1068,393 @@ def _iter_runnable_scripts(skill_dir: Path) -> list[str]:
     return runnable
 
 
+def _runtime_bin_dir_name() -> str:
+    return "Scripts" if os.name == "nt" else "bin"
+
+
+def _runtime_python_name() -> str:
+    return "python.exe" if os.name == "nt" else "python"
+
+
+def _venv_bin_dir(env_dir: Path) -> Path:
+    return (env_dir / _runtime_bin_dir_name()).resolve()
+
+
+def _venv_python_path(env_dir: Path) -> Path:
+    return (_venv_bin_dir(env_dir) / _runtime_python_name()).resolve()
+
+
+def _skill_env_metadata_path(env_dir: Path) -> Path:
+    return (env_dir / "env_metadata.json").resolve()
+
+
+def _skill_env_lock_path(env_hash: str) -> Path:
+    return (LOCKS_ROOT / f"{env_hash}.lock").resolve()
+
+
+def _normalize_skill_metadata_paths(value: Any) -> list[str]:
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if not isinstance(value, list):
+        return []
+    return [
+        str(item).strip()
+        for item in value
+        if isinstance(item, (str, int, float)) and str(item).strip()
+    ]
+
+
+def _resolve_skill_dependency_file(loaded_skill: LoadedSkill) -> Path | None:
+    skill_dir = loaded_skill.skill.path.resolve()
+    metadata = (
+        loaded_skill.skill.metadata
+        if isinstance(loaded_skill.skill.metadata, dict)
+        else {}
+    )
+    candidates = [
+        *_normalize_skill_metadata_paths(metadata.get("runtime_requirements")),
+        *_normalize_skill_metadata_paths(metadata.get("requirements")),
+        "requirements.lock",
+        "requirements.txt",
+    ]
+    seen: set[str] = set()
+    for raw_relative in candidates:
+        relative_path = str(raw_relative).replace("\\", "/").strip()
+        if not relative_path or relative_path in seen:
+            continue
+        seen.add(relative_path)
+        candidate = (skill_dir / relative_path).resolve()
+        if candidate == skill_dir or skill_dir not in candidate.parents:
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _build_skill_env_spec(loaded_skill: LoadedSkill) -> dict[str, Any] | None:
+    dependency_file = _resolve_skill_dependency_file(loaded_skill)
+    if dependency_file is None:
+        return None
+    raw_bytes = dependency_file.read_bytes()
+    requirements_hash = hashlib.sha256(raw_bytes).hexdigest()
+    env_hash = hashlib.sha256(
+        "\n".join(
+            [
+                ENV_HASH_FORMAT_VERSION,
+                platform.system().lower(),
+                platform.machine().lower(),
+                f"{sys.version_info.major}.{sys.version_info.minor}",
+                requirements_hash,
+            ]
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    env_name = f"py{sys.version_info.major}{sys.version_info.minor}-{env_hash}"
+    env_dir = (ENVS_ROOT / env_name).resolve()
+    return {
+        "enabled": True,
+        "strategy": "shared_wheelhouse_venv",
+        "env_hash": env_hash,
+        "env_name": env_name,
+        "env_path": str(env_dir),
+        "bin_dir": str(_venv_bin_dir(env_dir)),
+        "python_path": str(_venv_python_path(env_dir)),
+        "dependency_file": str(
+            dependency_file.relative_to(loaded_skill.skill.path.resolve())
+        ).replace("\\", "/"),
+        "dependency_path": str(dependency_file),
+        "dependency_hash": requirements_hash,
+        "wheelhouse_root": str(WHEELHOUSE_ROOT),
+        "pip_cache_dir": str(PIP_CACHE_ROOT),
+        "ready": False,
+        "materialized": False,
+        "reused": False,
+        "requires_materialization": False,
+        "error": None,
+    }
+
+
+def _load_skill_env_metadata(env_dir: Path) -> dict[str, Any] | None:
+    metadata_path = _skill_env_metadata_path(env_dir)
+    if not metadata_path.is_file():
+        return None
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return dict(payload) if isinstance(payload, dict) else None
+
+
+def _skill_env_is_ready(env_spec: dict[str, Any]) -> bool:
+    env_dir = Path(str(env_spec.get("env_path", ""))).resolve()
+    python_path = Path(str(env_spec.get("python_path", ""))).resolve()
+    metadata = _load_skill_env_metadata(env_dir)
+    if metadata is None:
+        return False
+    if str(metadata.get("env_hash", "")).strip() != str(env_spec.get("env_hash", "")).strip():
+        return False
+    if (
+        str(metadata.get("dependency_hash", "")).strip()
+        != str(env_spec.get("dependency_hash", "")).strip()
+    ):
+        return False
+    if (
+        str(metadata.get("format_version", "")).strip()
+        != ENV_HASH_FORMAT_VERSION
+    ):
+        return False
+    return env_dir.is_dir() and python_path.is_file()
+
+
+def _skill_env_runtime_payload(env_spec: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(env_spec, dict):
+        return {
+            "enabled": False,
+            "strategy": "shared_wheelhouse_venv",
+        }
+    payload = {
+        "enabled": bool(env_spec.get("enabled", False)),
+        "strategy": str(env_spec.get("strategy", "shared_wheelhouse_venv")).strip()
+        or "shared_wheelhouse_venv",
+        "env_hash": str(env_spec.get("env_hash", "")).strip(),
+        "env_name": str(env_spec.get("env_name", "")).strip(),
+        "env_path": str(env_spec.get("env_path", "")).strip(),
+        "python_path": str(env_spec.get("python_path", "")).strip(),
+        "dependency_file": str(env_spec.get("dependency_file", "")).strip(),
+        "dependency_hash": str(env_spec.get("dependency_hash", "")).strip(),
+        "wheelhouse_root": str(env_spec.get("wheelhouse_root", "")).strip(),
+        "pip_cache_dir": str(env_spec.get("pip_cache_dir", "")).strip(),
+        "ready": bool(env_spec.get("ready", False)),
+        "materialized": bool(env_spec.get("materialized", False)),
+        "reused": bool(env_spec.get("reused", False)),
+        "requires_materialization": bool(
+            env_spec.get("requires_materialization", False)
+        ),
+    }
+    error_text = str(env_spec.get("error", "")).strip()
+    if error_text:
+        payload["error"] = error_text
+    return payload
+
+
+def _command_references_skill_script(
+    command_plan: SkillCommandPlan,
+    loaded_skill: LoadedSkill,
+) -> bool:
+    command = str(command_plan.command or "").replace("\\", "/").strip()
+    if not command:
+        return False
+    for relative_path in _iter_runnable_scripts(loaded_skill.skill.path.resolve()):
+        normalized = relative_path.replace("\\", "/")
+        if normalized and normalized in command:
+            return True
+    return False
+
+
+def _command_plan_prefers_skill_env(
+    command_plan: SkillCommandPlan,
+    loaded_skill: LoadedSkill,
+) -> bool:
+    if command_plan.entrypoint and not str(command_plan.entrypoint).replace("\\", "/").startswith(
+        ".skill_generated/"
+    ):
+        return True
+    if command_plan.mode in {"inferred", "declared_example", "structured_args"}:
+        return True
+    return _command_references_skill_script(command_plan, loaded_skill)
+
+
+def _acquire_file_lock(lock_path: Path) -> int | None:
+    try:
+        return os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return None
+
+
+def _wait_for_skill_env_lock(lock_path: Path) -> int:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    started_at = time.monotonic()
+    while True:
+        handle = _acquire_file_lock(lock_path)
+        if handle is not None:
+            payload = {
+                "pid": os.getpid(),
+                "created_at": _utc_now(),
+            }
+            os.write(handle, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            return handle
+        if lock_path.exists():
+            lock_age_s = max(0.0, time.time() - lock_path.stat().st_mtime)
+            if lock_age_s > ENV_LOCK_STALE_S:
+                lock_path.unlink(missing_ok=True)
+                continue
+        if (time.monotonic() - started_at) >= ENV_LOCK_TIMEOUT_S:
+            raise SkillServerError(
+                f"Timed out waiting for skill environment lock: {lock_path.name}"
+            )
+        time.sleep(ENV_LOCK_POLL_INTERVAL_S)
+
+
+def _release_skill_env_lock(lock_path: Path, handle: int | None) -> None:
+    if handle is not None:
+        try:
+            os.close(handle)
+        except OSError:
+            pass
+    lock_path.unlink(missing_ok=True)
+
+
+def _build_pip_process_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PIP_CACHE_DIR"] = str(PIP_CACHE_ROOT)
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    return env
+
+
+def _ensure_skill_env_ready(
+    env_spec: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(env_spec, dict):
+        return None
+    resolved = dict(env_spec)
+    env_dir = Path(str(resolved["env_path"])).resolve()
+    python_path = Path(str(resolved["python_path"])).resolve()
+    resolved["ready"] = _skill_env_is_ready(resolved)
+    if resolved["ready"]:
+        resolved["materialized"] = True
+        resolved["reused"] = True
+        return resolved
+
+    dependency_path = Path(str(resolved["dependency_path"])).resolve()
+    lock_path = _skill_env_lock_path(str(resolved["env_hash"]))
+    temp_env_dir = (
+        ENVS_ROOT / f"{str(resolved['env_name']).strip()}.tmp-{uuid.uuid4().hex}"
+    ).resolve()
+    lock_handle: int | None = None
+    try:
+        lock_handle = _wait_for_skill_env_lock(lock_path)
+        resolved["ready"] = _skill_env_is_ready(resolved)
+        if resolved["ready"]:
+            resolved["materialized"] = True
+            resolved["reused"] = True
+            return resolved
+
+        temp_env_dir.parent.mkdir(parents=True, exist_ok=True)
+        WHEELHOUSE_ROOT.mkdir(parents=True, exist_ok=True)
+        PIP_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        create_result = subprocess.run(
+            [sys.executable, "-m", "venv", str(temp_env_dir)],
+            env=_build_pip_process_env(),
+            capture_output=True,
+            text=True,
+            timeout=ENV_BUILD_TIMEOUT_S,
+            check=False,
+        )
+        if create_result.returncode != 0:
+            raise SkillServerError(
+                "Failed to create isolated skill environment: "
+                + (create_result.stderr.strip() or create_result.stdout.strip() or "venv failed")
+            )
+
+        install_result = subprocess.run(
+            [
+                str(_venv_python_path(temp_env_dir)),
+                "-m",
+                "pip",
+                "install",
+                "--no-index",
+                "--find-links",
+                str(WHEELHOUSE_ROOT),
+                "-r",
+                str(dependency_path),
+            ],
+            env=_build_pip_process_env(),
+            capture_output=True,
+            text=True,
+            timeout=ENV_BUILD_TIMEOUT_S,
+            check=False,
+        )
+        if install_result.returncode != 0:
+            raise SkillServerError(
+                "Failed to install isolated skill dependencies from wheelhouse. "
+                f"dependency_file={resolved['dependency_file']} "
+                f"wheelhouse_root={WHEELHOUSE_ROOT}. "
+                + (
+                    install_result.stderr.strip()
+                    or install_result.stdout.strip()
+                    or "pip install failed"
+                )
+            )
+
+        metadata = {
+            "format_version": ENV_HASH_FORMAT_VERSION,
+            "env_hash": str(resolved["env_hash"]),
+            "env_name": str(resolved["env_name"]),
+            "dependency_file": str(resolved["dependency_file"]),
+            "dependency_hash": str(resolved["dependency_hash"]),
+            "created_at": _utc_now(),
+            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+            "platform": platform.system().lower(),
+            "machine": platform.machine().lower(),
+        }
+        _write_json_atomic(_skill_env_metadata_path(temp_env_dir), metadata)
+        if env_dir.exists():
+            shutil.rmtree(env_dir, ignore_errors=True)
+        temp_env_dir.replace(env_dir)
+        resolved["ready"] = True
+        resolved["materialized"] = True
+        resolved["reused"] = False
+        return resolved
+    finally:
+        shutil.rmtree(temp_env_dir, ignore_errors=True)
+        _release_skill_env_lock(lock_path, lock_handle)
+
+
+def _prefetch_skill_wheels_for_skill(loaded_skill: LoadedSkill) -> dict[str, Any]:
+    env_spec = _build_skill_env_spec(loaded_skill)
+    if env_spec is None:
+        return {
+            "skill_name": loaded_skill.skill.name,
+            "dependency_file": None,
+            "downloaded": False,
+            "skipped": True,
+            "reason": "no_dependency_file",
+        }
+    WHEELHOUSE_ROOT.mkdir(parents=True, exist_ok=True)
+    PIP_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    dependency_path = Path(str(env_spec["dependency_path"])).resolve()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "download",
+            "--only-binary=:all:",
+            "--dest",
+            str(WHEELHOUSE_ROOT),
+            "-r",
+            str(dependency_path),
+        ],
+        env=_build_pip_process_env(),
+        capture_output=True,
+        text=True,
+        timeout=ENV_BUILD_TIMEOUT_S,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SkillServerError(
+            f"Failed to prefetch wheels for skill '{loaded_skill.skill.name}': "
+            + (result.stderr.strip() or result.stdout.strip() or "pip download failed")
+        )
+    return {
+        "skill_name": loaded_skill.skill.name,
+        "dependency_file": str(env_spec["dependency_file"]),
+        "downloaded": True,
+        "wheelhouse_root": str(WHEELHOUSE_ROOT),
+        "pip_cache_dir": str(PIP_CACHE_ROOT),
+        "env_hash": str(env_spec["env_hash"]),
+    }
+
+
 def _powershell_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -1105,7 +1530,7 @@ def _build_script_shell_command(
     suffix = script_path.suffix.lower()
     argv: list[str]
     if suffix == ".py":
-        argv = [sys.executable, str(script_path)]
+        argv = ["python", str(script_path)]
     elif suffix in {".sh", ".bash"}:
         shell_bin = "sh.exe" if os.name == "nt" else "/bin/sh"
         argv = [shell_bin, str(script_path)]
@@ -1131,7 +1556,7 @@ def _build_workspace_script_shell_command(
     suffix = script_path.suffix.lower()
     argv: list[str]
     if suffix == ".py":
-        argv = [sys.executable, str(script_path)]
+        argv = ["python", str(script_path)]
     elif suffix in {".sh", ".bash"}:
         shell_bin = "sh.exe" if os.name == "nt" else "/bin/sh"
         argv = [shell_bin, str(script_path)]
@@ -1179,14 +1604,39 @@ def _build_run_env(
     constraints: dict[str, Any],
     runtime_target: SkillRuntimeTarget,
     request_file: Path,
-) -> dict[str, str]:
+    loaded_skill: LoadedSkill | None = None,
+    command_plan: SkillCommandPlan | None = None,
+    materialize_skill_env: bool = False,
+) -> tuple[dict[str, str], dict[str, Any] | None]:
     env = os.environ.copy()
-    python_bin_dir = str(Path(sys.executable).resolve().parent)
     bootstrap_paths = _bootstrap_workspace_paths(workspace_dir)
     for path in bootstrap_paths.values():
         path.mkdir(parents=True, exist_ok=True)
+    skill_env_spec = (
+        _build_skill_env_spec(loaded_skill) if isinstance(loaded_skill, LoadedSkill) else None
+    )
+    use_skill_env = bool(
+        skill_env_spec
+        and isinstance(command_plan, SkillCommandPlan)
+        and _command_plan_prefers_skill_env(command_plan, loaded_skill)
+    )
+    if skill_env_spec is not None:
+        skill_env_spec["requires_materialization"] = use_skill_env
+        skill_env_spec["ready"] = _skill_env_is_ready(skill_env_spec)
+        skill_env_spec["materialized"] = bool(skill_env_spec["ready"])
+        skill_env_spec["reused"] = bool(skill_env_spec["ready"])
+        if use_skill_env and materialize_skill_env:
+            skill_env_spec = _ensure_skill_env_ready(skill_env_spec)
+
+    python_bin_dir = str(Path(sys.executable).resolve().parent)
+    active_python_bin_dir = (
+        str(skill_env_spec["bin_dir"])
+        if skill_env_spec is not None and bool(skill_env_spec.get("ready"))
+        else python_bin_dir
+    )
     existing_path = env.get("PATH", "")
     path_entries = [
+        active_python_bin_dir,
         str(bootstrap_paths["bin"]),
         str(bootstrap_paths["scripts"]),
         python_bin_dir,
@@ -1203,6 +1653,15 @@ def _build_run_env(
     env["PYTHONPATH"] = os.pathsep.join(
         entry for entry in pythonpath_entries if isinstance(entry, str) and entry
     )
+    env["PIP_CACHE_DIR"] = str(PIP_CACHE_ROOT)
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    env["PIP_FIND_LINKS"] = str(WHEELHOUSE_ROOT)
+    if skill_env_spec is not None and bool(skill_env_spec.get("ready")):
+        env["VIRTUAL_ENV"] = str(skill_env_spec["env_path"])
+        env["SKILL_VENV_BIN"] = str(skill_env_spec["bin_dir"])
+        env["SKILL_PYTHON_BIN"] = str(skill_env_spec["python_path"])
+    else:
+        env["SKILL_PYTHON_BIN"] = str(Path(sys.executable).resolve())
     env.update(
         {
             "PYTHONUNBUFFERED": "1",
@@ -1222,7 +1681,12 @@ def _build_run_env(
             "HOME": str(workspace_dir),
         }
     )
-    return env
+    if skill_env_spec is not None:
+        env["SKILL_ENVIRONMENT_JSON"] = json.dumps(
+            _skill_env_runtime_payload(skill_env_spec),
+            ensure_ascii=False,
+        )
+    return env, skill_env_spec
 
 
 def _write_skill_request(
@@ -2163,16 +2627,32 @@ def _build_command(script_path: Path, args: list[str]) -> list[str]:
     )
 
 
-def _build_script_env(skill_dir: Path, workspace_dir: Path) -> dict[str, str]:
-    env = os.environ.copy()
-    env.update(
-        {
-            "PYTHONUNBUFFERED": "1",
-            "SKILL_NAME": skill_dir.name,
-            "SKILL_ROOT": str(skill_dir),
-            "SKILL_WORKSPACE": str(workspace_dir),
-            "HOME": str(workspace_dir),
-        }
+def _build_script_env(
+    skill_dir: Path,
+    workspace_dir: Path,
+    *,
+    relative_script: str,
+) -> dict[str, str]:
+    loaded_skill = _build_loaded_skill_from_dir(skill_dir)
+    dummy_plan = SkillCommandPlan(
+        skill_name=loaded_skill.skill.name,
+        goal="legacy execute_skill_script",
+        user_query="legacy execute_skill_script",
+        runtime_target=DEFAULT_RUNTIME_TARGET,
+        entrypoint=relative_script,
+        mode="inferred",
+    )
+    env, _skill_env_spec = _build_run_env(
+        skill_dir=skill_dir,
+        workspace_dir=workspace_dir,
+        goal="legacy execute_skill_script",
+        user_query="legacy execute_skill_script",
+        constraints={},
+        runtime_target=DEFAULT_RUNTIME_TARGET,
+        request_file=workspace_dir / "skill_request.json",
+        loaded_skill=loaded_skill,
+        command_plan=dummy_plan,
+        materialize_skill_env=True,
     )
     return env
 
@@ -2244,6 +2724,16 @@ def _durable_runtime_metadata(**extra: Any) -> dict[str, Any]:
     }
     runtime.update(extra)
     return runtime
+
+
+def _runtime_metadata_with_skill_env(
+    *,
+    runtime: dict[str, Any] | None = None,
+    skill_env_spec: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = dict(runtime or {})
+    payload["skill_environment"] = _skill_env_runtime_payload(skill_env_spec)
+    return payload
 
 
 def _mark_run_cancel_requested(run_id: str) -> None:
@@ -2734,6 +3224,7 @@ async def _complete_shell_run(
     preflight: dict[str, Any],
     shell_command: str,
     env: dict[str, str],
+    skill_env_spec: dict[str, Any] | None,
     timeout_s: int,
     cleanup_workspace: bool,
     worker_started_at: str | None = None,
@@ -2764,12 +3255,47 @@ async def _complete_shell_run(
         current_command = shell_command
         current_generated_files = list(generated_files)
         current_bootstrap_pending = bool(current_plan.bootstrap_commands)
+        current_env = dict(env)
+        current_skill_env_spec = (
+            dict(skill_env_spec) if isinstance(skill_env_spec, dict) else None
+        )
 
         while True:
             final_plan = current_plan
             final_preflight = current_preflight
             final_command = current_command
             generated_files = list(current_generated_files)
+
+            try:
+                current_env, current_skill_env_spec = _build_run_env(
+                    skill_dir=loaded_skill.skill.path.resolve(),
+                    workspace_dir=workspace_dir,
+                    goal=request.goal,
+                    user_query=request.user_query,
+                    constraints=request.constraints,
+                    runtime_target=request.runtime_target,
+                    request_file=request_file,
+                    loaded_skill=loaded_skill,
+                    command_plan=current_plan,
+                    materialize_skill_env=not is_dry_run(request.constraints),
+                )
+            except SkillServerError as exc:
+                if current_skill_env_spec is None and isinstance(skill_env_spec, dict):
+                    current_skill_env_spec = dict(skill_env_spec)
+                if isinstance(current_skill_env_spec, dict):
+                    current_skill_env_spec["error"] = str(exc)
+                current_preflight = {
+                    **dict(current_preflight),
+                    "status": "manual_required",
+                    "ok": False,
+                    "failure_reason": "skill_env_unavailable",
+                }
+                final_preflight = current_preflight
+                final_execution = _failed_execution_payload(
+                    workspace_dir=workspace_dir,
+                    stderr=str(exc),
+                )
+                break
 
             if current_plan.bootstrap_commands and current_bootstrap_pending:
                 if bootstrap_attempt_count >= MAX_BOOTSTRAP_ATTEMPTS:
@@ -2788,7 +3314,7 @@ async def _complete_shell_run(
                     bootstrap_result = await _execute_bootstrap_commands(
                         commands=current_plan.bootstrap_commands,
                         workspace_dir=workspace_dir,
-                        env=env,
+                        env=current_env,
                         timeout_s=timeout_s,
                     )
                     bootstrap_attempt_count += 1
@@ -2807,7 +3333,7 @@ async def _complete_shell_run(
                         current_preflight, current_generated_files = _run_preflight(
                             workspace_dir=workspace_dir,
                             command_plan=current_plan,
-                            env=env,
+                            env=current_env,
                         )
                         current_command = _materialize_shell_command(
                             loaded_skill=loaded_skill,
@@ -2881,8 +3407,11 @@ async def _complete_shell_run(
                     failure_reason=failure_reason,
                     artifacts=_collect_workspace_artifacts(workspace_dir),
                     logs_preview=final_execution["logs_preview"],
-                    runtime=_durable_runtime_metadata(
-                        free_shell_repair_limit=MAX_REPAIR_ATTEMPTS,
+                    runtime=_runtime_metadata_with_skill_env(
+                        runtime=_durable_runtime_metadata(
+                            free_shell_repair_limit=MAX_REPAIR_ATTEMPTS,
+                        ),
+                        skill_env_spec=current_skill_env_spec,
                     ),
                     preflight=final_preflight,
                     repair_attempted=True,
@@ -2953,7 +3482,7 @@ async def _complete_shell_run(
                 current_preflight, current_generated_files = _run_preflight(
                     workspace_dir=workspace_dir,
                     command_plan=current_plan,
-                    env=env,
+                    env=current_env,
                 )
                 current_command = _materialize_shell_command(
                     loaded_skill=loaded_skill,
@@ -2984,7 +3513,7 @@ async def _complete_shell_run(
                 run_id=run_id,
                 shell_command=current_command,
                 workspace_dir=workspace_dir,
-                env=env,
+                env=current_env,
                 timeout_s=timeout_s,
             )
             final_execution = execution
@@ -3020,8 +3549,11 @@ async def _complete_shell_run(
                 failure_reason=_failure_reason_from_execution(execution),
                 artifacts=execution["artifacts"],
                 logs_preview=execution["logs_preview"],
-                runtime=_durable_runtime_metadata(
-                    free_shell_repair_limit=MAX_REPAIR_ATTEMPTS,
+                runtime=_runtime_metadata_with_skill_env(
+                    runtime=_durable_runtime_metadata(
+                        free_shell_repair_limit=MAX_REPAIR_ATTEMPTS,
+                    ),
+                    skill_env_spec=current_skill_env_spec,
                 ),
                 preflight=current_preflight,
                 repair_attempted=True,
@@ -3095,7 +3627,7 @@ async def _complete_shell_run(
             current_preflight, current_generated_files = _run_preflight(
                 workspace_dir=workspace_dir,
                 command_plan=current_plan,
-                env=env,
+                env=current_env,
             )
             current_command = _materialize_shell_command(
                 loaded_skill=loaded_skill,
@@ -3180,21 +3712,24 @@ async def _complete_shell_run(
             failure_reason=final_failure_reason,
             artifacts=final_execution["artifacts"],
             logs_preview=final_execution["logs_preview"],
-            runtime=_durable_runtime_metadata(
-                free_shell_repair_limit=MAX_REPAIR_ATTEMPTS,
-                free_shell_repair_attempts=repair_attempt_count,
-                free_shell_bootstrap_limit=MAX_BOOTSTRAP_ATTEMPTS,
-                free_shell_bootstrap_attempts=bootstrap_attempt_count,
-                enqueued_at=started_at,
-                worker_started_at=worker_started_at,
-                queue_latency_s=_utc_duration_seconds(started_at, worker_started_at),
-                bootstrap_duration_s=sum(
-                    float(item.get("duration_s", 0.0) or 0.0)
-                    for item in bootstrap_history
-                    if isinstance(item, dict)
+            runtime=_runtime_metadata_with_skill_env(
+                runtime=_durable_runtime_metadata(
+                    free_shell_repair_limit=MAX_REPAIR_ATTEMPTS,
+                    free_shell_repair_attempts=repair_attempt_count,
+                    free_shell_bootstrap_limit=MAX_BOOTSTRAP_ATTEMPTS,
+                    free_shell_bootstrap_attempts=bootstrap_attempt_count,
+                    enqueued_at=started_at,
+                    worker_started_at=worker_started_at,
+                    queue_latency_s=_utc_duration_seconds(started_at, worker_started_at),
+                    bootstrap_duration_s=sum(
+                        float(item.get("duration_s", 0.0) or 0.0)
+                        for item in bootstrap_history
+                        if isinstance(item, dict)
+                    ),
+                    execution_duration_s=final_execution.get("duration_s"),
+                    total_duration_s=_utc_duration_seconds(started_at, finished_at),
                 ),
-                execution_duration_s=final_execution.get("duration_s"),
-                total_duration_s=_utc_duration_seconds(started_at, finished_at),
+                skill_env_spec=current_skill_env_spec,
             ),
             preflight=final_preflight,
             repair_attempted=repair_attempted,
@@ -3256,7 +3791,10 @@ async def _complete_shell_run(
             finished_at=_utc_now(),
             failure_reason="runtime_internal_error",
             artifacts=_collect_workspace_artifacts(workspace_dir),
-            runtime=_durable_runtime_metadata(error=str(exc)),
+            runtime=_runtime_metadata_with_skill_env(
+                runtime=_durable_runtime_metadata(error=str(exc)),
+                skill_env_spec=current_skill_env_spec,
+            ),
             preflight=preflight,
             cancel_requested=_is_cancel_requested(run_id),
         )
@@ -3361,8 +3899,9 @@ async def _run_shell_task(
     cleanup_workspace: bool,
     wait_for_completion: bool,
 ) -> dict[str, Any]:
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     workspace_dir = Path(
-        tempfile.mkdtemp(prefix=f"{skill_payload['name']}-", dir=str(WORKSPACE_ROOT))
+        tempfile.mkdtemp(prefix=f"{skill_payload['name']}-", dir=str(RUNS_ROOT))
     ).resolve()
     run_id = f"skill-run-{uuid.uuid4().hex}"
     started_at = _utc_now()
@@ -3386,7 +3925,7 @@ async def _run_shell_task(
             user_query=request.user_query,
             constraints=request.constraints,
         )
-        env = _build_run_env(
+        env, skill_env_spec = _build_run_env(
             skill_dir=Path(skill_payload["path"]).resolve(),
             workspace_dir=workspace_dir,
             goal=request.goal,
@@ -3394,6 +3933,9 @@ async def _run_shell_task(
             constraints=request.constraints,
             runtime_target=effective_runtime_target,
             request_file=request_file,
+            loaded_skill=loaded_skill,
+            command_plan=command_plan,
+            materialize_skill_env=False,
         )
         preflight, generated_files = _run_preflight(
             workspace_dir=workspace_dir,
@@ -3440,7 +3982,10 @@ async def _run_shell_task(
                 started_at=started_at,
                 finished_at=_utc_now(),
                 failure_reason=preflight.get("failure_reason"),
-                runtime={"executor": "shell"},
+                runtime=_runtime_metadata_with_skill_env(
+                    runtime={"executor": "shell"},
+                    skill_env_spec=skill_env_spec,
+                ),
                 preflight=preflight,
             )
             response = _build_run_record_payload(
@@ -3497,6 +4042,12 @@ async def _run_shell_task(
             payload=skill_payload,
             loaded_skill=loaded_skill,
         )
+        running_payload["runtime"] = _runtime_metadata_with_skill_env(
+            runtime=running_payload.get("runtime")
+            if isinstance(running_payload.get("runtime"), dict)
+            else {},
+            skill_env_spec=skill_env_spec,
+        )
         running_payload["request_file"] = str(request_file)
         running_payload["generated_files"] = generated_files
         running_payload["mirrored_skill_files"] = mirrored_skill_files
@@ -3539,9 +4090,12 @@ async def _run_shell_task(
                 started_at=started_at,
                 finished_at=_utc_now(),
                 failure_reason="worker_start_failed",
-                runtime=_durable_runtime_metadata(
-                    queue_state="failed",
-                    error=str(exc),
+                runtime=_runtime_metadata_with_skill_env(
+                    runtime=_durable_runtime_metadata(
+                        queue_state="failed",
+                        error=str(exc),
+                    ),
+                    skill_env_spec=skill_env_spec,
                 ),
                 preflight=preflight,
             )
@@ -3715,7 +4269,7 @@ async def _run_durable_worker(run_id: str) -> int:
             shutil.rmtree(workspace_dir, ignore_errors=True)
         return 0
 
-    env = _build_run_env(
+    env, skill_env_spec = _build_run_env(
         skill_dir=Path(payload["path"]).resolve(),
         workspace_dir=workspace_dir,
         goal=request.goal,
@@ -3723,6 +4277,9 @@ async def _run_durable_worker(run_id: str) -> int:
         constraints=request.constraints,
         runtime_target=runtime_target,
         request_file=request_file,
+        loaded_skill=loaded_skill,
+        command_plan=command_plan,
+        materialize_skill_env=False,
     )
     await _complete_shell_run(
         skill_payload=payload,
@@ -3737,6 +4294,7 @@ async def _run_durable_worker(run_id: str) -> int:
         preflight=preflight,
         shell_command=shell_command,
         env=env,
+        skill_env_spec=skill_env_spec,
         timeout_s=timeout_s,
         cleanup_workspace=cleanup_workspace,
         worker_started_at=worker_started_at,
@@ -4155,8 +4713,10 @@ async def execute_skill_script(
     """Legacy compatibility wrapper for explicit script execution."""
     skill_dir = _resolve_skill_dir(skill_name)
     script_path = _resolve_script_path(skill_dir, script_name)
+    relative_script = str(script_path.relative_to(skill_dir)).replace("\\", "/")
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
     workspace_dir = Path(
-        tempfile.mkdtemp(prefix=f"{skill_dir.name}-", dir=str(WORKSPACE_ROOT))
+        tempfile.mkdtemp(prefix=f"{skill_dir.name}-", dir=str(RUNS_ROOT))
     ).resolve()
     command = _build_command(script_path, [str(item) for item in (args or [])])
 
@@ -4164,7 +4724,11 @@ async def execute_skill_script(
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=str(workspace_dir),
-            env=_build_script_env(skill_dir, workspace_dir),
+            env=_build_script_env(
+                skill_dir,
+                workspace_dir,
+                relative_script=relative_script,
+            ),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -4268,14 +4832,50 @@ def skill_run_artifacts_resource(run_id: str) -> str:
     return json.dumps(get_run_artifacts(run_id), ensure_ascii=False, indent=2)
 
 
+def _prefetch_skill_wheels_cli(*, skill_name: str | None = None) -> dict[str, Any]:
+    if skill_name and skill_name.strip():
+        targets = [_build_loaded_skill(skill_name.strip())]
+    else:
+        targets = [_build_loaded_skill_from_dir(path) for path in _skill_dirs()]
+    results = [_prefetch_skill_wheels_for_skill(skill) for skill in targets]
+    return {
+        "summary": (
+            f"Prefetched wheels for {len(results)} skill(s)."
+            if results
+            else "No skills found."
+        ),
+        "wheelhouse_root": str(WHEELHOUSE_ROOT),
+        "pip_cache_dir": str(PIP_CACHE_ROOT),
+        "results": results,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--worker-run-id", default="")
     parser.add_argument("--queue-worker", action="store_true")
+    parser.add_argument("--prefetch-skill-wheels", default="")
+    parser.add_argument("--prefetch-all-skill-wheels", action="store_true")
     args, _unknown = parser.parse_known_args()
 
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+    STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    ENVS_ROOT.mkdir(parents=True, exist_ok=True)
+    WHEELHOUSE_ROOT.mkdir(parents=True, exist_ok=True)
+    PIP_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    LOCKS_ROOT.mkdir(parents=True, exist_ok=True)
     _ensure_run_store_initialized()
+    if bool(args.prefetch_all_skill_wheels) or str(args.prefetch_skill_wheels).strip():
+        payload = _prefetch_skill_wheels_cli(
+            skill_name=(
+                None
+                if bool(args.prefetch_all_skill_wheels)
+                else str(args.prefetch_skill_wheels).strip()
+            )
+        )
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
     if bool(args.queue_worker):
         raise SystemExit(asyncio.run(_run_queue_worker_loop()))
     if str(args.worker_run_id).strip():

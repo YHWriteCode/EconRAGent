@@ -1,0 +1,138 @@
+[CmdletBinding()]
+param(
+    [string]$RuntimeRoot = "",
+    [string]$ServerName = "skill-runtime",
+    [string]$Image = "lightrag-mcp-skill-service:latest",
+    [string]$SourceRoot = "",
+    [string]$ConfigOutputPath = "",
+    [switch]$EmitJsonOnly
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+function Resolve-RepoRoot {
+    return (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+}
+
+function Ensure-Directory {
+    param([string]$Path)
+
+    $item = New-Item -ItemType Directory -Force -Path $Path
+    return $item.FullName
+}
+
+function Convert-ToDockerMountPath {
+    param([string]$Path)
+
+    return ((Resolve-Path -LiteralPath $Path).Path -replace "\\", "/")
+}
+
+$repoRoot = Resolve-RepoRoot
+if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
+    $RuntimeRoot = Join-Path $repoRoot ".skill-runtime"
+}
+
+$resolvedSourceRoot = ""
+if (-not [string]::IsNullOrWhiteSpace($SourceRoot)) {
+    $resolvedSourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
+}
+
+$runtimeRootPath = Ensure-Directory -Path $RuntimeRoot
+$runtimeLayout = [ordered]@{
+    runs = Ensure-Directory -Path (Join-Path $runtimeRootPath "runs")
+    state = Ensure-Directory -Path (Join-Path $runtimeRootPath "state")
+    envs = Ensure-Directory -Path (Join-Path $runtimeRootPath "envs")
+    wheelhouse = Ensure-Directory -Path (Join-Path $runtimeRootPath "wheelhouse")
+    "pip-cache" = Ensure-Directory -Path (Join-Path $runtimeRootPath "pip-cache")
+    locks = Ensure-Directory -Path (Join-Path $runtimeRootPath "locks")
+}
+
+$skillsDir = "/app/skills"
+$pythonPathEnv = ""
+$serverEntrypoint = "/app/server.py"
+if (-not [string]::IsNullOrWhiteSpace($resolvedSourceRoot)) {
+    $skillsDir = "/src/skills"
+    $pythonPathEnv = "/src"
+    $serverEntrypoint = "/src/mcp-server/server.py"
+}
+
+$dockerArgs = @(
+    "run",
+    "--rm",
+    "-i",
+    "-e", "MCP_SKILLS_DIR=$skillsDir",
+    "-e", "MCP_WORKSPACE_DIR=/workspace",
+    "-e", "MCP_RUNS_DIR=/workspace/runs",
+    "-e", "MCP_STATE_DIR=/workspace/state",
+    "-e", "MCP_ENVS_DIR=/workspace/envs",
+    "-e", "MCP_WHEELHOUSE_DIR=/workspace/wheelhouse",
+    "-e", "MCP_PIP_CACHE_DIR=/workspace/pip-cache",
+    "-e", "MCP_LOCKS_DIR=/workspace/locks"
+)
+if (-not [string]::IsNullOrWhiteSpace($pythonPathEnv)) {
+    $dockerArgs += @("-e", "PYTHONPATH=$pythonPathEnv")
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedSourceRoot)) {
+    $dockerArgs += @(
+        "-v",
+        "$(Convert-ToDockerMountPath -Path $resolvedSourceRoot):/src:ro"
+    )
+}
+$dockerArgs += @(
+    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.runs):/workspace/runs",
+    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.state):/workspace/state",
+    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.envs):/workspace/envs",
+    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.wheelhouse):/workspace/wheelhouse",
+    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.'pip-cache'):/workspace/pip-cache",
+    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.locks):/workspace/locks",
+    $Image,
+    "python",
+    $serverEntrypoint
+)
+
+$dockerConfig = @(
+    [ordered]@{
+        name = $ServerName
+        command = "docker"
+        stdio_framing = "json_lines"
+        args = $dockerArgs
+        discover_tools = $false
+    }
+)
+
+$json = ConvertTo-Json -InputObject $dockerConfig -Depth 8 -Compress
+if (-not [string]::IsNullOrWhiteSpace($ConfigOutputPath)) {
+    $outputDir = Split-Path -Parent $ConfigOutputPath
+    if (-not [string]::IsNullOrWhiteSpace($outputDir)) {
+        New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+    }
+    Set-Content -LiteralPath $ConfigOutputPath -Value $json -Encoding utf8
+}
+
+if ($EmitJsonOnly) {
+    Write-Output $json
+    return
+}
+
+Write-Host "Initialized skill runtime host directories:" -ForegroundColor Green
+Write-Host "  root       $runtimeRootPath"
+foreach ($entry in $runtimeLayout.GetEnumerator()) {
+    Write-Host ("  {0,-10} {1}" -f $entry.Key, $entry.Value)
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedSourceRoot)) {
+    Write-Host ("  {0,-10} {1}" -f "source", $resolvedSourceRoot)
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ConfigOutputPath)) {
+    Write-Host ""
+    Write-Host "Saved KG_AGENT_MCP_SERVERS_JSON payload to:" -ForegroundColor Green
+    Write-Host "  $ConfigOutputPath"
+}
+
+Write-Host ""
+Write-Host "KG_AGENT_MCP_SERVERS_JSON:" -ForegroundColor Green
+Write-Output $json
+Write-Host ""
+Write-Host "PowerShell example:" -ForegroundColor Green
+Write-Host "  `$env:KG_AGENT_MCP_SERVERS_JSON = '$json'"

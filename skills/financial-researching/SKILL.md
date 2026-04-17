@@ -33,6 +33,7 @@ references:
   - references/linearmodels-panel-regression.md
   - references/backtrader-workflow.md
   - references/backtrader-analyzers-and-metrics.md
+runtime_requirements: requirements.lock
 ---
 
 # Financial Researching

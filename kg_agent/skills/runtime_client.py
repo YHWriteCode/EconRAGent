@@ -259,12 +259,16 @@ class MCPBasedSkillRuntimeClient:
         server_config = self.adapter.get_server_config(self.config.server)
         if server_config is None:
             return None
-        host_workspace_root = self._resolve_host_workspace_root(server_config, runtime_target)
-        if host_workspace_root is None:
+        resolved_mount = self._resolve_host_workspace_mount(
+            server_config,
+            runtime_workspace=runtime_workspace,
+            runtime_target=runtime_target,
+        )
+        if resolved_mount is None:
             return None
-        workspace_root = str(runtime_target.get("workspace_root", "")).strip() or "/workspace"
         runtime_workspace_path = PurePosixPath(runtime_workspace)
-        workspace_root_path = PurePosixPath(workspace_root)
+        host_workspace_root, container_workspace_root = resolved_mount
+        workspace_root_path = PurePosixPath(container_workspace_root)
         try:
             relative_path = runtime_workspace_path.relative_to(workspace_root_path)
         except ValueError:
@@ -272,43 +276,61 @@ class MCPBasedSkillRuntimeClient:
         return (host_workspace_root / Path(*relative_path.parts)).resolve()
 
     @staticmethod
-    def _resolve_host_workspace_root(
+    def _resolve_host_workspace_mount(
         server_config: MCPServerConfig,
+        *,
+        runtime_workspace: str,
         runtime_target: dict[str, Any],
-    ) -> Path | None:
+    ) -> tuple[Path, str] | None:
         command_name = Path(server_config.command).name.lower()
         if command_name not in {"docker", "docker.exe"}:
             return None
         workspace_root = str(runtime_target.get("workspace_root", "")).strip() or "/workspace"
+        runtime_workspace_path = PurePosixPath(runtime_workspace)
+        mounts: list[tuple[Path, str]] = []
         args = list(server_config.args)
         for index, arg in enumerate(args):
             if arg in {"-v", "--volume"} and index + 1 < len(args):
                 resolved = MCPBasedSkillRuntimeClient._parse_docker_bind_mount(
                     args[index + 1],
-                    workspace_root=workspace_root,
                 )
                 if resolved is not None:
-                    return resolved
+                    mounts.append(resolved)
             if arg == "--mount" and index + 1 < len(args):
                 resolved = MCPBasedSkillRuntimeClient._parse_docker_mount_flag(
                     args[index + 1],
-                    workspace_root=workspace_root,
                 )
                 if resolved is not None:
-                    return resolved
+                    mounts.append(resolved)
+        if not mounts:
+            return None
+
+        best_match: tuple[Path, str] | None = None
+        best_depth = -1
+        for host_path, container_path in mounts:
+            container_root = PurePosixPath(container_path)
+            if runtime_workspace_path != container_root and container_root not in runtime_workspace_path.parents:
+                continue
+            depth = len(container_root.parts)
+            if depth > best_depth:
+                best_match = (host_path, container_path)
+                best_depth = depth
+        if best_match is not None:
+            return best_match
+
+        for host_path, container_path in mounts:
+            if str(container_path).strip() == workspace_root:
+                return host_path, container_path
         return None
 
     @staticmethod
     def _parse_docker_bind_mount(
         raw_value: str,
-        *,
-        workspace_root: str,
-    ) -> Path | None:
+    ) -> tuple[Path, str] | None:
         value = str(raw_value or "").strip()
         if not value:
             return None
         mode = None
-        container_path = None
         host_part = None
         parts = value.split(":")
         if len(parts) < 2:
@@ -322,19 +344,15 @@ class MCPBasedSkillRuntimeClient:
         host_part = ":".join(parts[:-1])
         if mode and not mode.strip():
             mode = None
-        if container_path.strip() != workspace_root:
-            return None
         host_path = Path(host_part)
         if not host_path.is_absolute():
             return None
-        return host_path.resolve()
+        return host_path.resolve(), container_path.strip()
 
     @staticmethod
     def _parse_docker_mount_flag(
         raw_value: str,
-        *,
-        workspace_root: str,
-    ) -> Path | None:
+    ) -> tuple[Path, str] | None:
         items: dict[str, str] = {}
         for chunk in str(raw_value or "").split(","):
             if "=" not in chunk:
@@ -346,14 +364,12 @@ class MCPBasedSkillRuntimeClient:
         source = items.get("source") or items.get("src")
         if mount_type and mount_type != "bind":
             return None
-        if str(target or "").strip() != workspace_root:
-            return None
         if not source:
             return None
         source_path = Path(source)
         if not source_path.is_absolute():
             return None
-        return source_path.resolve()
+        return source_path.resolve(), str(target or "").strip()
 
     @staticmethod
     def _collect_host_workspace_artifacts(workspace_dir: Path) -> list[dict[str, Any]]:
