@@ -23,6 +23,7 @@ from .config import (
     ENV_LOCK_STALE_S,
     ENV_LOCK_TIMEOUT_S,
     LOCKS_ROOT,
+    OUTPUT_ROOT,
     PIP_CACHE_ROOT,
     WHEELHOUSE_ROOT,
 )
@@ -271,8 +272,47 @@ def _build_pip_process_env() -> dict[str, str]:
     return env
 
 
+def _run_subprocess_checked(
+    argv: list[str],
+    *,
+    timeout_s: int,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv,
+        env=_build_pip_process_env(),
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+        check=False,
+    )
+
+
+def _try_seed_wheelhouse_from_dependency_file(dependency_path: Path) -> None:
+    try:
+        result = _run_subprocess_checked(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "download",
+                "--only-binary=:all:",
+                "--dest",
+                str(WHEELHOUSE_ROOT),
+                "-r",
+                str(dependency_path),
+            ],
+            timeout_s=ENV_BUILD_TIMEOUT_S,
+        )
+    except Exception:
+        return
+    if result.returncode != 0:
+        return
+
+
 def _ensure_skill_env_ready(
     env_spec: dict[str, Any] | None,
+    *,
+    allow_network: bool = False,
 ) -> dict[str, Any] | None:
     if not isinstance(env_spec, dict):
         return None
@@ -301,13 +341,9 @@ def _ensure_skill_env_ready(
         temp_env_dir.parent.mkdir(parents=True, exist_ok=True)
         WHEELHOUSE_ROOT.mkdir(parents=True, exist_ok=True)
         PIP_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-        create_result = subprocess.run(
+        create_result = _run_subprocess_checked(
             [sys.executable, "-m", "venv", str(temp_env_dir)],
-            env=_build_pip_process_env(),
-            capture_output=True,
-            text=True,
-            timeout=ENV_BUILD_TIMEOUT_S,
-            check=False,
+            timeout_s=ENV_BUILD_TIMEOUT_S,
         )
         if create_result.returncode != 0:
             raise SkillServerError(
@@ -315,7 +351,7 @@ def _ensure_skill_env_ready(
                 + (create_result.stderr.strip() or create_result.stdout.strip() or "venv failed")
             )
 
-        install_result = subprocess.run(
+        offline_install_result = _run_subprocess_checked(
             [
                 str(_venv_python_path(temp_env_dir)),
                 "-m",
@@ -327,22 +363,49 @@ def _ensure_skill_env_ready(
                 "-r",
                 str(dependency_path),
             ],
-            env=_build_pip_process_env(),
-            capture_output=True,
-            text=True,
-            timeout=ENV_BUILD_TIMEOUT_S,
-            check=False,
+            timeout_s=ENV_BUILD_TIMEOUT_S,
         )
+        install_result = offline_install_result
+        install_mode = "offline_wheelhouse"
+        if install_result.returncode != 0 and allow_network:
+            install_result = _run_subprocess_checked(
+                [
+                    str(_venv_python_path(temp_env_dir)),
+                    "-m",
+                    "pip",
+                    "install",
+                    "-r",
+                    str(dependency_path),
+                ],
+                timeout_s=ENV_BUILD_TIMEOUT_S,
+            )
+            install_mode = "online_index"
+            if install_result.returncode == 0:
+                _try_seed_wheelhouse_from_dependency_file(dependency_path)
         if install_result.returncode != 0:
+            error_details = (
+                install_result.stderr.strip()
+                or install_result.stdout.strip()
+                or "pip install failed"
+            )
+            if allow_network:
+                offline_details = (
+                    offline_install_result.stderr.strip()
+                    or offline_install_result.stdout.strip()
+                    or "offline wheelhouse install failed"
+                )
+                raise SkillServerError(
+                    "Failed to install isolated skill dependencies. "
+                    f"dependency_file={resolved['dependency_file']} "
+                    f"wheelhouse_root={WHEELHOUSE_ROOT}. "
+                    f"Offline wheelhouse install failed first: {offline_details}. "
+                    f"Online fallback ({install_mode}) also failed: {error_details}"
+                )
             raise SkillServerError(
                 "Failed to install isolated skill dependencies from wheelhouse. "
                 f"dependency_file={resolved['dependency_file']} "
                 f"wheelhouse_root={WHEELHOUSE_ROOT}. "
-                + (
-                    install_result.stderr.strip()
-                    or install_result.stdout.strip()
-                    or "pip install failed"
-                )
+                + error_details
             )
 
         metadata = {
@@ -492,6 +555,26 @@ def _rewrite_runtime_workspace_path_text(
         replacement_pairs.append(pair)
         seen_pairs.add(pair)
 
+    normalized_workspace_root = raw_workspace_root.rstrip("/\\")
+    if OUTPUT_ROOT is not None:
+        shared_output_dir = (OUTPUT_ROOT / workspace_dir.name).resolve()
+        shared_output_text = str(shared_output_dir)
+        shared_output_posix = shared_output_text.replace("\\", "/")
+        workspace_output_roots = [
+            f"{normalized_workspace_root}/output",
+            f"{normalized_workspace_root}\\output",
+        ]
+        for output_root in workspace_output_roots:
+            normalized_output_root = str(output_root or "").rstrip("/\\")
+            if not normalized_output_root:
+                continue
+            if "/" in output_root and "\\" not in output_root:
+                _add_replacement(normalized_output_root + "/", shared_output_posix + "/")
+                _add_replacement(normalized_output_root, shared_output_posix)
+            else:
+                _add_replacement(normalized_output_root + "\\", shared_output_text + "\\")
+                _add_replacement(normalized_output_root, shared_output_text)
+
     for candidate_root in [raw_workspace_root, raw_workspace_root.replace("\\", "/")]:
         normalized_root = str(candidate_root or "").rstrip("/\\")
         if not normalized_root:
@@ -621,7 +704,10 @@ def _build_run_env(
         skill_env_spec["materialized"] = bool(skill_env_spec["ready"])
         skill_env_spec["reused"] = bool(skill_env_spec["ready"])
         if use_skill_env and materialize_skill_env:
-            skill_env_spec = _ensure_skill_env_ready(skill_env_spec)
+            skill_env_spec = _ensure_skill_env_ready(
+                skill_env_spec,
+                allow_network=bool(runtime_target.network_allowed),
+            )
 
     python_bin_dir = str(Path(sys.executable).resolve().parent)
     active_python_bin_dir = (

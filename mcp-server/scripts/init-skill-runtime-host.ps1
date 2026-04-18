@@ -29,23 +29,18 @@ function Convert-ToDockerMountPath {
 }
 
 $repoRoot = Resolve-RepoRoot
-if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
-    $RuntimeRoot = Join-Path $repoRoot ".skill-runtime"
-}
-
 $resolvedSourceRoot = ""
 if (-not [string]::IsNullOrWhiteSpace($SourceRoot)) {
     $resolvedSourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 }
-
-$runtimeRootPath = Ensure-Directory -Path $RuntimeRoot
-$runtimeLayout = [ordered]@{
-    runs = Ensure-Directory -Path (Join-Path $runtimeRootPath "runs")
-    state = Ensure-Directory -Path (Join-Path $runtimeRootPath "state")
-    envs = Ensure-Directory -Path (Join-Path $runtimeRootPath "envs")
-    wheelhouse = Ensure-Directory -Path (Join-Path $runtimeRootPath "wheelhouse")
-    "pip-cache" = Ensure-Directory -Path (Join-Path $runtimeRootPath "pip-cache")
-    locks = Ensure-Directory -Path (Join-Path $runtimeRootPath "locks")
+$skillOutputDir = Ensure-Directory -Path (Join-Path $repoRoot "skill_output")
+$runtimeVolumes = [ordered]@{
+    runs = "mcp_skill_runs"
+    state = "mcp_skill_state"
+    envs = "mcp_skill_envs"
+    wheelhouse = "mcp_skill_wheelhouse"
+    "pip-cache" = "mcp_skill_pip_cache"
+    locks = "mcp_skill_locks"
 }
 
 $skillsDir = "/app/skills"
@@ -66,6 +61,7 @@ $dockerArgs = @(
     "-e", "MCP_RUNS_DIR=/workspace/runs",
     "-e", "MCP_STATE_DIR=/workspace/state",
     "-e", "MCP_ENVS_DIR=/workspace/envs",
+    "-e", "MCP_OUTPUT_DIR=/workspace/output",
     "-e", "MCP_WHEELHOUSE_DIR=/workspace/wheelhouse",
     "-e", "MCP_PIP_CACHE_DIR=/workspace/pip-cache",
     "-e", "MCP_LOCKS_DIR=/workspace/locks"
@@ -80,12 +76,13 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedSourceRoot)) {
     )
 }
 $dockerArgs += @(
-    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.runs):/workspace/runs",
-    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.state):/workspace/state",
-    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.envs):/workspace/envs",
-    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.wheelhouse):/workspace/wheelhouse",
-    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.'pip-cache'):/workspace/pip-cache",
-    "-v", "$(Convert-ToDockerMountPath -Path $runtimeLayout.locks):/workspace/locks",
+    "-v", "$(Convert-ToDockerMountPath -Path $skillOutputDir):/workspace/output",
+    "-v", "$($runtimeVolumes.runs):/workspace/runs",
+    "-v", "$($runtimeVolumes.state):/workspace/state",
+    "-v", "$($runtimeVolumes.envs):/workspace/envs",
+    "-v", "$($runtimeVolumes.wheelhouse):/workspace/wheelhouse",
+    "-v", "$($runtimeVolumes.'pip-cache'):/workspace/pip-cache",
+    "-v", "$($runtimeVolumes.locks):/workspace/locks",
     $Image,
     "python",
     $serverEntrypoint
@@ -115,9 +112,9 @@ if ($EmitJsonOnly) {
     return
 }
 
-Write-Host "Initialized skill runtime host directories:" -ForegroundColor Green
-Write-Host "  root       $runtimeRootPath"
-foreach ($entry in $runtimeLayout.GetEnumerator()) {
+Write-Host "Initialized skill runtime mounts:" -ForegroundColor Green
+Write-Host ("  {0,-10} {1}" -f "output", $skillOutputDir)
+foreach ($entry in $runtimeVolumes.GetEnumerator()) {
     Write-Host ("  {0,-10} {1}" -f $entry.Key, $entry.Value)
 }
 if (-not [string]::IsNullOrWhiteSpace($resolvedSourceRoot)) {

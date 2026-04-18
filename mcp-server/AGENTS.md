@@ -22,6 +22,7 @@ It is responsible for:
 - Exposing skill catalog and run-lifecycle tools over FastMCP
 - Materializing runtime workspaces for skill runs
 - Rewriting runtime-root absolute output paths into the active run workspace when a plan targets `/workspace`-style runtime roots
+- Routing shared `/workspace/output/...` paths into the configured shared output root when `MCP_OUTPUT_DIR` is enabled
 - Persisting run records in a SQLite-backed durable store
 - Running queue workers and durable worker processes
 - Serving logs, artifacts, and compatibility skill resources
@@ -107,7 +108,7 @@ mcp-server/
 - queue-worker process mode
 - single durable-worker mode for one claimed run
 
-Environment defaults point the runtime at `/app/skills` for read-only skill content and `/workspace` for mutable run workspaces.
+Environment defaults point the runtime at `/app/skills` for read-only skill content and `/workspace` for mutable run workspaces. Local compose development now typically keeps `runs/state/envs/wheelhouse/pip-cache/locks` in Docker named volumes while binding the repository's `skill_output/` directory to `/workspace/output`.
 
 Docker-backed callers may still see `/workspace/...` inside runtime-target metadata, but the host-facing client contract should prefer host-visible run workspaces when a bind mount can be resolved.
 
@@ -120,7 +121,7 @@ Docker-backed callers may still see `/workspace/...` inside runtime-target metad
 - Keep `server.py` thin. New implementation code should go into `mcp_server_runtime/` unless it is specifically about entrypoint compatibility.
 - Preserve the durable-run boundary: queue state, run records, logs, artifacts, and cancellation must remain recoverable from the SQLite store.
 - Keep workspace writes under `MCP_WORKSPACE_DIR`; skill source content under `MCP_SKILLS_DIR` should stay read-only.
-- Preserve runtime-root path rewriting for explicit commands and CLI-arg-based entrypoints so outputs requested under `/workspace/...` land inside the current run workspace on the host-visible filesystem.
+- Preserve runtime-root path rewriting for explicit commands and CLI-arg-based entrypoints. General `/workspace/...` outputs should stay run-scoped, but `/workspace/output/...` should follow the configured shared output root when that feature is enabled.
 - Keep shell execution bounded by explicit timeout, bootstrap, and repair limits. Do not turn this server into an unbounded autonomous shell agent.
 - Maintain compatibility wrappers such as `read_skill_docs` and `execute_skill_script` only as thin shims around the newer coarse-grained runtime APIs.
 - Preserve CLI compatibility for `--queue-worker`, `--worker-run-id`, `--prefetch-skill-wheels`, and `--prefetch-all-skill-wheels`.
@@ -139,6 +140,6 @@ Docker-backed callers may still see `/workspace/...` inside runtime-target metad
 - Queue workers are still local host processes. There is no cross-node worker pool or richer distributed lease manager.
 - `worker_lost` recovery stops at bounded requeue through `max_attempts`; there is no dead-letter queue or richer backoff strategy yet.
 - Live progress is exposed through polling (`get_run_status`, `get_run_logs`, `get_run_artifacts`), not SSE or streaming job control.
-- Artifact fallback and host-workspace mapping only work well when Docker uses a host-visible bind mount for `/workspace` or `/workspace/runs`; named volumes or remote workers are not recoverable from the host side.
+- Artifact fallback and host-workspace mapping only work well when Docker uses a host-visible bind mount for `/workspace` or `/workspace/runs`; named volumes or remote workers are not recoverable from the host side. A separate bind mount for `/workspace/output` is supported for shared user-visible outputs.
 - The supported deployment pattern is still stdio MCP over `docker run` or `docker compose run`, not a long-lived HTTP or SSE runtime service.
 - Legacy compatibility wrappers still exist for older callers, but they are no longer the primary runtime surface.

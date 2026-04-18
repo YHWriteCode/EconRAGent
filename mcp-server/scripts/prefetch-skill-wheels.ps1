@@ -21,10 +21,6 @@ function Convert-ToDockerMountPath {
 }
 
 $repoRoot = Resolve-RepoRoot
-if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
-    $RuntimeRoot = Join-Path $repoRoot ".skill-runtime"
-}
-
 $resolvedSourceRoot = ""
 if (-not [string]::IsNullOrWhiteSpace($SourceRoot)) {
     $resolvedSourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
@@ -41,11 +37,12 @@ if (-not (Test-Path -LiteralPath $initScript)) {
 
 & $initScript -RuntimeRoot $RuntimeRoot -Image $Image -SourceRoot $resolvedSourceRoot -EmitJsonOnly | Out-Null
 
-$runtimeRootResolved = (Resolve-Path -LiteralPath $RuntimeRoot).Path
-$stateDir = Join-Path $runtimeRootResolved "state"
-$wheelhouseDir = Join-Path $runtimeRootResolved "wheelhouse"
-$pipCacheDir = Join-Path $runtimeRootResolved "pip-cache"
-$locksDir = Join-Path $runtimeRootResolved "locks"
+$runtimeVolumes = [ordered]@{
+    state = "mcp_skill_state"
+    wheelhouse = "mcp_skill_wheelhouse"
+    "pip-cache" = "mcp_skill_pip_cache"
+    locks = "mcp_skill_locks"
+}
 $skillsDir = "/app/skills"
 $pythonPathEnv = ""
 $serverEntrypoint = "/app/server.py"
@@ -75,10 +72,10 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedSourceRoot)) {
     )
 }
 $dockerArgs += @(
-    "-v", "$(Convert-ToDockerMountPath -Path $stateDir):/workspace/state",
-    "-v", "$(Convert-ToDockerMountPath -Path $wheelhouseDir):/workspace/wheelhouse",
-    "-v", "$(Convert-ToDockerMountPath -Path $pipCacheDir):/workspace/pip-cache",
-    "-v", "$(Convert-ToDockerMountPath -Path $locksDir):/workspace/locks",
+    "-v", "$($runtimeVolumes.state):/workspace/state",
+    "-v", "$($runtimeVolumes.wheelhouse):/workspace/wheelhouse",
+    "-v", "$($runtimeVolumes.'pip-cache'):/workspace/pip-cache",
+    "-v", "$($runtimeVolumes.locks):/workspace/locks",
     $Image,
     "python",
     $serverEntrypoint
@@ -109,5 +106,5 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "Wheel prefetch completed." -ForegroundColor Green
-Write-Host "  wheelhouse: $wheelhouseDir"
-Write-Host "  pip-cache : $pipCacheDir"
+Write-Host "  wheelhouse volume: $($runtimeVolumes.wheelhouse)"
+Write-Host "  pip-cache volume : $($runtimeVolumes.'pip-cache')"

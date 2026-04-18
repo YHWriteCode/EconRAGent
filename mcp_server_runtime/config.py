@@ -23,6 +23,11 @@ STATE_ROOT = Path(
 ENVS_ROOT = Path(
     os.environ.get("MCP_ENVS_DIR", str(WORKSPACE_ROOT / "envs"))
 ).resolve()
+OUTPUT_ROOT = (
+    Path(os.environ["MCP_OUTPUT_DIR"]).resolve()
+    if os.environ.get("MCP_OUTPUT_DIR", "").strip()
+    else None
+)
 WHEELHOUSE_ROOT = Path(
     os.environ.get("MCP_WHEELHOUSE_DIR", str(WORKSPACE_ROOT / "wheelhouse"))
 ).resolve()

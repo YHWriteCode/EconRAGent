@@ -11,6 +11,7 @@ from .config import (
     MAX_LOG_PREVIEW_BYTES,
     MAX_TRANSPORT_GENERATED_FILE_PREVIEW_BYTES,
     MAX_TRANSPORT_GENERATED_FILES_TOTAL_BYTES,
+    OUTPUT_ROOT,
 )
 from .utils import truncate_log, truncate_utf8_text
 
@@ -189,6 +190,23 @@ def _collect_workspace_artifacts(workspace_dir: Path) -> list[dict[str, Any]]:
                 "size_bytes": path.stat().st_size,
             }
         )
+    if OUTPUT_ROOT is not None:
+        shared_output_dir = (OUTPUT_ROOT / workspace_dir.name).resolve()
+        if shared_output_dir.is_dir():
+            for path in sorted(shared_output_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+                relative_path = str(path.relative_to(shared_output_dir)).replace("\\", "/")
+                artifacts.append(
+                    {
+                        "path": (
+                            f"output/{relative_path}"
+                            if relative_path
+                            else "output"
+                        ),
+                        "size_bytes": path.stat().st_size,
+                    }
+                )
     return artifacts
 
 

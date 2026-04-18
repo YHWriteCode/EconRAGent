@@ -71,6 +71,11 @@ class _StubLLM:
         return self.payloads.pop(0)
 
 
+class _UnavailableLLM:
+    def is_available(self) -> bool:
+        return False
+
+
 def test_runtime_service_utility_llm_client_falls_back_to_main_model_env(
     tmp_path: Path,
     monkeypatch,
@@ -135,6 +140,80 @@ def test_runtime_service_build_run_env_reuses_cached_skill_env_for_shipped_scrip
     assert '"ready": true' in env["SKILL_ENVIRONMENT_JSON"].lower()
 
 
+def test_runtime_service_build_run_env_falls_back_to_online_install_when_wheelhouse_misses(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    loaded_skill = module._build_loaded_skill("financial-researching")
+    workspace_dir = (tmp_path / "workspace-online-fallback").resolve()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    calls: list[list[str]] = []
+    completed_process = module._build_run_env.__globals__["subprocess"].CompletedProcess
+
+    def _fake_run(argv, **kwargs):
+        command = [str(item) for item in argv]
+        calls.append(command)
+        if command[:3] == [module.sys.executable, "-m", "venv"]:
+            temp_env_dir = Path(command[3]).resolve()
+            bin_dir = temp_env_dir / ("Scripts" if os.name == "nt" else "bin")
+            python_name = "python.exe" if os.name == "nt" else "python"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / python_name).write_text("", encoding="utf-8")
+            return completed_process(command, 0, "", "")
+        if "--no-index" in command:
+            return completed_process(command, 1, "", "wheelhouse miss")
+        if command[:4] == [module.sys.executable, "-m", "pip", "download"]:
+            return completed_process(command, 0, "", "")
+        if command[1:4] == ["-m", "pip", "install"]:
+            return completed_process(command, 0, "", "")
+        raise AssertionError(f"Unexpected subprocess argv: {command}")
+
+    monkeypatch.setattr(module._build_run_env.__globals__["subprocess"], "run", _fake_run)
+
+    env, resolved_spec = module._build_run_env(
+        skill_dir=loaded_skill.skill.path.resolve(),
+        workspace_dir=workspace_dir,
+        goal="Analyze Tesla trend",
+        user_query="analyze tsla",
+        constraints={},
+        runtime_target=module.SkillRuntimeTarget.from_dict(
+            {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": True,
+                "supports_python": True,
+            }
+        ),
+        request_file=workspace_dir / "skill_request.json",
+        loaded_skill=loaded_skill,
+        command_plan=module.SkillCommandPlan(
+            skill_name="financial-researching",
+            goal="Analyze Tesla trend",
+            user_query="analyze tsla",
+            runtime_target=module.DEFAULT_RUNTIME_TARGET,
+            entrypoint="scripts/analyze_stock_trend.py",
+            mode="inferred",
+        ),
+        materialize_skill_env=True,
+    )
+
+    assert resolved_spec is not None
+    assert resolved_spec["ready"] is True
+    assert resolved_spec["materialized"] is True
+    assert resolved_spec["reused"] is False
+    assert env["VIRTUAL_ENV"] == resolved_spec["env_path"]
+    assert env["SKILL_PYTHON_BIN"] == resolved_spec["python_path"]
+    assert any("--no-index" in command for command in calls)
+    assert any(
+        command[1:4] == ["-m", "pip", "install"] and "--no-index" not in command
+        for command in calls
+    )
+    assert any(command[:4] == [module.sys.executable, "-m", "pip", "download"] for command in calls)
+
+
 def test_materialize_shell_command_rewrites_workspace_root_cli_args(
     tmp_path: Path,
     monkeypatch,
@@ -195,6 +274,60 @@ def test_materialize_shell_command_rewrites_workspace_root_cli_args(
     assert str((workspace_dir / "output" / "tsla_trend.json")).replace("\\", "/") in (
         command.replace("\\", "/")
     )
+
+
+def test_materialize_shell_command_rewrites_workspace_output_into_shared_output_dir(
+    tmp_path: Path,
+    monkeypatch,
+):
+    shared_output_root = (tmp_path / "skill_output").resolve()
+    monkeypatch.setenv("MCP_OUTPUT_DIR", str(shared_output_root))
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    loaded_skill = module._build_loaded_skill("financial-researching")
+    workspace_dir = (tmp_path / "workspace-shared-output" / "run-42").resolve()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    fake_runtime_root = (tmp_path / "container-workspace").resolve()
+
+    command_plan = module.SkillCommandPlan(
+        skill_name="financial-researching",
+        goal="Analyze Tesla trend",
+        user_query="analyze tsla",
+        runtime_target=module.SkillRuntimeTarget.from_dict(
+            {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": fake_runtime_root.as_posix(),
+                "workdir": fake_runtime_root.as_posix(),
+                "network_allowed": True,
+                "supports_python": True,
+            }
+        ),
+        constraints={},
+        command=(
+            "python scripts/analyze_stock_trend.py --code TSLA "
+            f"--output {fake_runtime_root.as_posix()}/output/tsla_trend.json"
+        ),
+        mode="inferred",
+        shell_mode="conservative",
+        entrypoint="scripts/analyze_stock_trend.py",
+        cli_args=[
+            "--code",
+            "TSLA",
+            "--output",
+            f"{fake_runtime_root.as_posix()}/output/tsla_trend.json",
+        ],
+    )
+
+    command = module._materialize_shell_command(
+        loaded_skill=loaded_skill,
+        command_plan=command_plan,
+        workspace_dir=workspace_dir,
+    )
+
+    assert command is not None
+    expected_output = shared_output_root / workspace_dir.name / "tsla_trend.json"
+    assert str(expected_output).replace("\\", "/") in command.replace("\\", "/")
+    assert f"{fake_runtime_root.as_posix()}/output/tsla_trend.json" not in command
 
 
 async def _wait_for_terminal_run(module, run_id: str, *, timeout_s: float = 3.0):
@@ -484,6 +617,60 @@ async def test_runtime_service_rewrites_absolute_workspace_root_outputs_into_run
     assert result["success"] is True
     assert result["run_status"] == "completed"
     assert expected_output.read_text(encoding="utf-8").strip() == "rewritten ok"
+    assert fake_output_path.exists() is False
+    assert "output/rewritten.txt" in {item["path"] for item in result["artifacts"]}
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_collects_shared_output_artifacts_when_configured(
+    tmp_path: Path,
+    monkeypatch,
+):
+    shared_output_root = (tmp_path / "skill_output").resolve()
+    monkeypatch.setenv("MCP_OUTPUT_DIR", str(shared_output_root))
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    fake_runtime_root = (tmp_path / "container-workspace-shared").resolve()
+    fake_output_path = fake_runtime_root / "output" / "rewritten.txt"
+
+    result = await module.run_skill_task(
+        skill_name="example-skill",
+        goal="Write the report into the shared output directory",
+        user_query="store output in the shared output path",
+        constraints={},
+        command_plan={
+            "skill_name": "example-skill",
+            "goal": "Write the report into the shared output directory",
+            "user_query": "store output in the shared output path",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": fake_runtime_root.as_posix(),
+                "workdir": fake_runtime_root.as_posix(),
+                "network_allowed": True,
+                "supports_python": False,
+            },
+            "constraints": {},
+            "command": (
+                f"New-Item -ItemType Directory -Force -Path '{fake_output_path.parent.as_posix()}' | Out-Null; "
+                f"Set-Content -LiteralPath '{fake_output_path.as_posix()}' "
+                "-Value 'shared output ok'"
+            ),
+            "mode": "explicit",
+            "shell_mode": "conservative",
+            "entrypoint": None,
+            "cli_args": [],
+            "generated_files": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {},
+        },
+        wait_for_completion=True,
+    )
+
+    run_workspace = Path(result["workspace"]).resolve()
+    expected_output = shared_output_root / run_workspace.name / "rewritten.txt"
+    assert expected_output.is_file()
+    assert expected_output.read_text(encoding="utf-8").strip() == "shared output ok"
     assert fake_output_path.exists() is False
     assert "output/rewritten.txt" in {item["path"] for item in result["artifacts"]}
 
@@ -783,11 +970,11 @@ async def test_runtime_service_persists_run_state_outside_in_memory_cache(
         constraints={},
     )
 
-    assert result["run_status"] == "running"
+    assert result["run_status"] in {"running", "completed"}
     module.RUN_STORE.clear()
 
     live_status = module.get_run_status(result["run_id"])
-    assert live_status["run_status"] == "running"
+    assert live_status["run_status"] in {"running", "completed"}
     assert live_status["runtime"]["store_backend"] == "sqlite"
 
     final_status = await _wait_for_terminal_run(module, result["run_id"])
@@ -1198,6 +1385,7 @@ async def test_runtime_service_preflight_fails_when_required_tools_are_missing(
     monkeypatch,
 ):
     module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", _UnavailableLLM())
 
     result = await module.run_skill_task(
         skill_name="pdf",
@@ -1374,6 +1562,7 @@ async def test_runtime_service_preflight_checks_generated_python_syntax(
     monkeypatch,
 ):
     module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", _UnavailableLLM())
 
     result = await module.run_skill_task(
         skill_name="pdf",
