@@ -76,6 +76,18 @@ class _UnavailableLLM:
         return False
 
 
+def test_runtime_service_uses_non_login_shell_for_posix_exec(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module._build_shell_exec_argv.__globals__["os"], "name", "posix")
+
+    argv = module._build_shell_exec_argv("python scripts/analyze_stock_trend.py")
+
+    assert argv == ["/bin/sh", "-c", "python scripts/analyze_stock_trend.py"]
+
+
 def test_runtime_service_utility_llm_client_falls_back_to_main_model_env(
     tmp_path: Path,
     monkeypatch,
@@ -105,6 +117,11 @@ def test_runtime_service_build_run_env_reuses_cached_skill_env_for_shipped_scrip
     monkeypatch,
 ):
     module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setitem(
+        module._build_run_env.__globals__,
+        "_skill_env_has_required_distributions",
+        lambda **kwargs: True,
+    )
     loaded_skill = module._build_loaded_skill("xlsx")
     env_spec = _materialize_ready_skill_env(module, skill_name="xlsx")
     workspace_dir = (tmp_path / "workspace-for-env").resolve()
@@ -138,6 +155,79 @@ def test_runtime_service_build_run_env_reuses_cached_skill_env_for_shipped_scrip
     assert env["SKILL_PYTHON_BIN"] == env_spec["python_path"]
     assert env["PATH"].split(os.pathsep)[0] == env_spec["bin_dir"]
     assert '"ready": true' in env["SKILL_ENVIRONMENT_JSON"].lower()
+
+
+def test_runtime_service_marks_cached_skill_env_not_ready_when_dependency_check_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    env_spec = _materialize_ready_skill_env(module, skill_name="xlsx")
+    monkeypatch.setitem(
+        module._build_run_env.__globals__,
+        "_skill_env_has_required_distributions",
+        lambda **kwargs: False,
+    )
+
+    assert module._build_run_env.__globals__["_skill_env_is_ready"](env_spec) is False
+
+
+def test_runtime_service_skill_env_install_keeps_venv_python_path(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setitem(
+        module._build_run_env.__globals__,
+        "_runtime_bin_dir_name",
+        lambda: "bin",
+    )
+    monkeypatch.setitem(
+        module._build_run_env.__globals__,
+        "_runtime_python_name",
+        lambda: "python",
+    )
+    loaded_skill = module._build_loaded_skill("financial-researching")
+    env_spec = module._build_skill_env_spec(loaded_skill)
+    assert env_spec is not None
+    real_python = (tmp_path / "real-python").resolve()
+    real_python.write_text("", encoding="utf-8")
+    calls: list[list[str]] = []
+    completed_process = module._build_run_env.__globals__["subprocess"].CompletedProcess
+
+    def _fake_run(argv, **kwargs):
+        command = [str(item) for item in argv]
+        calls.append(command)
+        if command[:3] == [module.sys.executable, "-m", "venv"]:
+            temp_env_dir = Path(command[3]).resolve()
+            bin_dir = temp_env_dir / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            python_path = bin_dir / "python"
+            try:
+                os.symlink(real_python, python_path)
+            except (NotImplementedError, OSError):
+                pytest.skip("symlink creation is not available in this test environment")
+            return completed_process(command, 0, "", "")
+        if len(command) >= 4 and command[1:4] == ["-m", "pip", "install"]:
+            return completed_process(command, 0, "", "")
+        if command[:4] == [module.sys.executable, "-m", "pip", "download"]:
+            return completed_process(command, 0, "", "")
+        raise AssertionError(f"Unexpected subprocess argv: {command}")
+
+    monkeypatch.setattr(module._build_run_env.__globals__["subprocess"], "run", _fake_run)
+
+    resolved_spec = module._build_run_env.__globals__["_ensure_skill_env_ready"](
+        env_spec,
+        allow_network=True,
+    )
+
+    expected_python = str(Path(resolved_spec["env_path"]) / "bin" / "python")
+    pip_install_commands = [
+        command for command in calls if len(command) >= 4 and command[1:4] == ["-m", "pip", "install"]
+    ]
+    assert pip_install_commands
+    assert pip_install_commands[0][0] == expected_python
+    assert resolved_spec["python_path"] == expected_python
 
 
 def test_runtime_service_build_run_env_falls_back_to_online_install_when_wheelhouse_misses(
@@ -672,6 +762,63 @@ async def test_runtime_service_collects_shared_output_artifacts_when_configured(
     assert expected_output.is_file()
     assert expected_output.read_text(encoding="utf-8").strip() == "shared output ok"
     assert fake_output_path.exists() is False
+    assert "output/rewritten.txt" in {item["path"] for item in result["artifacts"]}
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_does_not_double_rewrite_shared_output_paths_under_workspace_root(
+    tmp_path: Path,
+    monkeypatch,
+):
+    fake_runtime_root = (tmp_path / "container-workspace-shared").resolve()
+    shared_output_root = (fake_runtime_root / "output").resolve()
+    monkeypatch.setenv("MCP_OUTPUT_DIR", str(shared_output_root))
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    fake_output_path = fake_runtime_root / "output" / "rewritten.txt"
+
+    result = await module.run_skill_task(
+        skill_name="example-skill",
+        goal="Write the report into the shared output directory under the runtime workspace",
+        user_query="store output in the shared output path",
+        constraints={},
+        command_plan={
+            "skill_name": "example-skill",
+            "goal": "Write the report into the shared output directory under the runtime workspace",
+            "user_query": "store output in the shared output path",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": fake_runtime_root.as_posix(),
+                "workdir": fake_runtime_root.as_posix(),
+                "network_allowed": True,
+                "supports_python": False,
+            },
+            "constraints": {},
+            "command": (
+                f"New-Item -ItemType Directory -Force -Path '{fake_output_path.parent.as_posix()}' | Out-Null; "
+                f"Set-Content -LiteralPath '{fake_output_path.as_posix()}' "
+                "-Value 'shared output ok'"
+            ),
+            "mode": "explicit",
+            "shell_mode": "conservative",
+            "entrypoint": None,
+            "cli_args": [],
+            "generated_files": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {},
+        },
+        wait_for_completion=True,
+    )
+
+    run_workspace = Path(result["workspace"]).resolve()
+    expected_output = shared_output_root / run_workspace.name / "rewritten.txt"
+    unexpected_nested_output = run_workspace / "output" / run_workspace.name / "rewritten.txt"
+
+    assert expected_output.is_file()
+    assert expected_output.read_text(encoding="utf-8").strip() == "shared output ok"
+    assert fake_output_path.exists() is False
+    assert unexpected_nested_output.exists() is False
     assert "output/rewritten.txt" in {item["path"] for item in result["artifacts"]}
 
 

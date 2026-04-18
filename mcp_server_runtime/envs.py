@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -46,7 +47,8 @@ def _venv_bin_dir(env_dir: Path) -> Path:
 
 
 def _venv_python_path(env_dir: Path) -> Path:
-    return (_venv_bin_dir(env_dir) / _runtime_python_name()).resolve()
+    # Keep the venv-local interpreter path instead of resolving its symlink target.
+    return _venv_bin_dir(env_dir) / _runtime_python_name()
 
 
 def _skill_env_metadata_path(env_dir: Path) -> Path:
@@ -151,7 +153,7 @@ def _load_skill_env_metadata(env_dir: Path) -> dict[str, Any] | None:
 
 def _skill_env_is_ready(env_spec: dict[str, Any]) -> bool:
     env_dir = Path(str(env_spec.get("env_path", ""))).resolve()
-    python_path = Path(str(env_spec.get("python_path", ""))).resolve()
+    python_path = Path(str(env_spec.get("python_path", "")))
     metadata = _load_skill_env_metadata(env_dir)
     if metadata is None:
         return False
@@ -164,7 +166,15 @@ def _skill_env_is_ready(env_spec: dict[str, Any]) -> bool:
         return False
     if str(metadata.get("format_version", "")).strip() != ENV_HASH_FORMAT_VERSION:
         return False
-    return env_dir.is_dir() and python_path.is_file()
+    if not (env_dir.is_dir() and python_path.is_file()):
+        return False
+    dependency_path = Path(str(env_spec.get("dependency_path", ""))).resolve()
+    if dependency_path.is_file() and not _skill_env_has_required_distributions(
+        python_path=python_path,
+        dependency_path=dependency_path,
+    ):
+        return False
+    return True
 
 
 def _skill_env_runtime_payload(env_spec: dict[str, Any] | None) -> dict[str, Any]:
@@ -309,6 +319,49 @@ def _try_seed_wheelhouse_from_dependency_file(dependency_path: Path) -> None:
         return
 
 
+def _dependency_distribution_names(dependency_path: Path) -> list[str]:
+    try:
+        lines = dependency_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        candidate = re.split(r"[<>=!~;\[]", line, maxsplit=1)[0].strip()
+        if not candidate:
+            continue
+        normalized = candidate.lower().replace("_", "-")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        names.append(candidate)
+    return names
+
+
+def _skill_env_has_required_distributions(
+    *,
+    python_path: Path,
+    dependency_path: Path,
+) -> bool:
+    distributions = _dependency_distribution_names(dependency_path)
+    if not distributions:
+        return True
+    check_result = _run_subprocess_checked(
+        [
+            str(python_path),
+            "-m",
+            "pip",
+            "show",
+            *distributions,
+        ],
+        timeout_s=ENV_BUILD_TIMEOUT_S,
+    )
+    return check_result.returncode == 0
+
+
 def _ensure_skill_env_ready(
     env_spec: dict[str, Any] | None,
     *,
@@ -423,6 +476,8 @@ def _ensure_skill_env_ready(
         if env_dir.exists():
             shutil.rmtree(env_dir, ignore_errors=True)
         temp_env_dir.replace(env_dir)
+        resolved["bin_dir"] = str(_venv_bin_dir(env_dir))
+        resolved["python_path"] = str(_venv_python_path(env_dir))
         resolved["ready"] = True
         resolved["materialized"] = True
         resolved["reused"] = False
@@ -541,57 +596,54 @@ def _rewrite_runtime_workspace_path_text(
 
     workspace_text = str(workspace_dir)
     workspace_posix = workspace_text.replace("\\", "/")
-    replacement_pairs: list[tuple[str, str]] = []
-    seen_pairs: set[tuple[str, str]] = set()
-
-    def _add_replacement(candidate: str, replacement: str) -> None:
-        normalized_candidate = str(candidate or "")
-        normalized_replacement = str(replacement or "")
-        if not normalized_candidate:
-            return
-        pair = (normalized_candidate, normalized_replacement)
-        if pair in seen_pairs:
-            return
-        replacement_pairs.append(pair)
-        seen_pairs.add(pair)
-
     normalized_workspace_root = raw_workspace_root.rstrip("/\\")
-    if OUTPUT_ROOT is not None:
+    output_placeholders: list[tuple[str, str]] = []
+
+    def _register_output_placeholder(candidate_root: str, replacement_root: str) -> None:
+        normalized_candidate = str(candidate_root or "").rstrip("/\\")
+        normalized_replacement = str(replacement_root or "").rstrip("/\\")
+        if not normalized_candidate or not normalized_replacement:
+            return
+        placeholder = f"__MCP_OUTPUT_ROOT_{len(output_placeholders)}__"
+        output_placeholders.append((placeholder, normalized_replacement))
+        rewritten_roots = (
+            (normalized_candidate + "/", placeholder + "/"),
+            (normalized_candidate + "\\", placeholder + "\\"),
+            (normalized_candidate, placeholder),
+        )
+        nonlocal rewritten
+        for candidate, replacement in rewritten_roots:
+            rewritten = rewritten.replace(candidate, replacement)
+
+    if OUTPUT_ROOT is not None and normalized_workspace_root:
         shared_output_dir = (OUTPUT_ROOT / workspace_dir.name).resolve()
         shared_output_text = str(shared_output_dir)
         shared_output_posix = shared_output_text.replace("\\", "/")
-        workspace_output_roots = [
+        _register_output_placeholder(
             f"{normalized_workspace_root}/output",
+            shared_output_posix,
+        )
+        _register_output_placeholder(
             f"{normalized_workspace_root}\\output",
-        ]
-        for output_root in workspace_output_roots:
-            normalized_output_root = str(output_root or "").rstrip("/\\")
-            if not normalized_output_root:
-                continue
-            if "/" in output_root and "\\" not in output_root:
-                _add_replacement(normalized_output_root + "/", shared_output_posix + "/")
-                _add_replacement(normalized_output_root, shared_output_posix)
-            else:
-                _add_replacement(normalized_output_root + "\\", shared_output_text + "\\")
-                _add_replacement(normalized_output_root, shared_output_text)
+            shared_output_text,
+        )
 
-    for candidate_root in [raw_workspace_root, raw_workspace_root.replace("\\", "/")]:
-        normalized_root = str(candidate_root or "").rstrip("/\\")
-        if not normalized_root:
-            continue
-        if "/" in candidate_root and "\\" not in candidate_root:
-            _add_replacement(normalized_root + "/", workspace_posix + "/")
-            _add_replacement(normalized_root, workspace_posix)
-        else:
-            _add_replacement(normalized_root + "\\", workspace_text + "\\")
-            _add_replacement(normalized_root, workspace_text)
-
-    for candidate, replacement in sorted(
-        replacement_pairs,
-        key=lambda item: len(item[0]),
-        reverse=True,
+    for candidate_root, replacement_root in (
+        (raw_workspace_root, workspace_text),
+        (raw_workspace_root.replace("\\", "/"), workspace_posix),
     ):
-        rewritten = rewritten.replace(candidate, replacement)
+        normalized_candidate = str(candidate_root or "").rstrip("/\\")
+        normalized_replacement = str(replacement_root or "").rstrip("/\\")
+        if not normalized_candidate or not normalized_replacement:
+            continue
+        rewritten = rewritten.replace(normalized_candidate + "/", normalized_replacement + "/")
+        rewritten = rewritten.replace(normalized_candidate + "\\", normalized_replacement + "\\")
+        rewritten = rewritten.replace(normalized_candidate, normalized_replacement)
+
+    for placeholder, replacement_root in output_placeholders:
+        rewritten = rewritten.replace(placeholder + "/", replacement_root + "/")
+        rewritten = rewritten.replace(placeholder + "\\", replacement_root + "\\")
+        rewritten = rewritten.replace(placeholder, replacement_root)
     return rewritten
 
 

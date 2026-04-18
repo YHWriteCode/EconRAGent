@@ -258,6 +258,151 @@ async def test_skill_command_planner_can_infer_tsla_trend_command_from_route_con
 
 
 @pytest.mark.asyncio
+async def test_skill_command_planner_prefers_fetch_market_data_for_simple_price_query():
+    loaded_skill = _load_repo_skill("financial-researching")
+    planner = SkillCommandPlanner()
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="financial-researching",
+            goal="获取宁德时代（300750）昨天的股价数据",
+            user_query="请帮我查一下宁德时代300750昨天的股价",
+            constraints={
+                "code": "300750",
+                "start": "20260414",
+                "end": "20260414",
+                "data_type": "stock price",
+            },
+        ),
+    )
+
+    assert plan.mode == "inferred"
+    assert plan.entrypoint == "scripts/fetch_market_data.py"
+    assert "--codes" in plan.cli_args
+    assert "300750" in plan.cli_args
+    assert "--start" in plan.cli_args
+    assert "20260414" in plan.cli_args
+    assert "--end" in plan.cli_args
+    assert "20260414" in plan.cli_args
+    assert "--output" not in plan.cli_args
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_ignores_llm_inferred_output_path_for_simple_financial_fetch():
+    loaded_skill = _load_repo_skill("financial-researching")
+    llm = _StubPlannerLLM(
+        {
+            "constraints": {
+                "code": "300750",
+                "start": "20260414",
+                "end": "20260414",
+                "output_path": "/workspace/output/market_data.csv",
+            },
+            "reason": "Normalized the request into shipped script arguments.",
+            "confidence": "high",
+        }
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="financial-researching",
+            goal="获取宁德时代（300750）昨天的股价数据",
+            user_query="请帮我查一下宁德时代300750昨天的股价",
+            constraints={},
+        ),
+    )
+
+    assert len(llm.calls) == 1
+    assert plan.mode == "inferred"
+    assert plan.entrypoint == "scripts/fetch_market_data.py"
+    assert "--output" not in plan.cli_args
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_infers_yesterday_fetch_dates_without_explicit_constraints(
+    monkeypatch,
+):
+    monkeypatch.setattr(command_planner_module, "_current_date", _FixedDate.today)
+    loaded_skill = _load_repo_skill("financial-researching")
+    planner = SkillCommandPlanner()
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="financial-researching",
+            goal="获取宁德时代（300750）昨天的股价数据",
+            user_query="请帮我查一下宁德时代300750昨天的股价",
+            constraints={},
+        ),
+    )
+
+    assert plan.mode == "inferred"
+    assert plan.entrypoint == "scripts/fetch_market_data.py"
+    assert "--start" in plan.cli_args
+    assert "20260414" in plan.cli_args
+    assert "--end" in plan.cli_args
+    assert "20260414" in plan.cli_args
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_infers_realtime_tesla_trend_dates_when_missing(
+    monkeypatch,
+):
+    monkeypatch.setattr(command_planner_module, "_current_date", _FixedDate.today)
+    loaded_skill = _load_repo_skill("financial-researching")
+    planner = SkillCommandPlanner()
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="financial-researching",
+            goal="现在特斯拉 TSLA 的股价是多少？顺便看下最近走势",
+            user_query="现在特斯拉 TSLA 的股价是多少？顺便看下最近走势",
+            constraints={},
+        ),
+    )
+
+    assert plan.mode == "inferred"
+    assert plan.entrypoint == "scripts/analyze_stock_trend.py"
+    assert "--code" in plan.cli_args
+    assert "TSLA" in plan.cli_args
+    assert "--start" in plan.cli_args
+    assert "20260115" in plan.cli_args
+    assert "--end" in plan.cli_args
+    assert "20260415" in plan.cli_args
+    assert "--trend-start" in plan.cli_args
+    assert "20260316" in plan.cli_args
+    assert "--trend-end" in plan.cli_args
+    assert "20260415" in plan.cli_args
+
+
+def test_infer_script_cli_args_normalizes_directory_output_scripts():
+    script_path = Path("skills/financial-researching/scripts/fetch_model_backtest.py")
+
+    cli_args, missing_fields, inferred_flag_count = command_planner_module.infer_script_cli_args(
+        script_path=script_path,
+        goal="抓取宁德时代(300750)并执行端到端回测",
+        user_query="请完成宁德时代300750的端到端建模回测",
+        constraints={
+            "codes": "000001,300750",
+            "target": "300750",
+            "start": "20260401",
+            "end": "20260415",
+            "output_path": "/workspace/output/market_data.csv",
+        },
+    )
+
+    assert missing_fields == []
+    assert inferred_flag_count >= 5
+    assert "--output" in cli_args
+    output_index = cli_args.index("--output")
+    assert cli_args[output_index + 1] == "/workspace/output"
+
+
+@pytest.mark.asyncio
 async def test_skill_command_planner_returns_manual_required_for_ambiguous_target():
     loaded_skill = _load_repo_skill("example-skill")
     planner = SkillCommandPlanner()

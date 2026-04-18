@@ -6,7 +6,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from datetime import date, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Protocol
 
 from kg_agent.agent.prompts import (
@@ -130,9 +130,6 @@ PATH_LIKE_CONSTRAINT_NAMES = {
 GENERIC_INFERABLE_CONSTRAINT_KEYS = {
     "input_path",
     "input_paths",
-    "output_path",
-    "output",
-    "destination_path",
     "format",
     "output_format",
     "mode",
@@ -158,6 +155,99 @@ SCRIPT_FIRST_REQUEST_PATTERN = re.compile(
     r"\u5199(?:\u4e00\u4e2a|\u4e2a)?(?:helper|python)?\s*\u811a\u672c|"
     r"\u590d\u6742\u547d\u4ee4|"
     r"\u547d\u4ee4\u94fe"
+    r")",
+    re.IGNORECASE,
+)
+FINANCIAL_PIPELINE_REQUEST_PATTERN = re.compile(
+    r"("
+    r"backtest|"
+    r"strategy|"
+    r"alpha|"
+    r"panel|"
+    r"regression|"
+    r"factor|"
+    r"model|"
+    r"\u56de\u6d4b|"
+    r"\u7b56\u7565|"
+    r"\u56e0\u5b50|"
+    r"\u5efa\u6a21|"
+    r"\u56de\u5f52|"
+    r"\u9762\u677f|"
+    r"\u4fe1\u53f7"
+    r")",
+    re.IGNORECASE,
+)
+FINANCIAL_TREND_REQUEST_PATTERN = re.compile(
+    r"("
+    r"trend|"
+    r"volatility|"
+    r"price\s+movement|"
+    r"candlestick|"
+    r"ohlc|"
+    r"\u8d8b\u52bf|"
+    r"\u8d70\u52bf|"
+    r"\u6ce2\u52a8|"
+    r"\u6da8\u8dcc|"
+    r"\u6da8\u5e45|"
+    r"\u8dcc\u5e45|"
+    r"\u4e0a\u6da8|"
+    r"\u4e0b\u8dcc|"
+    r"k\u7ebf"
+    r")",
+    re.IGNORECASE,
+)
+FINANCIAL_FETCH_REQUEST_PATTERN = re.compile(
+    r"("
+    r"quote|"
+    r"price|"
+    r"market\s+data|"
+    r"history|"
+    r"historical|"
+    r"fetch|"
+    r"pull|"
+    r"get|"
+    r"current|"
+    r"today|"
+    r"yesterday|"
+    r"\u80a1\u4ef7|"
+    r"\u884c\u60c5|"
+    r"\u5f00\u76d8\u4ef7|"
+    r"\u6536\u76d8\u4ef7|"
+    r"\u6700\u9ad8\u4ef7|"
+    r"\u6700\u4f4e\u4ef7|"
+    r"\u6210\u4ea4\u91cf|"
+    r"\u6210\u4ea4\u989d|"
+    r"\u5386\u53f2\u6570\u636e|"
+    r"\u62c9\u53d6|"
+    r"\u83b7\u53d6|"
+    r"\u67e5(?:\u4e00\u4e0b|\u8be2|\u627e)?|"
+    r"\u4eca\u5929|"
+    r"\u6628\u5929|"
+    r"\u5f53\u524d"
+    r")",
+    re.IGNORECASE,
+)
+RELATIVE_YESTERDAY_PATTERN = re.compile(
+    r"("
+    r"\u6628\u5929|"
+    r"\u6628\u65e5|"
+    r"yesterday"
+    r")",
+    re.IGNORECASE,
+)
+RELATIVE_TODAY_PATTERN = re.compile(
+    r"("
+    r"\u4eca\u5929|"
+    r"\u4eca\u65e5|"
+    r"\u73b0\u5728|"
+    r"\u5f53\u524d|"
+    r"\u6700\u65b0|"
+    r"\u5b9e\u65f6|"
+    r"today|"
+    r"current|"
+    r"now|"
+    r"latest|"
+    r"real.?time"
     r")",
     re.IGNORECASE,
 )
@@ -233,6 +323,10 @@ def _normalize_relative_unit(raw_unit: str | None) -> str | None:
     if normalized in {"天", "day", "days"}:
         return "days"
     return None
+
+
+def _format_yyyymmdd(value: date) -> str:
+    return value.strftime("%Y%m%d")
 
 
 def _shift_date_by_months(base: date, months: int) -> date:
@@ -387,8 +481,6 @@ def _build_allowed_constraint_keys(
             allowed.add(normalized)
             if normalized in {"input", "file", "path"}:
                 allowed.add("input_path")
-            if normalized == "output":
-                allowed.add("output_path")
     return sorted(allowed)
 
 
@@ -481,6 +573,159 @@ def _truncate_text(text: str, *, max_chars: int) -> str:
     if len(normalized) <= max_chars:
         return normalized
     return normalized[:max_chars].rstrip() + "\n...[truncated]"
+
+
+def _join_request_context_text(*parts: Any) -> str:
+    normalized_parts: list[str] = []
+    for part in parts:
+        if isinstance(part, dict):
+            normalized_parts.extend(str(item) for item in part.values())
+            continue
+        if isinstance(part, (list, tuple, set)):
+            normalized_parts.extend(str(item) for item in part)
+            continue
+        if part not in (None, ""):
+            normalized_parts.append(str(part))
+    return "\n".join(item for item in normalized_parts if item.strip())
+
+
+def _infer_financial_research_request_kind(
+    *,
+    goal: str,
+    user_query: str,
+    constraints: dict[str, Any],
+) -> str | None:
+    query_text = _join_request_context_text(goal, user_query, constraints)
+    if not query_text.strip():
+        return None
+    if FINANCIAL_PIPELINE_REQUEST_PATTERN.search(query_text):
+        return "pipeline"
+    if FINANCIAL_TREND_REQUEST_PATTERN.search(query_text):
+        return "trend"
+    if FINANCIAL_FETCH_REQUEST_PATTERN.search(query_text):
+        return "fetch"
+    return None
+
+
+def _infer_financial_default_dates(
+    *,
+    goal: str,
+    user_query: str,
+    constraints: dict[str, Any],
+) -> dict[str, str]:
+    query_text = _join_request_context_text(goal, user_query, constraints)
+    request_kind = _infer_financial_research_request_kind(
+        goal=goal,
+        user_query=user_query,
+        constraints=constraints,
+    )
+    if request_kind not in {"fetch", "trend"}:
+        return {}
+
+    reference_date = _current_date()
+    if RELATIVE_YESTERDAY_PATTERN.search(query_text):
+        target_date = reference_date - timedelta(days=1)
+        formatted = _format_yyyymmdd(target_date)
+        defaults = {
+            "start": formatted,
+            "end": formatted,
+        }
+        if request_kind == "trend":
+            defaults["trend_start"] = formatted
+            defaults["trend_end"] = formatted
+        return defaults
+
+    if request_kind == "fetch":
+        start_date = reference_date - timedelta(days=7)
+        end_date = reference_date
+        return {
+            "start": _format_yyyymmdd(start_date),
+            "end": _format_yyyymmdd(end_date),
+        }
+
+    start_date = reference_date - timedelta(days=90)
+    trend_start_date = reference_date - timedelta(days=30)
+    return {
+        "start": _format_yyyymmdd(start_date),
+        "end": _format_yyyymmdd(reference_date),
+        "trend_start": _format_yyyymmdd(trend_start_date),
+        "trend_end": _format_yyyymmdd(reference_date),
+    }
+
+
+def _financial_research_entrypoint_kind(relative_path: str) -> str | None:
+    normalized = relative_path.replace("\\", "/").strip().lower()
+    if normalized.endswith("scripts/fetch_market_data.py"):
+        return "fetch"
+    if normalized.endswith("scripts/analyze_stock_trend.py"):
+        return "trend"
+    if normalized.endswith("scripts/fetch_model_backtest.py"):
+        return "pipeline"
+    if normalized.endswith("scripts/prepare_panel_data.py"):
+        return "panel"
+    if normalized.endswith("scripts/run_panel_model.py"):
+        return "model"
+    if normalized.endswith("scripts/run_backtest.py"):
+        return "backtest"
+    return None
+
+
+def _score_financial_research_candidate(
+    *,
+    relative_path: str,
+    request_kind: str | None,
+) -> tuple[bool, int]:
+    candidate_kind = _financial_research_entrypoint_kind(relative_path)
+    if request_kind == "fetch":
+        if candidate_kind == "fetch":
+            return False, 8
+        if candidate_kind in {"trend", "pipeline", "panel", "model", "backtest"}:
+            return True, 0
+    if request_kind == "trend":
+        if candidate_kind == "trend":
+            return False, 8
+        if candidate_kind in {"fetch", "pipeline", "panel", "model", "backtest"}:
+            return True, 0
+    if request_kind == "pipeline":
+        if candidate_kind == "pipeline":
+            return False, 8
+        if candidate_kind in {"panel", "model", "backtest"}:
+            return False, 3
+        if candidate_kind in {"fetch", "trend"}:
+            return True, 0
+    return False, 0
+
+
+def _script_output_flag_expects_directory(script_path: Path) -> bool:
+    default_output = str(extract_cli_flag_defaults(script_path).get("--output") or "").strip()
+    if not default_output:
+        return False
+    normalized = default_output.replace("\\", "/").rstrip("/")
+    if not normalized:
+        return False
+    return PurePosixPath(normalized).suffix == ""
+
+
+def _normalize_output_argument_for_script(
+    *,
+    script_path: Path,
+    output_path: str,
+) -> str:
+    normalized_output = str(output_path or "").strip()
+    if not normalized_output or not _script_output_flag_expects_directory(script_path):
+        return normalized_output
+    if normalized_output.endswith(("/", "\\")):
+        return normalized_output.rstrip("/\\")
+
+    default_output = str(extract_cli_flag_defaults(script_path).get("--output") or "output").strip()
+    path_type = PureWindowsPath if re.match(r"^[A-Za-z]:[\\/]", normalized_output) or "\\" in normalized_output else PurePosixPath
+    candidate_path = path_type(normalized_output)
+    if candidate_path.suffix:
+        parent = str(candidate_path.parent)
+        if parent not in {"", "."}:
+            return parent
+        return default_output
+    return normalized_output
 
 
 def extract_code_examples(
@@ -1105,6 +1350,11 @@ def infer_script_cli_args(
             and defaults.get("--codes")
         ):
             value = _merge_csv_values(defaults["--codes"], value)
+        if flag == "--output":
+            value = _normalize_output_argument_for_script(
+                script_path=script_path,
+                output_path=value,
+            )
         inferred.extend([flag, value])
         inferred_flag_count += 1
         used_flags.add(flag)
@@ -1134,7 +1384,15 @@ def infer_script_cli_args(
 
     output_path = extract_output_path(constraints)
     if output_path and "--output" in flags and "--output" not in used_flags:
-        inferred.extend(["--output", output_path])
+        inferred.extend(
+            [
+                "--output",
+                _normalize_output_argument_for_script(
+                    script_path=script_path,
+                    output_path=output_path,
+                ),
+            ]
+        )
         inferred_flag_count += 1
         used_flags.add("--output")
 
@@ -1151,6 +1409,11 @@ def infer_required_flag_value(
     normalized = flag.lstrip("-").replace("-", "_")
     combined_text = f"{goal}\n{user_query}"
     relative_windows = extract_relative_date_windows(combined_text)
+    financial_default_dates = _infer_financial_default_dates(
+        goal=goal,
+        user_query=user_query,
+        constraints=constraints,
+    )
     candidate_keys = [normalized, flag, normalized.removesuffix("_path")]
     if normalized in CODE_LIKE_FLAG_NAMES:
         candidate_keys.extend(["target", "target_code", "code", "codes", "ticker", "symbol"])
@@ -1187,23 +1450,31 @@ def infer_required_flag_value(
         if dates:
             return dates[0]
         primary_window = _select_primary_relative_date_window(relative_windows)
-        return primary_window.start.strftime("%Y%m%d") if primary_window else None
+        if primary_window:
+            return primary_window.start.strftime("%Y%m%d")
+        return financial_default_dates.get("start")
     if normalized in END_DATE_FLAG_NAMES:
         dates = extract_date_candidates(combined_text)
         if len(dates) >= 2:
             return dates[-1]
         primary_window = _select_primary_relative_date_window(relative_windows)
-        return primary_window.end.strftime("%Y%m%d") if primary_window else None
+        if primary_window:
+            return primary_window.end.strftime("%Y%m%d")
+        return financial_default_dates.get("end")
     if normalized in TREND_START_DATE_FLAG_NAMES:
         window = _select_secondary_relative_date_window(relative_windows) or _select_primary_relative_date_window(
             relative_windows
         )
-        return window.start.strftime("%Y%m%d") if window else None
+        if window:
+            return window.start.strftime("%Y%m%d")
+        return financial_default_dates.get("trend_start")
     if normalized in TREND_END_DATE_FLAG_NAMES:
         window = _select_secondary_relative_date_window(relative_windows) or _select_primary_relative_date_window(
             relative_windows
         )
-        return window.end.strftime("%Y%m%d") if window else None
+        if window:
+            return window.end.strftime("%Y%m%d")
+        return financial_default_dates.get("trend_end")
     if normalized in {"target", "target_code", "code", "ticker", "symbol"}:
         symbols = extract_symbol_candidates(combined_text)
         return symbols[0] if symbols else None
@@ -1403,12 +1674,10 @@ def _build_preferred_shipped_script_plan(
     shell_hints: dict[str, Any],
     shell_mode: SkillShellMode,
 ) -> SkillCommandPlan | None:
-    query_text = "\n".join(
-        [
-            request.goal,
-            request.user_query,
-            " ".join(str(item) for item in request.constraints.values()),
-        ]
+    query_text = _join_request_context_text(
+        request.goal,
+        request.user_query,
+        request.constraints,
     )
     documented_scripts = {
         item.replace("\\", "/").strip()
@@ -1420,21 +1689,27 @@ def _build_preferred_shipped_script_plan(
         for item in load_script_previews(loaded_skill, query_text=query_text, limit=8)
         if isinstance(item, dict) and item.get("path")
     }
+    financial_request_kind = (
+        _infer_financial_research_request_kind(
+            goal=request.goal,
+            user_query=request.user_query,
+            constraints=request.constraints,
+        )
+        if loaded_skill.skill.name.strip().lower() == "financial-researching"
+        else None
+    )
     candidates: list[dict[str, Any]] = []
     for index, relative_path in enumerate(iter_runnable_scripts(loaded_skill)):
         if documented_scripts and relative_path not in documented_scripts:
             continue
-        normalized_entrypoint = relative_path.replace("\\", "/").lower()
-        query_lower = query_text.casefold()
-        if (
-            loaded_skill.skill.name.strip().lower() == "financial-researching"
-            and normalized_entrypoint.endswith("scripts/analyze_stock_trend.py")
-            and re.search(
-                r"(backtest|回测|panel|regression|回归|factor|因子|建模|model)",
-                query_lower,
-                re.IGNORECASE,
+        skip_candidate = False
+        intent_bonus = 0
+        if loaded_skill.skill.name.strip().lower() == "financial-researching":
+            skip_candidate, intent_bonus = _score_financial_research_candidate(
+                relative_path=relative_path,
+                request_kind=financial_request_kind,
             )
-        ):
+        if skip_candidate:
             continue
         script_path = (loaded_skill.skill.path / relative_path).resolve()
         cli_args, missing_fields, inferred_flag_count = infer_script_cli_args(
@@ -1446,7 +1721,7 @@ def _build_preferred_shipped_script_plan(
         if missing_fields:
             continue
         preview_score = previews_by_path.get(relative_path, 0)
-        relevance_score = _score_relevance(relative_path, query_text) + preview_score
+        relevance_score = _score_relevance(relative_path, query_text) + preview_score + intent_bonus
         if inferred_flag_count <= 0 and relevance_score <= 0:
             continue
         candidates.append(

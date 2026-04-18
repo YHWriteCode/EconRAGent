@@ -55,4 +55,4 @@ def shell_join(argv: list[str]) -> str:
 def build_shell_exec_argv(shell_command: str) -> list[str]:
     if os.name == "nt":
         return ["powershell.exe", "-NoProfile", "-Command", shell_command]
-    return ["/bin/sh", "-lc", shell_command]
+    return ["/bin/sh", "-c", shell_command]

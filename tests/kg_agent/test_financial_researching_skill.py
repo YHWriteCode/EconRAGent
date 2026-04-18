@@ -204,3 +204,56 @@ def test_analyze_stock_trend_supports_us_ticker_via_yfinance(monkeypatch):
 
     assert module._yfinance_symbol_for_code("tsla") == "TSLA"
     assert set(result["code"].astype(str)) == {"TSLA"}
+
+
+def test_fetch_market_data_falls_back_to_yfinance_for_a_share_network_failures(monkeypatch):
+    module = _load_financial_skill_script(
+        monkeypatch,
+        "skills/financial-researching/scripts/fetch_market_data.py",
+    )
+    module.FETCH_RETRIES = 1
+    monkeypatch.setattr(module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    def _stock_hist(*, symbol, **_kwargs):
+        if symbol in {"300750", "600519"}:
+            raise ConnectionError("akshare unavailable")
+        return _akshare_frame(symbol)
+
+    monkeypatch.setattr(module.ak, "stock_zh_a_hist", _stock_hist)
+    yf_module = types.SimpleNamespace(
+        download=lambda symbol, **_kwargs: (
+            _yfinance_frame()
+            if symbol in {"300750.SZ", "600519.SS"}
+            else pd.DataFrame()
+        )
+    )
+    monkeypatch.setitem(sys.modules, "yfinance", yf_module)
+
+    catl = module.fetch_single_stock("300750", "20230103", "20230109", "qfq")
+    maotai = module.fetch_single_stock("600519", "20230103", "20230109", "qfq")
+    result = module.standardize(pd.concat([catl, maotai], ignore_index=True))
+
+    assert not result.empty
+    assert set(result["code"].astype(str)) == {"300750", "600519"}
+    assert float(result[result["code"] == "300750"]["amount"].iloc[0]) == 0.0
+    assert float(result[result["code"] == "600519"]["amount"].iloc[0]) == 0.0
+
+
+def test_fetch_market_data_supports_us_ticker_via_yfinance(monkeypatch):
+    module = _load_financial_skill_script(
+        monkeypatch,
+        "skills/financial-researching/scripts/fetch_market_data.py",
+    )
+    module.FETCH_RETRIES = 1
+    monkeypatch.setattr(module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    yf_module = types.SimpleNamespace(
+        download=lambda symbol, **_kwargs: _yfinance_frame() if symbol == "TSLA" else pd.DataFrame()
+    )
+    monkeypatch.setitem(sys.modules, "yfinance", yf_module)
+
+    result = module.fetch_single_stock("TSLA", "20230103", "20230109", "qfq")
+    standardized = module.standardize(result)
+
+    assert module._yfinance_symbol_for_code("tsla") == "TSLA"
+    assert set(standardized["code"].astype(str)) == {"TSLA"}
