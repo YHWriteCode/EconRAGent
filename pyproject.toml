@@ -169,7 +169,7 @@ Repository = "https://github.com/YHWriteCode/EconRAGent"
 "Bug Tracker" = "https://github.com/YHWriteCode/EconRAGent/issues"
 
 [tool.setuptools.packages.find]
-include = ["lightrag_fork*", "kg_agent*"]
+include = ["lightrag_fork*", "kg_agent*", "mcp_server_runtime*"]
 exclude = ["data*", "tests*", "scripts*", "examples*", "dickens*", "reproduce*", "output_complete*", "rag_storage*", "inputs*"]
 
 [tool.setuptools]

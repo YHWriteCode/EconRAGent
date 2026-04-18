@@ -225,6 +225,39 @@ async def test_skill_command_planner_llm_constraint_inference_handles_fuzzy_date
 
 
 @pytest.mark.asyncio
+async def test_skill_command_planner_can_infer_tsla_trend_command_from_route_constraints(
+    monkeypatch,
+):
+    monkeypatch.setattr(command_planner_module, "_current_date", _FixedDate.today)
+    loaded_skill = _load_repo_skill("financial-researching")
+    planner = SkillCommandPlanner()
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="financial-researching",
+            goal="Use skill 'financial-researching' to fulfill the user request: 帮我查一下最近1个月，Tesla股价波动情况",
+            user_query="帮我查一下最近1个月，Tesla股价波动情况",
+            constraints={
+                "timeframe": "最近1个月 (past month)",
+                "target": "Tesla (TSLA) stock price",
+                "analysis_type": "波动情况 (volatility/fluctuation analysis)",
+            },
+        ),
+    )
+
+    assert plan.mode == "inferred"
+    assert plan.entrypoint == "scripts/analyze_stock_trend.py"
+    assert plan.shell_mode == "conservative"
+    assert "--code" in plan.cli_args
+    assert "TSLA" in plan.cli_args
+    assert "--start" in plan.cli_args
+    assert "20260315" in plan.cli_args
+    assert "--end" in plan.cli_args
+    assert "20260415" in plan.cli_args
+
+
+@pytest.mark.asyncio
 async def test_skill_command_planner_returns_manual_required_for_ambiguous_target():
     loaded_skill = _load_repo_skill("example-skill")
     planner = SkillCommandPlanner()

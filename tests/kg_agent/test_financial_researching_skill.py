@@ -185,3 +185,22 @@ def test_analyze_stock_trend_reports_uptrend(monkeypatch):
     assert result["trend"]["is_uptrend"] is True
     assert result["trend"]["label"] == "uptrend"
     assert "存在上涨趋势" in summary
+
+
+def test_analyze_stock_trend_supports_us_ticker_via_yfinance(monkeypatch):
+    module = _load_financial_skill_script(
+        monkeypatch,
+        "skills/financial-researching/scripts/analyze_stock_trend.py",
+    )
+    module.FETCH_RETRIES = 1
+    monkeypatch.setattr(module.time, "sleep", lambda *_args, **_kwargs: None)
+
+    yf_module = types.SimpleNamespace(
+        download=lambda symbol, **_kwargs: _yfinance_frame() if symbol == "TSLA" else pd.DataFrame()
+    )
+    monkeypatch.setitem(sys.modules, "yfinance", yf_module)
+
+    result = module.fetch_stock_data("TSLA", "20230103", "20230109")
+
+    assert module._yfinance_symbol_for_code("tsla") == "TSLA"
+    assert set(result["code"].astype(str)) == {"TSLA"}

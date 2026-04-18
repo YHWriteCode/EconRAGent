@@ -80,6 +80,12 @@ UPPERCASE_SYMBOL_STOPWORDS = {
     "XML",
     "YAML",
 }
+COMPANY_TICKER_ALIASES = {
+    "tesla": "TSLA",
+    "tesla motors": "TSLA",
+    "特斯拉": "TSLA",
+    "特斯拉汽车": "TSLA",
+}
 CODE_LIKE_FLAG_NAMES = {
     "code",
     "codes",
@@ -323,6 +329,23 @@ def _normalize_code_like_value(value: Any) -> str | None:
     return None
 
 
+def _extract_code_like_value(value: Any) -> str | None:
+    normalized = _normalize_code_like_value(value)
+    if normalized is not None:
+        return normalized
+    text = str(value or "").strip()
+    if not text:
+        return None
+    lowered = text.casefold()
+    for alias, ticker in COMPANY_TICKER_ALIASES.items():
+        if alias.casefold() in lowered:
+            return ticker
+    candidates = extract_symbol_candidates(text)
+    if candidates:
+        return candidates[0]
+    return None
+
+
 def _normalize_multi_code_like_value(value: Any) -> str | None:
     if isinstance(value, list):
         parts = [str(item).strip() for item in value if str(item).strip()]
@@ -331,7 +354,7 @@ def _normalize_multi_code_like_value(value: Any) -> str | None:
     normalized_parts: list[str] = []
     seen: set[str] = set()
     for part in parts:
-        normalized = _normalize_code_like_value(part)
+        normalized = _extract_code_like_value(part)
         if normalized is None or normalized in seen:
             continue
         normalized_parts.append(normalized)
@@ -377,7 +400,7 @@ def _sanitize_inferred_constraint_value(key: str, value: Any) -> Any:
         candidate = str(value or "").strip()
         return candidate if re.fullmatch(r"20\d{6}", candidate) else None
     if normalized_key in {"code", "target", "target_code", "ticker", "symbol"}:
-        return _normalize_code_like_value(value)
+        return _extract_code_like_value(value)
     if normalized_key in {"codes", "symbols", "tickers"}:
         return _normalize_multi_code_like_value(value)
     if normalized_key in BOOL_LIKE_CONSTRAINT_NAMES:
@@ -1012,6 +1035,8 @@ def script_expects_numeric_codes(script_path: Path) -> bool:
     except Exception:
         return False
     lowered = raw.lower()
+    if "alphabetic_ticker_supported = true" in lowered:
+        return False
     return any(
         marker in lowered
         for marker in (
@@ -1143,6 +1168,14 @@ def infer_required_flag_value(
         candidate_keys.extend(["trend_end", "trend_end_date", "window_end"])
     for key in candidate_keys:
         value = constraints.get(key)
+        if normalized in CODE_LIKE_FLAG_NAMES:
+            extracted_code = _extract_code_like_value(value)
+            if extracted_code:
+                return extracted_code
+        if normalized in {"codes", "symbols", "tickers"}:
+            extracted_codes = _normalize_multi_code_like_value(value)
+            if extracted_codes:
+                return extracted_codes
         if isinstance(value, str) and value.strip():
             return value.strip()
         if isinstance(value, list) and value:
@@ -1390,6 +1423,18 @@ def _build_preferred_shipped_script_plan(
     candidates: list[dict[str, Any]] = []
     for index, relative_path in enumerate(iter_runnable_scripts(loaded_skill)):
         if documented_scripts and relative_path not in documented_scripts:
+            continue
+        normalized_entrypoint = relative_path.replace("\\", "/").lower()
+        query_lower = query_text.casefold()
+        if (
+            loaded_skill.skill.name.strip().lower() == "financial-researching"
+            and normalized_entrypoint.endswith("scripts/analyze_stock_trend.py")
+            and re.search(
+                r"(backtest|回测|panel|regression|回归|factor|因子|建模|model)",
+                query_lower,
+                re.IGNORECASE,
+            )
+        ):
             continue
         script_path = (loaded_skill.skill.path / relative_path).resolve()
         cli_args, missing_fields, inferred_flag_count = infer_script_cli_args(

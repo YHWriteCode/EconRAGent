@@ -27,6 +27,7 @@ RUN groupadd --gid 10001 appuser \
     && chown -R appuser:appuser /app /workspace
 
 COPY mcp-server/server.py /app/server.py
+COPY mcp_server_runtime /app/mcp_server_runtime
 COPY kg_agent /app/kg_agent
 COPY skills /app/skills
 

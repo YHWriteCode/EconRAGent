@@ -1,0 +1,31 @@
+{
+  "skill_name": "example-skill",
+  "goal": "Persist runtime state durably",
+  "user_query": "make state survive cache clears",
+  "constraints": {},
+  "skill": {
+    "name": "example-skill",
+    "description": "Generate a small markdown report inside an isolated workspace using a read-only template and optional notes.",
+    "tags": [
+      "reporting",
+      "example"
+    ],
+    "path": "D:\\AllForLearning\\lightrag\\skills\\example-skill"
+  },
+  "shell_hints": {
+    "execution_mode": "shell",
+    "example_commands": [],
+    "auto_generated_commands": [
+      "python scripts/run_report.py"
+    ],
+    "runnable_scripts": [
+      "scripts/run_report.py"
+    ],
+    "documented_scripts": [
+      "scripts/run_report.py"
+    ],
+    "python_example_count": 0,
+    "required_credentials": [],
+    "notes": "Provide constraints.shell_command / constraints.command for an explicit shell task, or provide structured CLI args in constraints.args / constraints.cli_args when the skill has a single runnable entrypoint. Set constraints.shell_mode='free_shell' to enable LLM-driven shell planning, optional generated scripts, and optional bootstrap_commands before the main command."
+  }
+}

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -32,6 +33,7 @@ except ImportError:
 FETCH_RETRIES = 3
 FETCH_RETRY_BASE_DELAY_S = 1.0
 YFINANCE_TIMEOUT_S = 20
+ALPHABETIC_TICKER_SUPPORTED = True
 COLUMN_MAP = {
     "日期": "date",
     "开盘": "open",
@@ -46,7 +48,18 @@ COLUMN_MAP = {
 
 
 def _normalize_code(code: str) -> str:
-    return str(code).strip().zfill(6)
+    normalized = str(code).strip()
+    if not normalized:
+        raise ValueError("股票代码不能为空")
+    if re.fullmatch(r"\d{1,6}", normalized):
+        return normalized.zfill(6)
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9.-]{0,9}", normalized):
+        return normalized.upper()
+    raise ValueError(f"不支持的股票代码格式: {normalized}")
+
+
+def _is_numeric_code(code: str) -> bool:
+    return bool(re.fullmatch(r"\d{6}", _normalize_code(code)))
 
 
 def _normalize_akshare_frame(df: pd.DataFrame, code: str) -> pd.DataFrame:
@@ -57,6 +70,8 @@ def _normalize_akshare_frame(df: pd.DataFrame, code: str) -> pd.DataFrame:
 
 def _yfinance_symbol_for_code(code: str) -> str:
     normalized = _normalize_code(code)
+    if not _is_numeric_code(normalized):
+        return normalized
     if normalized.startswith(("4", "8")):
         return f"{normalized}.BJ"
     if normalized.startswith(("5", "6", "9")):
@@ -115,8 +130,11 @@ def _normalize_yfinance_frame(df: pd.DataFrame, code: str) -> pd.DataFrame:
 
 
 def _fetch_from_akshare(code: str, start: str, end: str, adjust: str) -> pd.DataFrame:
+    normalized_code = _normalize_code(code)
+    if not _is_numeric_code(normalized_code):
+        raise ValueError(f"akshare 仅支持 A 股 6 位代码，当前标的为 {normalized_code}")
     return ak.stock_zh_a_hist(
-        symbol=_normalize_code(code),
+        symbol=normalized_code,
         period="daily",
         start_date=start,
         end_date=end,
@@ -181,7 +199,7 @@ def standardize_stock_frame(df: pd.DataFrame) -> pd.DataFrame:
     normalized = df.copy()
     normalized["date"] = pd.to_datetime(normalized["date"], errors="coerce")
     normalized = normalized.dropna(subset=["date"]).copy()
-    normalized["code"] = normalized["code"].astype(str).str.zfill(6)
+    normalized["code"] = normalized["code"].astype(str).map(_normalize_code)
     for column in ("open", "high", "low", "close", "volume", "amount"):
         if column in normalized.columns:
             normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
@@ -264,7 +282,7 @@ def analyze_stock(
     trend_label = "uptrend" if is_uptrend else "not_uptrend"
 
     return {
-        "code": str(market_df["code"].iloc[0]).zfill(6),
+        "code": _normalize_code(str(market_df["code"].iloc[0])),
         "overall_window": {
             "start": overall_start.isoformat(),
             "end": overall_end.isoformat(),
@@ -308,7 +326,12 @@ def build_summary(result: dict[str, object]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="分析单只股票的波动率和趋势")
-    parser.add_argument("--code", type=str, required=True, help="6 位股票代码，如 002594")
+    parser.add_argument(
+        "--code",
+        type=str,
+        required=True,
+        help="股票代码或 ticker，如 002594 / TSLA",
+    )
     parser.add_argument("--start", type=str, required=True, help="开始日期，格式 YYYYMMDD")
     parser.add_argument("--end", type=str, required=True, help="结束日期，格式 YYYYMMDD")
     parser.add_argument(
