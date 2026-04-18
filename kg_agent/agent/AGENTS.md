@@ -61,6 +61,15 @@ The normal flow is:
 6. Optionally trigger path explanation and dynamic-graph refresh behavior.
 7. Build the final answer prompt and persist compact memory records.
 
+When a runtime-backed skill initially returns `run_status=running`, `AgentCore` now performs a short bounded polling loop through the skill runtime status/logs/artifacts APIs before final answer generation. This is meant to collapse fast durable runs into a terminal result for normal `chat()` flows without turning the agent path into an unbounded job waiter.
+
+Two additional routing expectations now matter:
+
+- Questions about the agent's own available tools, skills, or capabilities should route to a no-tool metadata answer path rather than KG retrieval, because the capability catalog and skill catalog are already available in planner/final-answer context.
+- Financial market questions such as current stock price, recent行情, volatility, or trend analysis should prefer a matching finance skill when one is present, instead of defaulting to `kg_hybrid_search`.
+
+The final-answer stage now also receives the capability catalog and skill catalog, not only tool results. That allows direct answers for metadata questions even when no tool is called.
+
 Planner surfaces are intentionally split:
 
 - `ToolRegistry` is the execution registry for native built-in tools.
@@ -82,6 +91,10 @@ Keep those layers distinct. A local skill is not a planner-visible MCP tool, and
 - Do not expose `RouteJudge` or `PathExplainer` as standalone chat endpoints.
 - Keep framework-reserved tool kwargs under framework control; tool-generated args must not override values such as `query`, `rag`, `session_id`, `user_id`, `session_context`, `user_profile`, `domain_schema`, or `memory_store`.
 - Keep prompt ownership centralized in `prompts.py`; do not scatter prompt templates across unrelated modules.
+- Keep skill terminal-result waiting bounded and config-driven. Do not replace the short polling path with indefinite blocking waits inside normal chat flows.
+- Preserve the distinction between user-domain questions and agent-metadata questions. If the agent already has the relevant capability/skill metadata in context, do not route those questions through KG retrieval just to restate the local catalog.
+- Preserve the finance-skill preference for stock/quote/volatility/trend queries when a matching finance skill exists. Do not let the generic factual-QA fallback silently outrank a concrete market-analysis skill.
+- Keep the final-answer prompt aligned with the routing surface: if route planning sees capability and skill catalogs, final-answer generation should also receive them when they are needed to answer the user directly.
 - When adding LLM-assisted normalization for skills, keep it schema-bounded and prompt-driven; do not let planner prompts devolve into free-form command generation outside the skill runtime boundary.
 - Keep native capability exposure lightweight and metadata-driven. Domain-specific external systems should usually be surfaced through MCP rather than hardcoded into the native registry.
 - Keep path explanation optional and fallback-safe. Plain answers must still work when graph paths or evidence are weak.
@@ -94,3 +107,5 @@ Keep those layers distinct. A local skill is not a planner-visible MCP tool, and
 - Path explanation already consumes schema-provided explanation profiles, relation semantics, guardrails, and scenario overrides, but only the built-in `general` and `economy` profiles exist today.
 - Path explanation still uses lightweight lexical and semantic-token scoring; embedding-based reranking is not integrated yet.
 - Utility-model fallback is supported for routing and explanation work, but richer planner-specialized model strategies are still out of scope for this layer.
+- Explicit skill invocation APIs may still return an immediate run record for client-managed follow-up; the bounded terminal wait is mainly part of the planner/chat orchestration path.
+- Routing still mixes explicit rules with optional LLM refinement. New domain categories may still need additional rule coverage when a generic KG fallback remains too attractive.

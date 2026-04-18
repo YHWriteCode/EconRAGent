@@ -463,11 +463,78 @@ def _build_script_shell_command(
     return shell_join(argv)
 
 
+def _rewrite_runtime_workspace_path_text(
+    *,
+    value: str | None,
+    runtime_target: SkillRuntimeTarget | None,
+    workspace_dir: Path | None,
+) -> str | None:
+    if value is None or workspace_dir is None or runtime_target is None:
+        return value
+    rewritten = str(value)
+    raw_workspace_root = str(runtime_target.workspace_root or "").strip()
+    if not raw_workspace_root:
+        return rewritten
+
+    workspace_text = str(workspace_dir)
+    workspace_posix = workspace_text.replace("\\", "/")
+    replacement_pairs: list[tuple[str, str]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+
+    def _add_replacement(candidate: str, replacement: str) -> None:
+        normalized_candidate = str(candidate or "")
+        normalized_replacement = str(replacement or "")
+        if not normalized_candidate:
+            return
+        pair = (normalized_candidate, normalized_replacement)
+        if pair in seen_pairs:
+            return
+        replacement_pairs.append(pair)
+        seen_pairs.add(pair)
+
+    for candidate_root in [raw_workspace_root, raw_workspace_root.replace("\\", "/")]:
+        normalized_root = str(candidate_root or "").rstrip("/\\")
+        if not normalized_root:
+            continue
+        if "/" in candidate_root and "\\" not in candidate_root:
+            _add_replacement(normalized_root + "/", workspace_posix + "/")
+            _add_replacement(normalized_root, workspace_posix)
+        else:
+            _add_replacement(normalized_root + "\\", workspace_text + "\\")
+            _add_replacement(normalized_root, workspace_text)
+
+    for candidate, replacement in sorted(
+        replacement_pairs,
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        rewritten = rewritten.replace(candidate, replacement)
+    return rewritten
+
+
+def _rewrite_cli_args_for_workspace(
+    *,
+    cli_args: list[str] | None,
+    runtime_target: SkillRuntimeTarget | None,
+    workspace_dir: Path | None,
+) -> list[str]:
+    rewritten_args: list[str] = []
+    for item in cli_args or []:
+        rewritten = _rewrite_runtime_workspace_path_text(
+            value=str(item),
+            runtime_target=runtime_target,
+            workspace_dir=workspace_dir,
+        )
+        rewritten_args.append(str(rewritten if rewritten is not None else item))
+    return rewritten_args
+
+
 def _build_workspace_script_shell_command(
     *,
     workspace_dir: Path,
     relative_script: str,
     cli_args: list[str] | None = None,
+    runtime_target: SkillRuntimeTarget | None = None,
 ) -> str:
     script_path = (workspace_dir / relative_script).resolve()
     suffix = script_path.suffix.lower()
@@ -485,7 +552,13 @@ def _build_workspace_script_shell_command(
         argv.extend(["-File", str(script_path)])
     else:
         argv = [str(script_path)]
-    argv.extend(str(item) for item in (cli_args or []))
+    argv.extend(
+        _rewrite_cli_args_for_workspace(
+            cli_args=cli_args,
+            runtime_target=runtime_target,
+            workspace_dir=workspace_dir,
+        )
+    )
     return shell_join(argv)
 
 
@@ -494,6 +567,7 @@ def _rewrite_command_for_workspace(
     command: str | None,
     loaded_skill: LoadedSkill,
     workspace_dir: Path | None,
+    runtime_target: SkillRuntimeTarget | None = None,
 ) -> str | None:
     if command is None or workspace_dir is None:
         return command
@@ -509,7 +583,11 @@ def _rewrite_command_for_workspace(
         if candidate:
             rewritten = rewritten.replace(candidate, workspace_text)
             rewritten = rewritten.replace(candidate.replace("\\", "/"), workspace_posix)
-    return rewritten
+    return _rewrite_runtime_workspace_path_text(
+        value=rewritten,
+        runtime_target=runtime_target,
+        workspace_dir=workspace_dir,
+    )
 
 
 def _build_run_env(

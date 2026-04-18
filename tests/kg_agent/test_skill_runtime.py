@@ -106,6 +106,60 @@ class _FallbackArtifactsAdapter:
         return self.server_config
 
 
+class _DockerWorkspaceAdapter:
+    def __init__(self, runs_root: Path):
+        self.runs_root = runs_root.resolve()
+        self.server_config = MCPServerConfig(
+            name="skill-runtime",
+            command="docker",
+            args=[
+                "run",
+                "--rm",
+                "-i",
+                "-v",
+                f"{self.runs_root.as_posix()}:/workspace/runs",
+                "fake-image",
+                "python",
+                "/app/server.py",
+            ],
+        )
+
+    async def invoke_remote_tool(self, *, server_name: str, remote_name: str, arguments: dict):
+        if remote_name != "run_skill_task":
+            raise AssertionError(f"Unexpected remote tool: {remote_name}")
+        return ToolResult(
+            tool_name=remote_name,
+            success=True,
+            data={
+                "structured_content": {
+                    "summary": "run enqueued",
+                    "run_id": "skill-run-host-path",
+                    "skill_name": arguments["skill_name"],
+                    "run_status": "running",
+                    "status": "running",
+                    "success": True,
+                    "shell_mode": "conservative",
+                    "runtime_target": {
+                        "platform": "linux",
+                        "shell": "/bin/sh",
+                        "workspace_root": "/workspace",
+                        "workdir": "/workspace",
+                        "network_allowed": False,
+                        "supports_python": True,
+                    },
+                    "workspace": "/workspace/runs/run-42",
+                    "runtime": {"delivery": "durable_worker", "queue_state": "queued"},
+                    "command_plan": arguments["command_plan"],
+                    "logs_preview": {"stdout": "", "stderr": ""},
+                    "artifacts": [],
+                }
+            },
+        )
+
+    def get_server_config(self, server_name: str):
+        return self.server_config
+
+
 @pytest.mark.asyncio
 async def test_agent_core_can_execute_skill_plan_via_mcp_runtime_transport():
     fixture_path = (
@@ -169,8 +223,8 @@ async def test_agent_core_can_execute_skill_plan_via_mcp_runtime_transport():
     assert response.tool_calls[0]["tool"] == "skill:example-skill"
     assert response.tool_calls[0]["metadata"]["executor"] == "skill"
     assert response.tool_calls[0]["data"]["execution_mode"] == "shell"
-    assert response.tool_calls[0]["data"]["run_status"] == "running"
-    assert response.tool_calls[0]["data"]["status"] == "running"
+    assert response.tool_calls[0]["data"]["run_status"] == "completed"
+    assert response.tool_calls[0]["data"]["status"] == "completed"
     assert response.tool_calls[0]["data"]["shell_mode"] == "conservative"
     assert response.tool_calls[0]["data"]["runtime_target"]["platform"] == "linux"
     assert response.tool_calls[0]["data"]["preflight"]["ok"] is True
@@ -188,8 +242,10 @@ async def test_agent_core_can_execute_skill_plan_via_mcp_runtime_transport():
         "python scripts/run_report.py --topic 'example' --notes 'runtime test'"
     )
     assert response.tool_calls[0]["data"]["command_plan"]["mode"] == "explicit"
-    assert response.tool_calls[0]["data"]["artifacts"] == []
-    assert response.tool_calls[0]["data"]["logs_preview"]["stdout"] == ""
+    assert response.tool_calls[0]["data"]["artifacts"] == [
+        {"path": "report.md", "size_bytes": 128}
+    ]
+    assert response.tool_calls[0]["data"]["logs_preview"]["stdout"] == "report generated"
     assert response.tool_calls[0]["data"]["runtime_result"]["echo"]["skill_name"] == (
         "example-skill"
     )
@@ -319,3 +375,68 @@ async def test_runtime_client_falls_back_to_host_workspace_for_artifacts_on_tran
     assert artifacts["runtime"]["artifacts_host_fallback"] is True
     assert artifacts["runtime"]["container_workspace"] == "/workspace/runs/run-42"
     assert artifacts["artifacts"] == [{"path": "output/report.json", "size_bytes": 11}]
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_maps_docker_workspace_to_host_path_in_run_payload(
+    tmp_path: Path,
+):
+    runs_root = (tmp_path / "mounted-workspace" / "runs").resolve()
+    runs_root.mkdir(parents=True, exist_ok=True)
+    client = MCPBasedSkillRuntimeClient(
+        adapter=_DockerWorkspaceAdapter(runs_root),
+        config=SkillRuntimeConfig(server="skill-runtime"),
+    )
+
+    request = type(
+        "_Req",
+        (),
+        {
+            "skill_name": "example-skill",
+            "goal": "Run example skill",
+            "user_query": "run example skill",
+            "workspace": None,
+            "constraints": {},
+        },
+    )()
+    loaded_skill = type(
+        "_Loaded",
+        (),
+        {"skill": type("_Skill", (), {"path": Path("skills/example-skill").resolve()})()},
+    )()
+    command_plan = type(
+        "_Plan",
+        (),
+        {
+            "to_dict": lambda self: {
+                "skill_name": "example-skill",
+                "goal": "Run example skill",
+                "user_query": "run example skill",
+                "runtime_target": {
+                    "platform": "linux",
+                    "shell": "/bin/sh",
+                    "workspace_root": "/workspace",
+                    "workdir": "/workspace",
+                    "network_allowed": False,
+                    "supports_python": True,
+                },
+                "constraints": {},
+                "command": "python scripts/run_report.py",
+                "mode": "explicit",
+                "shell_mode": "conservative",
+                "generated_files": [],
+                "missing_fields": [],
+                "failure_reason": None,
+                "hints": {},
+            }
+        },
+    )()
+
+    run_record = await client.run_skill_task(
+        request=request,
+        loaded_skill=loaded_skill,
+        command_plan=command_plan,
+    )
+
+    assert run_record.workspace == str((runs_root / "run-42").resolve())
+    assert run_record.runtime["container_workspace"] == "/workspace/runs/run-42"

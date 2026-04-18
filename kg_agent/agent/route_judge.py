@@ -178,6 +178,51 @@ FREE_SHELL_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+AGENT_METADATA_PATTERN = re.compile(
+    r"("
+    r"\u54ea\u4e9b(?:\u5de5\u5177|\u6280\u80fd|\u80fd\u529b)|"
+    r"\u6709\u54ea\u4e9b(?:\u5de5\u5177|\u6280\u80fd|\u80fd\u529b)|"
+    r"\u5177\u5907\u54ea\u4e9b(?:\u5de5\u5177|\u6280\u80fd|\u80fd\u529b)|"
+    r"\u5217\u51fa(?:\u5de5\u5177|\u6280\u80fd|\u80fd\u529b)|"
+    r"\u4f1a\u4ec0\u4e48|"
+    r"\u80fd\u505a\u4ec0\u4e48|"
+    r"what\s+(?:tools?|skills?|capabilities)\s+do\s+you\s+have|"
+    r"which\s+(?:tools?|skills?|capabilities)\s+do\s+you\s+have|"
+    r"list\s+(?:your\s+)?(?:tools?|skills?|capabilities)|"
+    r"show\s+(?:your\s+)?(?:tools?|skills?|capabilities)|"
+    r"available\s+(?:tools?|skills?|capabilities)|"
+    r"what\s+can\s+you\s+do|"
+    r"your\s+(?:tools?|skills?|capabilities)"
+    r")",
+    re.IGNORECASE,
+)
+FINANCIAL_MARKET_QUERY_PATTERN = re.compile(
+    r"("
+    r"\u80a1\u7968|"
+    r"\u80a1\u4ef7|"
+    r"\u884c\u60c5|"
+    r"\u6ce2\u52a8|"
+    r"\u8d8b\u52bf|"
+    r"\u6da8\u8dcc|"
+    r"\u6da8\u5e45|"
+    r"\u8dcc\u5e45|"
+    r"\u5f00\u76d8\u4ef7|"
+    r"\u6536\u76d8\u4ef7|"
+    r"\u6700\u9ad8\u4ef7|"
+    r"\u6700\u4f4e\u4ef7|"
+    r"k\u7ebf|"
+    r"stock|"
+    r"share\s+price|"
+    r"stock\s+price|"
+    r"quote|"
+    r"ohlc|"
+    r"candlestick|"
+    r"volatility|"
+    r"trend|"
+    r"price\s+movement"
+    r")",
+    re.IGNORECASE,
+)
 GENERATED_SCRIPT_PATTERN = re.compile(
     r"("
     r"\u5148\u5199\u811a\u672c\u518d\u6267\u884c|"
@@ -346,6 +391,7 @@ class RouteJudge:
         )
 
         is_simple = bool(SIMPLE_PATTERN.search(normalized_query))
+        is_agent_metadata_query = bool(AGENT_METADATA_PATTERN.search(normalized_query))
         is_followup = bool(FOLLOWUP_PATTERN.search(normalized_query)) and (
             has_history or has_cross_session_tool
         )
@@ -367,6 +413,21 @@ class RouteJudge:
         need_path_explanation = False
         strategy = "simple_answer_no_tool"
         reason = "The query can be handled without external tools."
+
+        if is_agent_metadata_query:
+            return RouteDecision(
+                need_tools=False,
+                need_memory=False,
+                need_web_search=False,
+                need_path_explanation=False,
+                strategy="agent_metadata_answer",
+                tool_sequence=[],
+                reason=(
+                    "The user is asking about the agent's available tools or skills, "
+                    "which are already present in the planner context."
+                ),
+                max_iterations=1,
+            )
 
         if is_simple and not any(
             [
@@ -941,6 +1002,20 @@ class RouteJudge:
     ) -> dict[str, Any] | None:
         if not skill_catalog:
             return None
+        if cls._is_financial_market_query(query):
+            finance_candidates = [
+                skill for skill in skill_catalog if cls._is_finance_skill(skill)
+            ]
+            if finance_candidates:
+                ranked_finance = sorted(
+                    (
+                        (cls._score_search_match(query=query, item=skill), skill)
+                        for skill in finance_candidates
+                    ),
+                    key=lambda item: (item[0], item[1]["name"]),
+                    reverse=True,
+                )
+                return ranked_finance[0][1]
         ranked = sorted(
             (
                 (cls._score_search_match(query=query, item=skill), skill)
@@ -1085,9 +1160,40 @@ class RouteJudge:
         skill_name = str(matched_skill.get("name", "")).strip().lower()
         if skill_name and skill_name in query_lower:
             return True
+        if (
+            RouteJudge._is_financial_market_query(query)
+            and RouteJudge._is_finance_skill(matched_skill)
+        ):
+            return True
         if requests_skill_workflow or needs_specialized_external_capability:
             return True
         return RouteJudge._score_search_match(query=query, item=matched_skill) >= 6
+
+    @staticmethod
+    def _is_financial_market_query(query: str) -> bool:
+        return bool(FINANCIAL_MARKET_QUERY_PATTERN.search(query or ""))
+
+    @staticmethod
+    def _is_finance_skill(skill: dict[str, Any]) -> bool:
+        search_text = RouteJudge._build_search_text(skill)
+        if not search_text:
+            return False
+        return any(
+            token in search_text
+            for token in (
+                "finance",
+                "financial",
+                "quant",
+                "股票",
+                "股价",
+                "行情",
+                "波动",
+                "趋势",
+                "金融",
+                "回测",
+                "market data",
+            )
+        )
 
     @staticmethod
     def _should_route_to_external_capability(

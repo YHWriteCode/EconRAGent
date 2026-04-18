@@ -64,6 +64,8 @@ class _StubSkillExecutor:
         self.calls = []
         self.status_calls = []
         self.cancel_calls = []
+        self.logs_calls = []
+        self.artifact_calls = []
 
     async def execute(self, **kwargs):
         self.calls.append(kwargs)
@@ -104,6 +106,25 @@ class _StubSkillExecutor:
             "failure_reason": "cancelled",
             "cancel_requested": True,
             "command_plan": {"mode": "explicit"},
+        }
+
+    async def get_run_logs(self, *, run_id: str):
+        self.logs_calls.append(run_id)
+        return {
+            "run_id": run_id,
+            "run_status": "completed",
+            "status": "completed",
+            "stdout": "",
+            "stderr": "",
+        }
+
+    async def get_run_artifacts(self, *, run_id: str):
+        self.artifact_calls.append(run_id)
+        return {
+            "run_id": run_id,
+            "run_status": "completed",
+            "status": "completed",
+            "artifacts": [],
         }
 
 
@@ -591,6 +612,168 @@ async def test_agent_core_dispatches_skill_plan_to_skill_executor():
     assert skill_executor.calls[0]["skill_name"] == "example-skill"
     assert skill_executor.calls[0]["goal"] == "Use example-skill to create a report"
     assert skill_executor.calls[0]["workspace"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_core_waits_for_running_skill_to_reach_terminal_status():
+    class _RunningSkillExecutor(_StubSkillExecutor):
+        async def execute(self, **kwargs):
+            self.calls.append(kwargs)
+            return ToolResult(
+                tool_name=f"skill:{kwargs['skill_name']}",
+                success=True,
+                data={
+                    "run_id": "run-99",
+                    "run_status": "running",
+                    "status": "running",
+                    "skill_name": kwargs["skill_name"],
+                    "goal": kwargs["goal"],
+                    "workspace": kwargs.get("workspace"),
+                    "summary": "Skill enqueued",
+                    "command_plan": {"mode": "explicit"},
+                },
+                metadata={"executor": "skill", "skill_name": kwargs["skill_name"]},
+            )
+
+        async def get_run_status(self, *, run_id: str):
+            self.status_calls.append(run_id)
+            return {
+                "run_id": run_id,
+                "run_status": "completed",
+                "status": "completed",
+                "success": True,
+                "summary": "Skill finished",
+                "workspace": "host-run-99",
+                "command_plan": {"mode": "explicit"},
+            }
+
+        async def get_run_logs(self, *, run_id: str):
+            self.logs_calls.append(run_id)
+            return {
+                "run_id": run_id,
+                "run_status": "completed",
+                "status": "completed",
+                "stdout": "report generated",
+                "stderr": "",
+            }
+
+        async def get_run_artifacts(self, *, run_id: str):
+            self.artifact_calls.append(run_id)
+            return {
+                "run_id": run_id,
+                "run_status": "completed",
+                "status": "completed",
+                "workspace": "host-run-99",
+                "artifacts": [{"path": "output/report.md", "size_bytes": 128}],
+            }
+
+    route = RouteDecision(
+        need_tools=False,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="skill_request",
+        tool_sequence=[],
+        reason="skill route",
+        max_iterations=1,
+        skill_plan=SkillPlan(
+            skill_name="example-skill",
+            goal="Use example-skill to create a report",
+            reason="Matched local skill",
+        ),
+    )
+    skill_executor = _RunningSkillExecutor()
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        route_judge=_StubRouteJudge(route=route),
+        skill_executor=skill_executor,
+    )
+
+    response = await agent.chat(
+        query="run a report skill",
+        session_id="skill-terminal-session",
+        use_memory=False,
+        debug=True,
+    )
+
+    assert response.tool_calls[0]["data"]["run_status"] == "completed"
+    assert response.tool_calls[0]["data"]["status"] == "completed"
+    assert response.tool_calls[0]["data"]["workspace"] == "host-run-99"
+    assert response.tool_calls[0]["data"]["artifacts"] == [
+        {"path": "output/report.md", "size_bytes": 128}
+    ]
+    assert response.tool_calls[0]["data"]["logs_preview"]["stdout"] == "report generated"
+    assert skill_executor.status_calls == ["run-99"]
+    assert skill_executor.logs_calls == ["run-99"]
+    assert skill_executor.artifact_calls == ["run-99"]
+
+
+@pytest.mark.asyncio
+async def test_agent_core_can_answer_agent_metadata_from_catalog_without_tools(tmp_path: Path):
+    skill_dir = tmp_path / "skills" / "financial-researching"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: financial-researching\n"
+        "description: Analyze stock trends and financial data.\n"
+        "tags:\n"
+        "  - finance\n"
+        "---\n"
+        "# financial-researching\n",
+        encoding="utf-8",
+    )
+
+    route = RouteDecision(
+        need_tools=False,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="agent_metadata_answer",
+        tool_sequence=[],
+        reason="metadata is already available in context",
+        max_iterations=1,
+    )
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="kg_hybrid_search",
+            description="Hybrid retrieval",
+            input_schema={},
+            handler=_echo_tool,
+        )
+    )
+    skill_registry = SkillRegistry(tmp_path / "skills")
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(
+                default_workspace="",
+                max_iterations=3,
+                skills_dir=str(tmp_path / "skills"),
+            ),
+        ),
+        tool_registry=registry,
+        route_judge=_StubRouteJudge(route=route),
+        skill_registry=skill_registry,
+        skill_loader=SkillLoader(skill_registry),
+    )
+
+    response = await agent.chat(
+        query="你有哪些工具和技能？",
+        session_id="agent-metadata-session",
+        use_memory=False,
+    )
+
+    assert "kg_hybrid_search" in response.answer
+    assert "financial-researching" in response.answer
+    assert response.tool_calls == []
 
 
 @pytest.mark.asyncio

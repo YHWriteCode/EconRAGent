@@ -31,9 +31,9 @@ mcp_server_runtime/
 |-- errors.py      # Shared runtime exception types
 |-- utils.py       # Small shell/time/text helpers
 |-- skills.py      # Skill discovery, SKILL.md parsing, payload construction
-|-- envs.py        # Skill environment hashing, metadata, wheelhouse/venv handling
+|-- envs.py        # Skill environment hashing, metadata, wheelhouse/venv handling, runtime-root path rewriting
 |-- workspace.py   # Workspace mirroring, request files, snapshots, artifacts
-|-- planning.py    # Command planning, runtime target shaping, preflight, repair planning
+|-- planning.py    # Command planning, runtime target shaping, runtime-workspace materialization, preflight, repair planning
 |-- store.py       # SQLite-backed durable run store
 |-- queue.py       # Queue lease handling, worker spawn/reap, stale-run recovery
 |-- execution.py   # Bootstrap, shell execution, durable worker orchestration
@@ -127,6 +127,8 @@ Also preserve these behavioral constraints:
 - durable runs must remain recoverable from SQLite + workspace snapshots
 - queue workers must still be startable by relaunching `mcp-server/server.py`
 - shell execution must remain bounded by timeout, bootstrap, and repair limits
+- explicit shell commands and CLI-arg entrypoints that target the runtime workspace root must be rewritten into the concrete run workspace before execution
+- Docker-facing `/workspace/...` run paths should remain mappable back to host-visible bind-mount paths when the runtime is mounted from the host
 
 ---
 
@@ -138,6 +140,9 @@ Also preserve these behavioral constraints:
 - If a change touches queue/execution timing, verify both:
   - immediate background return behavior
   - later polling via `get_run_status`, `get_run_logs`, and `get_run_artifacts`
+- If a change touches workspace-path handling, verify both:
+  - outputs requested under runtime-root absolute paths end up inside the active run workspace
+  - host-side artifact fallback still works after any workspace-path remapping
 - If a change adds new package files, keep Docker packaging and `pyproject.toml` package discovery updated.
 
 ---
@@ -148,3 +153,4 @@ Also preserve these behavioral constraints:
 - `execution.py` uses injected callbacks so it can stay decoupled from the file-entrypoint facade.
 - `queue.py` owns the in-process worker table, but `server.py` re-exports that state through `QUEUE_WORKER_PROCESSES` for tests and compatibility.
 - `store.py` owns the SQLite schema and in-memory mirror, but `server.py` re-exports `RUN_STORE` and helper functions for compatibility.
+- `envs.py` and `planning.py` cooperatively rewrite runtime-root absolute command paths such as `/workspace/output/...` into the concrete per-run workspace so artifacts land in durable host-visible run directories instead of only inside the container view.

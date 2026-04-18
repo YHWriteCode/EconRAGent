@@ -456,6 +456,7 @@ def _materialize_shell_command(
             command=command_plan.command,
             loaded_skill=loaded_skill,
             workspace_dir=workspace_dir,
+            runtime_target=command_plan.runtime_target,
         )
     if command_plan.mode == "generated_script":
         relative_script = command_plan.entrypoint
@@ -467,6 +468,7 @@ def _materialize_shell_command(
                     workspace_dir=workspace_dir,
                     relative_script=relative_script,
                     cli_args=command_plan.cli_args,
+                    runtime_target=command_plan.runtime_target,
                 )
             return command_plan.command
         if relative_script:
@@ -479,6 +481,7 @@ def _materialize_shell_command(
             command=command_plan.command,
             loaded_skill=loaded_skill,
             workspace_dir=workspace_dir,
+            runtime_target=command_plan.runtime_target,
         )
     if command_plan.entrypoint:
         if workspace_dir is not None:
@@ -486,6 +489,7 @@ def _materialize_shell_command(
                 workspace_dir=workspace_dir,
                 relative_script=command_plan.entrypoint,
                 cli_args=command_plan.cli_args,
+                runtime_target=command_plan.runtime_target,
             )
         return _build_script_shell_command(
             skill_dir=loaded_skill.skill.path,
@@ -496,6 +500,7 @@ def _materialize_shell_command(
         command=command_plan.command,
         loaded_skill=loaded_skill,
         workspace_dir=workspace_dir,
+        runtime_target=command_plan.runtime_target,
     )
 
 

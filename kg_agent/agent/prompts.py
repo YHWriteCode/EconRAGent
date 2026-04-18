@@ -526,11 +526,14 @@ def build_final_answer_prompt(
     tool_results: list[dict[str, Any]],
     path_explanation: dict[str, Any] | None,
     conversation_history: list[dict[str, str]] | None,
+    available_capability_catalog: list[dict[str, Any]] | None = None,
+    available_skills: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
     system_prompt = (
         "You are the final answering module of a knowledge-graph-enhanced agent. "
         "Answer in the same language as the user query. "
         "Use tool results and path explanation when available. "
+        "Use the provided capability and skill catalogs directly when the user asks what the agent can do. "
         "Be explicit about uncertainty when tools failed or evidence is incomplete."
     )
     user_prompt = (
@@ -540,6 +543,10 @@ def build_final_answer_prompt(
         f"{json.dumps(route, ensure_ascii=False, indent=2)}\n\n"
         "Recent conversation history:\n"
         f"{json.dumps(conversation_history or [], ensure_ascii=False, indent=2)}\n\n"
+        "Available capabilities:\n"
+        f"{json.dumps(available_capability_catalog or [], ensure_ascii=False, indent=2)}\n\n"
+        "Available skills:\n"
+        f"{json.dumps(available_skills or [], ensure_ascii=False, indent=2)}\n\n"
         "Tool results:\n"
         f"{json.dumps(tool_results, ensure_ascii=False, indent=2)}\n\n"
         "Path explanation:\n"

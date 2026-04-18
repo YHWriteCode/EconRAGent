@@ -1,5 +1,6 @@
 from kg_agent.agent.prompts import (
     DEFAULT_PATH_EXPLAINER_TEMPLATE_ID,
+    build_final_answer_prompt,
     build_skill_constraint_inference_prompt,
     build_path_explainer_prompt,
     list_path_explainer_prompt_templates,
@@ -89,6 +90,31 @@ def test_build_route_judge_prompt_includes_skills_and_skill_plan_contract():
     assert "Available skills:" in user_prompt
     assert '"skill_plan": {"skill_name": str, "goal": str, "reason": str, "constraints": dict} | null' in user_prompt
     assert "include structured constraints when they are explicit in the user query" in user_prompt
+
+
+def test_build_final_answer_prompt_includes_capability_and_skill_catalogs():
+    system_prompt, user_prompt = build_final_answer_prompt(
+        query="你有哪些工具和技能？",
+        route={"strategy": "agent_metadata_answer"},
+        tool_results=[],
+        path_explanation=None,
+        conversation_history=[],
+        available_capability_catalog=[
+            {"name": "kg_hybrid_search", "description": "Run LightRAG hybrid retrieval."}
+        ],
+        available_skills=[
+            {
+                "name": "financial-researching",
+                "description": "Analyze stock trends and financial data.",
+            }
+        ],
+    )
+
+    assert "capability and skill catalogs" in system_prompt
+    assert "Available capabilities:" in user_prompt
+    assert "kg_hybrid_search" in user_prompt
+    assert "Available skills:" in user_prompt
+    assert "financial-researching" in user_prompt
 
 
 def test_build_skill_constraint_inference_prompt_includes_reference_date_and_allowed_keys():

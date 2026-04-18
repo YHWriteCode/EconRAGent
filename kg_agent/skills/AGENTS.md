@@ -43,6 +43,8 @@ skills/
 3. `SkillCommandPlanner` derives a canonical `SkillCommandPlan`.
 4. `SkillExecutor` passes the plan through the runtime boundary and returns canonical `run_status`.
 
+When the runtime is MCP-backed and Docker-hosted, the runtime client should prefer host-visible workspace paths in returned payloads whenever it can resolve the container bind mount. Container-local paths may still appear inside `runtime.container_workspace` for debugging and fallback logic.
+
 ---
 
 ## 3. Canonical Behavior
@@ -51,6 +53,7 @@ Skills are intentionally separate from both native tools and external MCP capabi
 
 - The planner sees a local skill catalog, not full runtime payloads.
 - The executor boundary hides whether the underlying runtime client is local or MCP-backed.
+- The runtime client is responsible for normalizing host-visible workspace paths and preserving container workspace metadata when both views are needed.
 - `SkillCommandPlan` is the source of truth for runtime target, shell mode, generated files, entrypoint, CLI args, bootstrap commands, and failure reasons.
 - `SkillRunRecord` is the canonical lifecycle record; compatibility `status` fields still exist only for older callers.
 
@@ -72,6 +75,7 @@ This layer is shell-oriented by design:
 - Preserve the distinction between planning and execution. `command_planner.py` decides the command shape; runtime clients execute it.
 - Keep `run_status` as the internal source of truth. Compatibility-facing `status` strings should not drive new logic.
 - Keep generated-script support bounded and transport-aware; avoid pushing large multi-file payloads through public transport surfaces when workspace staging is better.
+- Preserve host-workspace normalization and artifact fallback behavior in `runtime_client.py`; do not regress Docker bind-mount path recovery when reshaping runtime payloads.
 - Keep runtime-target and shell-mode logic explicit in the models rather than inferring them from arbitrary strings at the last minute.
 - When improving shipped scripts, prefer making the script contract more inferable rather than weakening planner safety checks.
 - Treat regex/date heuristics as fallback normalization only; the preferred path for fuzzy-but-low-risk parameter inference is schema-bounded LLM output validated back into typed constraints.
@@ -85,3 +89,4 @@ This layer is shell-oriented by design:
 - Compatibility `status` is still exposed at some boundaries for older clients, but internal logic should treat canonical `run_status` as authoritative.
 - Runtime-backed bootstrap and repair behavior is intentionally bounded. Automatic dependency classification and richer environment recovery remain lower-priority improvements.
 - Relative date parsing still has a deterministic fallback path, but richer business semantics such as fiscal periods, market-specific calendars, or vague anchor phrases still depend on LLM inference quality and validation rules.
+- Host-side artifact fallback depends on Docker bind mounts that expose the runtime workspace back to the host. Named volumes or remote workers still limit what the client can recover directly from the filesystem.

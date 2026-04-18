@@ -60,6 +60,7 @@ class MCPBasedSkillRuntimeClient:
         )
         payload["runtime"] = self._runtime_metadata(remote_name=self.config.run_tool_name)
         payload["runtime_result"] = structured or data
+        payload = self._map_workspace_to_host(payload)
         return SkillRunRecord.from_dict(
             payload,
             default_skill_name=request.skill_name,
@@ -71,21 +72,21 @@ class MCPBasedSkillRuntimeClient:
             remote_name=self.config.status_tool_name,
             arguments={"run_id": run_id},
         )
-        return self._normalize_run_payload(payload)
+        return self._map_workspace_to_host(self._normalize_run_payload(payload))
 
     async def cancel_skill_run(self, *, run_id: str) -> dict[str, Any]:
         payload = await self._invoke_structured_tool(
             remote_name=self.config.cancel_tool_name,
             arguments={"run_id": run_id},
         )
-        return self._normalize_run_payload(payload)
+        return self._map_workspace_to_host(self._normalize_run_payload(payload))
 
     async def get_run_logs(self, *, run_id: str) -> dict[str, Any]:
         payload = await self._invoke_structured_tool(
             remote_name=self.config.logs_tool_name,
             arguments={"run_id": run_id},
         )
-        return self._normalize_run_payload(payload)
+        return self._map_workspace_to_host(self._normalize_run_payload(payload))
 
     async def get_run_artifacts(self, *, run_id: str) -> dict[str, Any]:
         if not self.config.artifacts_tool_name.strip():
@@ -106,7 +107,7 @@ class MCPBasedSkillRuntimeClient:
                 run_id=run_id,
                 fallback_reason=message,
             )
-        return self._normalize_run_payload(payload)
+        return self._map_workspace_to_host(self._normalize_run_payload(payload))
 
     async def _invoke_structured_tool(
         self,
@@ -184,10 +185,20 @@ class MCPBasedSkillRuntimeClient:
         fallback_reason: str,
     ) -> dict[str, Any]:
         status = await self.get_run_status(run_id=run_id)
+        runtime = (
+            dict(status.get("runtime", {}))
+            if isinstance(status.get("runtime"), dict)
+            else {}
+        )
         runtime_workspace = (
-            str(status.get("workspace", "")).strip()
-            if isinstance(status.get("workspace"), str)
-            else ""
+            str(runtime.get("container_workspace", "")).strip()
+            if isinstance(runtime.get("container_workspace"), str)
+            and str(runtime.get("container_workspace"),).strip()
+            else (
+                str(status.get("workspace", "")).strip()
+                if isinstance(status.get("workspace"), str)
+                else ""
+            )
         )
         runtime_target = (
             dict(status.get("runtime_target", {}))
@@ -202,7 +213,6 @@ class MCPBasedSkillRuntimeClient:
             raise RuntimeError(fallback_reason)
 
         artifacts = self._collect_host_workspace_artifacts(host_workspace)
-        runtime = dict(status.get("runtime", {}))
         runtime["artifacts_host_fallback"] = True
         runtime["artifacts_host_fallback_reason"] = fallback_reason
         runtime["container_workspace"] = runtime_workspace
@@ -247,6 +257,36 @@ class MCPBasedSkillRuntimeClient:
                 "artifacts": artifacts,
             }
         )
+
+    def _map_workspace_to_host(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        runtime_workspace = (
+            str(normalized.get("workspace", "")).strip()
+            if isinstance(normalized.get("workspace"), str)
+            else ""
+        )
+        if not runtime_workspace:
+            return normalized
+        runtime_target = (
+            dict(normalized.get("runtime_target", {}))
+            if isinstance(normalized.get("runtime_target"), dict)
+            else {}
+        )
+        host_workspace = self._resolve_host_workspace_path(
+            runtime_workspace=runtime_workspace,
+            runtime_target=runtime_target,
+        )
+        if host_workspace is None:
+            return normalized
+        runtime = (
+            dict(normalized.get("runtime", {}))
+            if isinstance(normalized.get("runtime"), dict)
+            else {}
+        )
+        runtime.setdefault("container_workspace", runtime_workspace)
+        normalized["runtime"] = runtime
+        normalized["workspace"] = str(host_workspace)
+        return normalized
 
     def _resolve_host_workspace_path(
         self,

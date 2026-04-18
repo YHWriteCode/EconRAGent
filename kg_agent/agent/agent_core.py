@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import re
 from dataclasses import asdict, dataclass, field
@@ -132,6 +133,8 @@ class PreparedAgentRun:
     answer_tool_calls: list[dict[str, Any]]
     path_explanation_dict: dict[str, Any] | None
     metadata: dict[str, Any]
+    available_capability_catalog: list[dict[str, Any]] = field(default_factory=list)
+    available_skills: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -142,6 +145,8 @@ class PlannedAgentRun:
     user_profile: dict[str, Any] | None
     route: RouteDecision
     execution_limit: int
+    available_capability_catalog: list[dict[str, Any]] = field(default_factory=list)
+    available_skills: list[dict[str, Any]] = field(default_factory=list)
 
 
 RagProvider = Callable[[str | None], LightRAG | Awaitable[LightRAG]]
@@ -316,6 +321,8 @@ class AgentCore:
             tool_calls=prepared.answer_tool_calls,
             path_explanation=prepared.path_explanation_dict,
             conversation_history=prepared.session_context["history"],
+            available_capability_catalog=prepared.available_capability_catalog,
+            available_skills=prepared.available_skills,
         )
         answer = self._apply_answer_annotations(answer, prepared.metadata)
 
@@ -606,6 +613,8 @@ class AgentCore:
                     tool_calls=prepared.answer_tool_calls,
                     path_explanation=prepared.path_explanation_dict,
                     conversation_history=prepared.session_context["history"],
+                    available_capability_catalog=prepared.available_capability_catalog,
+                    available_skills=prepared.available_skills,
                 ):
                     if not delta:
                         continue
@@ -621,6 +630,8 @@ class AgentCore:
                 prepared.route,
                 prepared.answer_tool_calls,
                 prepared.path_explanation_dict,
+                prepared.available_capability_catalog,
+                prepared.available_skills,
             )
             if not chunks or fallback_answer not in "".join(chunks):
                 chunks.append(fallback_answer)
@@ -782,6 +793,11 @@ class AgentCore:
             user_id=context.user_id,
         )
         user_profile = await self.user_profile_store.get_profile(user_id)
+        available_capability_catalog = self._available_capability_catalog(
+            include_memory=context.use_memory,
+            include_cross_session=bool(context.user_id),
+        )
+        available_skills = self._available_skill_catalog()
         route = await self.route_judge.plan(
             query=context.query,
             session_context=session_context,
@@ -790,11 +806,8 @@ class AgentCore:
                 include_memory=context.use_memory,
                 include_cross_session=bool(context.user_id),
             ),
-            available_capability_catalog=self._available_capability_catalog(
-                include_memory=context.use_memory,
-                include_cross_session=bool(context.user_id),
-            ),
-            available_skills=self._available_skill_catalog(),
+            available_capability_catalog=available_capability_catalog,
+            available_skills=available_skills,
         )
 
         execution_limit = max(
@@ -808,6 +821,8 @@ class AgentCore:
             user_profile=user_profile,
             route=route,
             execution_limit=execution_limit,
+            available_capability_catalog=available_capability_catalog,
+            available_skills=available_skills,
         )
 
     async def _build_session_context(
@@ -902,6 +917,8 @@ class AgentCore:
             answer_tool_calls=answer_tool_calls,
             path_explanation_dict=path_explanation_dict,
             metadata=metadata,
+            available_capability_catalog=planned.available_capability_catalog,
+            available_skills=planned.available_skills,
         )
 
     async def _persist_memory(
@@ -958,6 +975,8 @@ class AgentCore:
         tool_calls: list[dict[str, Any]],
         path_explanation: dict[str, Any] | None,
         conversation_history: list[dict[str, str]],
+        available_capability_catalog: list[dict[str, Any]],
+        available_skills: list[dict[str, Any]],
     ) -> str:
         if self.llm_client.is_available():
             system_prompt, user_prompt = build_final_answer_prompt(
@@ -966,6 +985,8 @@ class AgentCore:
                 tool_results=tool_calls,
                 path_explanation=path_explanation,
                 conversation_history=conversation_history,
+                available_capability_catalog=available_capability_catalog,
+                available_skills=available_skills,
             )
             try:
                 text = await self.llm_client.complete_text(
@@ -978,7 +999,14 @@ class AgentCore:
                     return text.strip()
             except Exception:
                 pass
-        return self._fallback_answer(query, route, tool_calls, path_explanation)
+        return self._fallback_answer(
+            query,
+            route,
+            tool_calls,
+            path_explanation,
+            available_capability_catalog,
+            available_skills,
+        )
 
     async def _build_final_answer_stream(
         self,
@@ -988,6 +1016,8 @@ class AgentCore:
         tool_calls: list[dict[str, Any]],
         path_explanation: dict[str, Any] | None,
         conversation_history: list[dict[str, str]],
+        available_capability_catalog: list[dict[str, Any]],
+        available_skills: list[dict[str, Any]],
     ) -> AsyncIterator[str]:
         system_prompt, user_prompt = build_final_answer_prompt(
             query=query,
@@ -995,6 +1025,8 @@ class AgentCore:
             tool_results=tool_calls,
             path_explanation=path_explanation,
             conversation_history=conversation_history,
+            available_capability_catalog=available_capability_catalog,
+            available_skills=available_skills,
         )
         async for delta in self.llm_client.stream_text(
             system_prompt=system_prompt,
@@ -1210,13 +1242,160 @@ class AgentCore:
         context: AgentRunContext,
         skill_plan,
     ):
-        return await self.skill_executor.execute(
+        result = await self.skill_executor.execute(
             skill_name=skill_plan.skill_name,
             goal=skill_plan.goal,
             user_query=context.query,
             workspace=context.workspace,
             constraints=getattr(skill_plan, "constraints", {}) or {},
         )
+        return await self._maybe_wait_for_skill_terminal_result(result)
+
+    async def _maybe_wait_for_skill_terminal_result(self, result):
+        if not self.config.skill_runtime.wait_for_terminal_result:
+            return result
+        if not isinstance(result.data, dict):
+            return result
+
+        run_id = result.data.get("run_id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            return result
+
+        run_status = result.data.get("run_status") or result.data.get("status")
+        if str(run_status or "").strip().lower() != "running":
+            return result
+
+        timeout_s = max(0.0, self.config.skill_runtime.wait_for_terminal_timeout_s)
+        if timeout_s <= 0:
+            return result
+
+        poll_interval_s = max(
+            0.1,
+            self.config.skill_runtime.wait_for_terminal_poll_interval_s,
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            try:
+                status_payload = await self.skill_executor.get_run_status(run_id=run_id)
+            except Exception:
+                return result
+
+            if self._is_terminal_skill_run_status(
+                status_payload.get("run_status") or status_payload.get("status")
+            ):
+                return await self._merge_terminal_skill_result(
+                    result=result,
+                    run_id=run_id,
+                    status_payload=status_payload,
+                )
+
+            now = loop.time()
+            if now >= deadline:
+                return result
+            await asyncio.sleep(min(poll_interval_s, deadline - now))
+
+    @staticmethod
+    def _is_terminal_skill_run_status(value: Any) -> bool:
+        normalized = str(value or "").strip().lower()
+        return normalized in {
+            "planned",
+            "completed",
+            "failed",
+            "manual_required",
+            "needs_shell_command",
+        }
+
+    async def _merge_terminal_skill_result(
+        self,
+        *,
+        result,
+        run_id: str,
+        status_payload: dict[str, Any],
+    ):
+        merged_data = dict(result.data) if isinstance(result.data, dict) else {}
+        self._merge_skill_result_payload(merged_data, status_payload)
+
+        for fetcher in (
+            self.skill_executor.get_run_logs,
+            self.skill_executor.get_run_artifacts,
+        ):
+            try:
+                payload = await fetcher(run_id=run_id)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                self._merge_skill_result_payload(merged_data, payload)
+
+        stdout = merged_data.get("stdout")
+        stderr = merged_data.get("stderr")
+        if isinstance(stdout, str) or isinstance(stderr, str):
+            merged_data["logs_preview"] = {
+                "stdout": stdout if isinstance(stdout, str) else "",
+                "stderr": stderr if isinstance(stderr, str) else "",
+                "stdout_truncated": bool(
+                    merged_data.get("stdout_truncated", False)
+                ),
+                "stderr_truncated": bool(
+                    merged_data.get("stderr_truncated", False)
+                ),
+            }
+
+        success = bool(merged_data.get("success", result.success))
+        error = result.error
+        if not success:
+            failure_reason = merged_data.get("failure_reason")
+            summary = merged_data.get("summary")
+            if isinstance(failure_reason, str) and failure_reason.strip():
+                error = failure_reason.strip()
+            elif isinstance(summary, str) and summary.strip():
+                error = summary.strip()
+
+        return type(result)(
+            tool_name=result.tool_name,
+            success=success,
+            data=merged_data,
+            error=error,
+            metadata=result.metadata,
+        )
+
+    @staticmethod
+    def _merge_skill_result_payload(
+        merged_data: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        existing_runtime = (
+            dict(merged_data.get("runtime"))
+            if isinstance(merged_data.get("runtime"), dict)
+            else {}
+        )
+        payload_runtime = (
+            dict(payload.get("runtime"))
+            if isinstance(payload.get("runtime"), dict)
+            else {}
+        )
+        merged_data.update(payload)
+        if payload_runtime or existing_runtime:
+            runtime = {**payload_runtime}
+            runtime.update(
+                {
+                    key: value
+                    for key, value in existing_runtime.items()
+                    if key
+                    in {
+                        "executor",
+                        "server",
+                        "run_tool_name",
+                        "status_tool_name",
+                        "cancel_tool_name",
+                        "logs_tool_name",
+                        "artifacts_tool_name",
+                        "container_workspace",
+                        "artifacts_host_fallback",
+                    }
+                }
+            )
+            merged_data["runtime"] = runtime
 
     async def _execute_capability(
         self,
@@ -1508,7 +1687,25 @@ class AgentCore:
         route: RouteDecision,
         tool_calls: list[dict[str, Any]],
         path_explanation: dict[str, Any] | None,
+        available_capability_catalog: list[dict[str, Any]] | None = None,
+        available_skills: list[dict[str, Any]] | None = None,
     ) -> str:
+        if route.strategy == "agent_metadata_answer":
+            capability_lines = [
+                f"- {item.get('name')}: {item.get('description') or 'No description provided.'}"
+                for item in (available_capability_catalog or [])
+                if isinstance(item, dict) and str(item.get("name", "")).strip()
+            ]
+            skill_lines = [
+                f"- {item.get('name')}: {item.get('description') or 'No description provided.'}"
+                for item in (available_skills or [])
+                if isinstance(item, dict) and str(item.get("name", "")).strip()
+            ]
+            lines = ["Available capabilities:"]
+            lines.extend(capability_lines or ["- None"])
+            lines.append("Available skills:")
+            lines.extend(skill_lines or ["- None"])
+            return "\n".join(lines)
         lines = [
             f"Question: {query}",
             f"Route strategy: {route.strategy}",
@@ -1542,6 +1739,11 @@ class AgentCore:
                 "run_status",
                 "status",
                 "command",
+                "execution_mode",
+                "shell_mode",
+                "exit_code",
+                "started_at",
+                "finished_at",
                 "failure_reason",
             ):
                 if key in data:
@@ -1564,6 +1766,23 @@ class AgentCore:
             files = data.get("file_inventory")
             if isinstance(files, list):
                 summary["file_count"] = len(files)
+            artifacts = data.get("artifacts")
+            if isinstance(artifacts, list):
+                summary["artifact_count"] = len(artifacts)
+                summary["artifacts"] = [
+                    {
+                        "path": item.get("path"),
+                        "size_bytes": item.get("size_bytes"),
+                    }
+                    for item in artifacts[:10]
+                    if isinstance(item, dict)
+                ]
+            logs_preview = data.get("logs_preview")
+            if isinstance(logs_preview, dict):
+                summary["logs_preview"] = {
+                    "stdout": str(logs_preview.get("stdout", ""))[:400],
+                    "stderr": str(logs_preview.get("stderr", ""))[:400],
+                }
             return summary
 
         if tool_name == "web_search":

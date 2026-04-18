@@ -325,6 +325,9 @@ class SkillRuntimeConfig:
     logs_tool_name: str = "get_run_logs"
     artifacts_tool_name: str = "get_run_artifacts"
     default_shell_mode: str = "conservative"
+    wait_for_terminal_result: bool = True
+    wait_for_terminal_timeout_s: float = 30.0
+    wait_for_terminal_poll_interval_s: float = 1.0
     default_runtime_target: SkillRuntimeTarget = field(
         default_factory=_default_skill_runtime_target
     )
@@ -385,6 +388,18 @@ class SkillRuntimeConfig:
                 "conservative",
             ).strip()
             or "conservative",
+            wait_for_terminal_result=_env_bool(
+                "KG_AGENT_SKILL_WAIT_FOR_TERMINAL_RESULT",
+                True,
+            ),
+            wait_for_terminal_timeout_s=_env_float(
+                "KG_AGENT_SKILL_WAIT_FOR_TERMINAL_TIMEOUT_S",
+                30.0,
+            ),
+            wait_for_terminal_poll_interval_s=_env_float(
+                "KG_AGENT_SKILL_WAIT_FOR_TERMINAL_POLL_INTERVAL_S",
+                1.0,
+            ),
             default_runtime_target=SkillRuntimeTarget.from_dict(
                 {
                     "platform": os.getenv(

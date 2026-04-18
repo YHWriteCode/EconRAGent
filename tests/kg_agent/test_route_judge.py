@@ -160,6 +160,52 @@ async def test_route_judge_selects_financial_researching_skill_for_chinese_stock
 
 
 @pytest.mark.asyncio
+async def test_route_judge_selects_financial_researching_skill_for_current_stock_price_query():
+    judge = RouteJudge(default_max_iterations=3)
+    skill_registry = SkillRegistry("skills")
+
+    route = await judge.plan(
+        query="现在特斯拉 TSLA 的股价是多少？顺便看下最近走势",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            skill.to_catalog_dict() for skill in skill_registry.refresh()
+        ],
+    )
+
+    assert route.strategy == "skill_request"
+    assert route.need_tools is False
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "financial-researching"
+
+
+@pytest.mark.asyncio
+async def test_route_judge_answers_agent_metadata_without_kg_retrieval():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query="当前 agent 具备哪些工具和技能？",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search", "web_search"],
+        available_skills=[
+            {
+                "name": "financial-researching",
+                "description": "Analyze stock trends and financial data.",
+                "tags": ["finance"],
+                "path": "/skills/financial-researching",
+            }
+        ],
+    )
+
+    assert route.strategy == "agent_metadata_answer"
+    assert route.need_tools is False
+    assert route.tool_sequence == []
+    assert route.skill_plan is None
+
+
+@pytest.mark.asyncio
 async def test_route_judge_extracts_spreadsheet_constraints_for_xlsx_skill():
     judge = RouteJudge(default_max_iterations=3)
 
