@@ -181,6 +181,91 @@ async def test_route_judge_selects_financial_researching_skill_for_current_stock
 
 
 @pytest.mark.asyncio
+async def test_route_judge_selects_pptx_skill_for_explicit_presentation_request():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query='请帮我做一个关于"生成式人工智能起源发展"的PPT',
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pptx",
+                "description": (
+                    "Use this skill any time a .pptx file is involved in any way — as input, "
+                    "output, or both."
+                ),
+                "tags": [],
+                "path": "/skills/pptx",
+            }
+        ],
+    )
+
+    assert route.strategy == "skill_request"
+    assert route.need_tools is False
+    assert route.tool_sequence == []
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pptx"
+
+
+@pytest.mark.asyncio
+async def test_route_judge_extracts_artifact_defaults_for_pptx_skill():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query='请帮我做一个关于“生成式人工智能起源发展”的PPT，做成学术风格，12页左右',
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pptx",
+                "description": "Use this skill any time a .pptx file is involved in any way.",
+                "tags": [],
+                "path": "/skills/pptx",
+            }
+        ],
+    )
+
+    assert route.strategy == "skill_request"
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pptx"
+    assert route.skill_plan.constraints["topic"] == "生成式人工智能起源发展"
+    assert route.skill_plan.constraints["title"] == "生成式人工智能起源发展"
+    assert route.skill_plan.constraints["output_format"] == "pptx"
+    assert route.skill_plan.constraints["style"] == "学术"
+    assert route.skill_plan.constraints["slide_count"] == "12"
+    assert "生成式人工智能起源发展" in route.skill_plan.constraints["notes"]
+
+
+@pytest.mark.asyncio
+async def test_route_judge_selects_pptx_skill_for_chinese_briefing_request_via_aliases():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query="请帮我做一个关于生成式人工智能起源发展的简报",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pptx",
+                "description": "Use this skill any time a .pptx file is involved in any way.",
+                "tags": [],
+                "path": "/skills/pptx",
+            }
+        ],
+    )
+
+    assert route.strategy == "skill_request"
+    assert route.need_tools is False
+    assert route.tool_sequence == []
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pptx"
+
+
+@pytest.mark.asyncio
 async def test_route_judge_answers_agent_metadata_without_kg_retrieval():
     judge = RouteJudge(default_max_iterations=3)
 
@@ -203,6 +288,82 @@ async def test_route_judge_answers_agent_metadata_without_kg_retrieval():
     assert route.need_tools is False
     assert route.tool_sequence == []
     assert route.skill_plan is None
+
+
+@pytest.mark.asyncio
+async def test_route_judge_llm_refinement_cannot_downgrade_skill_request_to_factual_qa():
+    llm_client = _CapturingLLMClient(
+        {
+            "need_tools": True,
+            "need_memory": False,
+            "need_web_search": False,
+            "need_path_explanation": False,
+            "strategy": "factual_qa",
+            "tool_sequence": [{"tool": "kg_hybrid_search", "args": {}, "optional": False}],
+            "reason": "fallback to hybrid retrieval",
+            "max_iterations": 3,
+        }
+    )
+    judge = RouteJudge(llm_client=llm_client, default_max_iterations=3)
+
+    route = await judge.plan(
+        query='请帮我做一个关于"生成式人工智能起源发展"的PPT',
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pptx",
+                "description": (
+                    "Use this skill any time a .pptx file is involved in any way — as input, "
+                    "output, or both."
+                ),
+                "tags": [],
+                "path": "/skills/pptx",
+            }
+        ],
+    )
+
+    assert route.strategy == "skill_request"
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pptx"
+
+
+@pytest.mark.asyncio
+async def test_route_judge_skips_llm_refinement_for_direct_output_skill_requests():
+    llm_client = _CapturingLLMClient(
+        {
+            "need_tools": True,
+            "need_memory": False,
+            "need_web_search": False,
+            "need_path_explanation": False,
+            "strategy": "factual_qa",
+            "tool_sequence": [{"tool": "kg_hybrid_search", "args": {}, "optional": False}],
+            "reason": "fallback to hybrid retrieval",
+            "max_iterations": 3,
+        }
+    )
+    judge = RouteJudge(llm_client=llm_client, default_max_iterations=3)
+
+    route = await judge.plan(
+        query="请帮我做一个关于生成式人工智能起源发展的简报",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pptx",
+                "description": "Use this skill any time a .pptx file is involved in any way.",
+                "tags": [],
+                "path": "/skills/pptx",
+            }
+        ],
+    )
+
+    assert route.strategy == "skill_request"
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pptx"
+    assert llm_client.calls == []
 
 
 @pytest.mark.asyncio

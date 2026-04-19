@@ -102,7 +102,7 @@ class RuntimeService:
     def read_skill(self, skill_name: str) -> dict[str, Any]:
         payload = self.deps.load_skill_payload(skill_name)
         return {
-            "summary": f"Loaded skill '{payload['name']}'",
+            "summary": f"Loaded SKILL.md for skill '{payload['name']}'",
             "name": payload["name"],
             "description": payload["description"],
             "tags": payload["tags"],
@@ -114,9 +114,6 @@ class RuntimeService:
                 "path": payload["path"],
             },
             "skill_md": payload["skill_md"],
-            "file_inventory": payload["file_inventory"],
-            "references": payload["references"],
-            "shell_hints": payload["shell_hints"],
             "execution_mode": "shell",
         }
 
@@ -143,7 +140,7 @@ class RuntimeService:
 
     def read_skill_docs(self, skill_name: str) -> dict[str, Any]:
         payload = self.read_skill(skill_name)
-        payload["summary"] = f"Loaded docs for skill '{skill_name}'"
+        payload["summary"] = f"Loaded SKILL.md for skill '{skill_name}'"
         return payload
 
     async def run_skill_task(
@@ -188,7 +185,8 @@ class RuntimeService:
                 skill_name=request.skill_name,
                 run_status="manual_required",
                 success=False,
-                summary=f"Skill '{skill_name}' needs more execution detail before it can run.",
+                summary=resolved_command_plan.rationale
+                or f"Skill '{skill_name}' could not be planned automatically.",
                 command_plan=resolved_command_plan,
                 run_id=f"skill-run-{uuid.uuid4().hex}",
                 command=None,

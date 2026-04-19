@@ -2,6 +2,7 @@ from kg_agent.agent.prompts import (
     DEFAULT_PATH_EXPLAINER_TEMPLATE_ID,
     build_final_answer_prompt,
     build_skill_constraint_inference_prompt,
+    build_skill_free_shell_planner_prompt,
     build_path_explainer_prompt,
     list_path_explainer_prompt_templates,
     resolve_path_explainer_prompt_template,
@@ -135,3 +136,26 @@ def test_build_skill_constraint_inference_prompt_includes_reference_date_and_all
     assert "Reference date:\n2026-04-16" in user_prompt
     assert '"trend_start"' in user_prompt
     assert '"trend_end"' in user_prompt
+
+
+def test_build_skill_free_shell_prompt_uses_full_skill_md_and_natural_language_dependency_guidance():
+    system_prompt, user_prompt = build_skill_free_shell_planner_prompt(
+        skill_name="pptx",
+        goal="Create a presentation",
+        user_query="做一个PPT",
+        runtime_target={"platform": "linux", "shell": "/bin/sh"},
+        constraints={"shell_mode": "free_shell"},
+        shell_hints={"required_credentials": []},
+        file_inventory=[{"path": "SKILL.md", "kind": "skill_doc", "size_bytes": 1024}],
+        skill_md_excerpt="Line 1\nLine 2\nInstall with pip install example-package",
+        script_previews=[],
+        python_examples=[],
+        conservative_plan={"mode": "manual_required"},
+    )
+
+    assert "free-shell planning module" in system_prompt.lower()
+    assert "Full SKILL.md content:" in user_prompt
+    assert "natural-language dependency guidance anywhere in SKILL.md" in user_prompt
+    assert "SKILL_BOOTSTRAP_SITE_PACKAGES" in user_prompt
+    assert "NPM_CONFIG_PREFIX" in user_prompt
+    assert "pip install example-package" in user_prompt

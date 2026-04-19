@@ -160,6 +160,64 @@ class _DockerWorkspaceAdapter:
         return self.server_config
 
 
+class _SharedOutputOnlyAdapter:
+    def __init__(self, output_root: Path):
+        self.output_root = output_root.resolve()
+        self.server_config = MCPServerConfig(
+            name="skill-runtime",
+            command="docker",
+            args=[
+                "run",
+                "--rm",
+                "-i",
+                "-v",
+                f"{self.output_root.as_posix()}:/workspace/output",
+                "-v",
+                "mcp_skill_runs:/workspace/runs",
+                "fake-image",
+                "python",
+                "/app/server.py",
+            ],
+        )
+
+    async def invoke_remote_tool(self, *, server_name: str, remote_name: str, arguments: dict):
+        if remote_name != "run_skill_task":
+            raise AssertionError(f"Unexpected remote tool: {remote_name}")
+        return ToolResult(
+            tool_name=remote_name,
+            success=True,
+            data={
+                "structured_content": {
+                    "summary": "run completed",
+                    "run_id": "skill-run-shared-output",
+                    "skill_name": arguments["skill_name"],
+                    "run_status": "completed",
+                    "status": "completed",
+                    "success": True,
+                    "shell_mode": "conservative",
+                    "runtime_target": {
+                        "platform": "linux",
+                        "shell": "/bin/sh",
+                        "workspace_root": "/workspace",
+                        "workdir": "/workspace",
+                        "network_allowed": True,
+                        "supports_python": True,
+                    },
+                    "workspace": "/workspace/runs/run-42",
+                    "runtime": {"delivery": "durable_worker", "queue_state": "completed"},
+                    "command_plan": arguments["command_plan"],
+                    "logs_preview": {"stdout": "csv generated", "stderr": ""},
+                    "artifacts": [
+                        {"path": "output/market_data.csv", "size_bytes": 112},
+                    ],
+                }
+            },
+        )
+
+    def get_server_config(self, server_name: str):
+        return self.server_config
+
+
 @pytest.mark.asyncio
 async def test_agent_core_can_execute_skill_plan_via_mcp_runtime_transport():
     fixture_path = (
@@ -375,6 +433,150 @@ async def test_runtime_client_falls_back_to_host_workspace_for_artifacts_on_tran
     assert artifacts["runtime"]["artifacts_host_fallback"] is True
     assert artifacts["runtime"]["container_workspace"] == "/workspace/runs/run-42"
     assert artifacts["artifacts"] == [{"path": "output/report.json", "size_bytes": 11}]
+    assert artifacts["artifact_previews"] == [
+        {
+            "path": "output/report.json",
+            "kind": "json",
+            "json_type": "dict",
+            "keys": ["ok"],
+            "value_preview": {"ok": True},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_attaches_output_preview_when_only_shared_output_is_host_visible(
+    tmp_path: Path,
+):
+    output_root = (tmp_path / "skill_output").resolve()
+    run_output_dir = output_root / "run-42"
+    run_output_dir.mkdir(parents=True, exist_ok=True)
+    market_data = run_output_dir / "market_data.csv"
+    market_data.write_text(
+        "\n".join(
+            [
+                "date,code,close,volume",
+                "2026-04-13,NVDA,145.32,100",
+                "2026-04-14,NVDA,146.10,110",
+                "2026-04-15,NVDA,147.25,120",
+                "2026-04-16,NVDA,148.50,130",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    client = MCPBasedSkillRuntimeClient(
+        adapter=_SharedOutputOnlyAdapter(output_root),
+        config=SkillRuntimeConfig(server="skill-runtime"),
+    )
+
+    request = type(
+        "_Req",
+        (),
+        {
+            "skill_name": "financial-researching",
+            "goal": "Fetch NVDA market data",
+            "user_query": "查询下英伟达的股价",
+            "workspace": None,
+            "constraints": {},
+        },
+    )()
+    loaded_skill = type(
+        "_Loaded",
+        (),
+        {
+            "skill": type(
+                "_Skill",
+                (),
+                {"path": Path("skills/financial-researching").resolve()},
+            )()
+        },
+    )()
+    command_plan = type(
+        "_Plan",
+        (),
+        {
+            "to_dict": lambda self: {
+                "skill_name": "financial-researching",
+                "goal": "Fetch NVDA market data",
+                "user_query": "查询下英伟达的股价",
+                "runtime_target": {
+                    "platform": "linux",
+                    "shell": "/bin/sh",
+                    "workspace_root": "/workspace",
+                    "workdir": "/workspace",
+                    "network_allowed": True,
+                    "supports_python": True,
+                },
+                "constraints": {},
+                "command": "python scripts/fetch_market_data.py --codes NVDA",
+                "mode": "inferred",
+                "shell_mode": "conservative",
+                "generated_files": [],
+                "missing_fields": [],
+                "failure_reason": None,
+                "hints": {},
+            }
+        },
+    )()
+
+    run_record = await client.run_skill_task(
+        request=request,
+        loaded_skill=loaded_skill,
+        command_plan=command_plan,
+    )
+
+    public = run_record.to_public_dict()
+    assert public["workspace"] == "/workspace/runs/run-42"
+    assert public["artifacts"] == [{"path": "output/market_data.csv", "size_bytes": 112}]
+    assert public["artifact_previews"] == [
+        {
+            "path": "output/market_data.csv",
+            "kind": "csv",
+            "columns": ["date", "code", "close", "volume"],
+            "row_count": 4,
+            "head_rows": [
+                {
+                    "date": "2026-04-13",
+                    "code": "NVDA",
+                    "close": "145.32",
+                    "volume": "100",
+                },
+                {
+                    "date": "2026-04-14",
+                    "code": "NVDA",
+                    "close": "146.10",
+                    "volume": "110",
+                },
+                {
+                    "date": "2026-04-15",
+                    "code": "NVDA",
+                    "close": "147.25",
+                    "volume": "120",
+                },
+            ],
+            "tail_rows": [
+                {
+                    "date": "2026-04-14",
+                    "code": "NVDA",
+                    "close": "146.10",
+                    "volume": "110",
+                },
+                {
+                    "date": "2026-04-15",
+                    "code": "NVDA",
+                    "close": "147.25",
+                    "volume": "120",
+                },
+                {
+                    "date": "2026-04-16",
+                    "code": "NVDA",
+                    "close": "148.50",
+                    "volume": "130",
+                },
+            ],
+        }
+    ]
 
 
 @pytest.mark.asyncio

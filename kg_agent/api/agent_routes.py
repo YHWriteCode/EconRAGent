@@ -158,7 +158,6 @@ class SkillsResponse(BaseModel):
 class SkillDetailResponse(BaseModel):
     skill: SkillInfo
     skill_md: str
-    file_inventory: list[SkillFileInfo]
 
 
 class SkillFileResponse(BaseModel):

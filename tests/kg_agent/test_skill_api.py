@@ -121,10 +121,8 @@ def test_skill_endpoints_list_read_file_and_invoke(tmp_path: Path):
     assert detail_payload["skill"]["description"] == (
         "Prepare and validate spreadsheet workflows."
     )
-    inventory_paths = [item["path"] for item in detail_payload["file_inventory"]]
-    assert "SKILL.md" in inventory_paths
-    assert "references/usage.md" in inventory_paths
-    assert "scripts/run.ps1" in inventory_paths
+    assert detail_payload["skill_md"].startswith("# xlsx-automation")
+    assert "Prepare and validate spreadsheet workflows." in detail_payload["skill_md"]
 
     assert file_response.status_code == 200
     file_payload = file_response.json()

@@ -17,6 +17,63 @@ from .utils import truncate_log, truncate_utf8_text
 
 INTERNAL_RUNTIME_DIRNAME = ".skill_runtime"
 TERMINAL_SNAPSHOT_FILENAME = "terminal_run_record.json"
+SKILL_INVOCATION_FILENAME = "skill_invocation.json"
+SKILL_CONTEXT_FILENAME = "skill_context.json"
+
+
+def _skill_invocation_path(workspace_dir: Path) -> Path:
+    return (workspace_dir / SKILL_INVOCATION_FILENAME).resolve()
+
+
+def _skill_context_path(workspace_dir: Path) -> Path:
+    return (workspace_dir / SKILL_CONTEXT_FILENAME).resolve()
+
+
+def _build_effective_constraints(
+    *,
+    constraints: dict[str, Any],
+    command_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    effective = dict(constraints or {})
+    hints = (
+        dict(command_plan.get("hints", {}))
+        if isinstance(command_plan, dict) and isinstance(command_plan.get("hints"), dict)
+        else {}
+    )
+    inferred = hints.get("auto_inferred_constraints")
+    if isinstance(inferred, dict):
+        for key, value in inferred.items():
+            normalized_key = str(key).strip()
+            if normalized_key and normalized_key not in effective:
+                effective[normalized_key] = value
+    return effective
+
+
+def _write_skill_context(
+    *,
+    workspace_dir: Path,
+    skill_payload: dict[str, Any],
+) -> Path:
+    context_path = _skill_context_path(workspace_dir)
+    context_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "skill_context",
+                "skill": {
+                    "name": skill_payload["name"],
+                    "description": str(skill_payload["description"]).strip(),
+                    "tags": skill_payload["tags"],
+                    "path": skill_payload["path"],
+                },
+                "skill_md": str(skill_payload.get("skill_md", "")),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return context_path
 
 
 def _write_skill_request(
@@ -26,22 +83,38 @@ def _write_skill_request(
     goal: str,
     user_query: str,
     constraints: dict[str, Any],
+    workspace: str | None = None,
+    runtime_target: dict[str, Any] | None = None,
+    command_plan: dict[str, Any] | None = None,
 ) -> Path:
-    request_path = workspace_dir / "skill_request.json"
+    request_path = _skill_invocation_path(workspace_dir)
     request_path.write_text(
         json.dumps(
             {
+                "version": 1,
+                "kind": "skill_invocation",
                 "skill_name": skill_payload["name"],
                 "goal": goal,
                 "user_query": user_query,
-                "constraints": constraints,
-                "skill": {
-                    "name": skill_payload["name"],
-                    "description": skill_payload["description"],
-                    "tags": skill_payload["tags"],
-                    "path": skill_payload["path"],
-                },
-                "shell_hints": skill_payload["shell_hints"],
+                "workspace": workspace,
+                "runtime_target": dict(runtime_target or {}),
+                "constraints": dict(constraints or {}),
+                "effective_constraints": _build_effective_constraints(
+                    constraints=constraints,
+                    command_plan=command_plan,
+                ),
+                "planning_mode": (
+                    str(command_plan.get("mode", "")).strip()
+                    if isinstance(command_plan, dict)
+                    else ""
+                )
+                or None,
+                "shell_mode": (
+                    str(command_plan.get("shell_mode", "")).strip()
+                    if isinstance(command_plan, dict)
+                    else ""
+                )
+                or None,
             },
             ensure_ascii=False,
             indent=2,
@@ -171,9 +244,33 @@ def _load_terminal_snapshot(
     return dict(record)
 
 
+def _sync_workspace_output_to_shared_output(*, workspace_dir: Path) -> None:
+    if OUTPUT_ROOT is None:
+        return
+    source_output_dir = (workspace_dir / "output").resolve()
+    if not source_output_dir.is_dir():
+        return
+    shared_output_dir = (OUTPUT_ROOT / workspace_dir.name).resolve()
+    if shared_output_dir == source_output_dir:
+        return
+    if source_output_dir in shared_output_dir.parents:
+        return
+    shared_output_dir.mkdir(parents=True, exist_ok=True)
+    for path in sorted(source_output_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(source_output_dir)
+        target = (shared_output_dir / relative_path).resolve()
+        if target == shared_output_dir or shared_output_dir not in target.parents:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
 def _collect_workspace_artifacts(workspace_dir: Path) -> list[dict[str, Any]]:
-    artifacts: list[dict[str, Any]] = []
+    artifacts_by_path: dict[str, dict[str, Any]] = {}
     mirrored_skill_paths = _load_mirrored_skill_paths(workspace_dir=workspace_dir)
+    _sync_workspace_output_to_shared_output(workspace_dir=workspace_dir)
     for path in sorted(workspace_dir.rglob("*")):
         if not path.is_file():
             continue
@@ -184,12 +281,10 @@ def _collect_workspace_artifacts(workspace_dir: Path) -> list[dict[str, Any]]:
             continue
         if relative_path in mirrored_skill_paths:
             continue
-        artifacts.append(
-            {
-                "path": relative_path,
-                "size_bytes": path.stat().st_size,
-            }
-        )
+        artifacts_by_path[relative_path] = {
+            "path": relative_path,
+            "size_bytes": path.stat().st_size,
+        }
     if OUTPUT_ROOT is not None:
         shared_output_dir = (OUTPUT_ROOT / workspace_dir.name).resolve()
         if shared_output_dir.is_dir():
@@ -197,17 +292,16 @@ def _collect_workspace_artifacts(workspace_dir: Path) -> list[dict[str, Any]]:
                 if not path.is_file():
                     continue
                 relative_path = str(path.relative_to(shared_output_dir)).replace("\\", "/")
-                artifacts.append(
-                    {
-                        "path": (
-                            f"output/{relative_path}"
-                            if relative_path
-                            else "output"
-                        ),
-                        "size_bytes": path.stat().st_size,
-                    }
+                public_path = (
+                    f"output/{relative_path}"
+                    if relative_path
+                    else "output"
                 )
-    return artifacts
+                artifacts_by_path[public_path] = {
+                    "path": public_path,
+                    "size_bytes": path.stat().st_size,
+                }
+    return [artifacts_by_path[key] for key in sorted(artifacts_by_path)]
 
 
 def _compact_generated_files_for_transport(

@@ -1741,10 +1741,16 @@ class AgentCore:
                 "command",
                 "execution_mode",
                 "shell_mode",
+                "shell_mode_requested",
+                "shell_mode_effective",
+                "shell_mode_escalated",
+                "shell_mode_escalation_reason",
                 "exit_code",
                 "started_at",
                 "finished_at",
                 "failure_reason",
+                "auto_inferred_constraints",
+                "planning_blockers",
             ):
                 if key in data:
                     summary[key] = data[key]
@@ -1775,6 +1781,13 @@ class AgentCore:
                         "size_bytes": item.get("size_bytes"),
                     }
                     for item in artifacts[:10]
+                    if isinstance(item, dict)
+                ]
+            artifact_previews = data.get("artifact_previews")
+            if isinstance(artifact_previews, list):
+                summary["artifact_previews"] = [
+                    dict(item)
+                    for item in artifact_previews[:3]
                     if isinstance(item, dict)
                 ]
             logs_preview = data.get("logs_preview")
@@ -1978,7 +1991,11 @@ class AgentCore:
 
     def read_skill(self, name: str) -> dict[str, Any]:
         self.skill_registry.refresh()
-        return self.skill_loader.load_skill(name).to_dict()
+        loaded_skill = self.skill_loader.load_skill(name)
+        return {
+            "skill": loaded_skill.skill.to_catalog_dict(),
+            "skill_md": loaded_skill.skill_md,
+        }
 
     def read_skill_file(self, name: str, relative_path: str) -> dict[str, Any]:
         self.skill_registry.refresh()

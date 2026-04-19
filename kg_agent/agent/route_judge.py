@@ -74,9 +74,40 @@ SKILL_REQUEST_PATTERN = re.compile(
     r"\u6280\u80fd\u5305|"
     r"\u6280\u80fd\u5de5\u4f5c\u6d41|"
     r"\u5de5\u4f5c\u6d41|"
+    r"\u5e7b\u706f\u7247|"
+    r"\u6f14\u793a\u6587\u7a3f|"
+    r"\u6f14\u793a\u6587\u6863|"
+    r"\u6f14\u793a\u7a3f|"
+    r"\u7b80\u62a5|"
+    r"pptx?|"
+    r"powerpoint|"
+    r"presentation|presentations|"
+    r"slide|slides|"
+    r"deck|decks|"
     r"\u7535\u5b50\u8868\u683c|"
     r"\u8868\u683c\u6587\u4ef6|"
     r"agent skill|agent skills|skill|skills|workflow|spreadsheet|xlsx|xlsm|csv|tsv"
+    r")",
+    re.IGNORECASE,
+)
+DIRECT_OUTPUT_SKILL_REQUEST_PATTERN = re.compile(
+    r"("
+    r"\u5e7b\u706f\u7247|"
+    r"\u6f14\u793a\u6587\u7a3f|"
+    r"\u6f14\u793a\u6587\u6863|"
+    r"\u6f14\u793a\u7a3f|"
+    r"\u7b80\u62a5|"
+    r"\u7535\u5b50\u8868\u683c|"
+    r"\u5de5\u4f5c\u7c3f|"
+    r"\u62a5\u8868|"
+    r"pptx?|"
+    r"powerpoint|"
+    r"presentation|presentations|"
+    r"slide|slides|"
+    r"deck|decks|"
+    r"spreadsheet|workbook|"
+    r"xlsx|xlsm|xls|csv|tsv|"
+    r"pdf"
     r")",
     re.IGNORECASE,
 )
@@ -161,6 +192,39 @@ MODE_HINT_PATTERN = re.compile(
 )
 DRY_RUN_PATTERN = re.compile(
     r"(dry[- ]run|plan only|without execution|don'?t execute|do not execute)",
+    re.IGNORECASE,
+)
+SLIDE_COUNT_PATTERN = re.compile(
+    r"(?:(?P<count>\d{1,2})\s*(?:页|张|slides?|pages?))|"
+    r"(?:(?:slides?|pages?)\s*(?P<count_suffix>\d{1,2}))",
+    re.IGNORECASE,
+)
+TOPIC_ABOUT_PATTERN = re.compile(
+    r"(?:关于|on|about)\s*(?:[\"“”'‘’「」『』])?(?P<topic>.+?)(?:[\"“”'‘’「」『』])?"
+    r"\s*(?:的)?\s*(?:pptx?|ppt|powerpoint|presentation|slides?|deck|简报|幻灯片|演示文稿|电子表格|工作簿|spreadsheet|workbook|pdf)\b",
+    re.IGNORECASE,
+)
+TOPIC_QUOTED_PATTERN = re.compile(
+    r"[\"“”'‘’「」『』](?P<topic>[^\"“”'‘’「」『』]{2,120})[\"“”'‘’「」『』]"
+)
+STYLE_HINT_PATTERN = re.compile(
+    r"(?P<style>简约|极简|学术|商务|现代|正式|creative|modern|minimal|academic|business|professional)",
+    re.IGNORECASE,
+)
+THEME_HINT_PATTERN = re.compile(
+    r"(?P<theme>深色|暗色|浅色|明亮|科技感|蓝色|绿色|red|blue|green|dark|light|corporate|warm)",
+    re.IGNORECASE,
+)
+LANGUAGE_HINT_PATTERN = re.compile(
+    r"(?P<language>中英双语|双语|中文|英文|英语|chinese|english|bilingual)",
+    re.IGNORECASE,
+)
+AUDIENCE_HINT_PATTERN = re.compile(
+    r"(?:面向|给|for)\s*(?P<audience>[^,，。.!！？]{2,40})",
+    re.IGNORECASE,
+)
+TEMPLATE_HINT_PATTERN = re.compile(
+    r"(?:template|模板)\s*(?:为|is|:)?\s*(?P<template>[A-Za-z0-9_./\\ -]{2,80})",
     re.IGNORECASE,
 )
 FREE_SHELL_PATTERN = re.compile(
@@ -289,6 +353,40 @@ MATCH_STOPWORDS = {
     "using",
     "with",
 }
+SEARCH_ALIASES_BY_NAME = {
+    "pptx": [
+        "ppt",
+        "powerpoint",
+        "presentation",
+        "presentations",
+        "slide",
+        "slides",
+        "deck",
+        "decks",
+        "\u5e7b\u706f\u7247",
+        "\u6f14\u793a\u6587\u7a3f",
+        "\u6f14\u793a\u6587\u6863",
+        "\u6f14\u793a\u7a3f",
+        "\u7b80\u62a5",
+    ],
+    "xlsx": [
+        "excel",
+        "spreadsheet",
+        "workbook",
+        "worksheet",
+        "\u7535\u5b50\u8868\u683c",
+        "\u5de5\u4f5c\u7c3f",
+        "\u8868\u683c",
+        "\u62a5\u8868",
+    ],
+    "pdf": [
+        "pdf",
+        "document",
+        "documents",
+        "\u6587\u6863",
+        "\u6587\u4ef6",
+    ],
+}
 
 
 @dataclass
@@ -400,6 +498,9 @@ class RouteJudge:
             SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN.search(normalized_query)
         )
         requests_skill_workflow = bool(SKILL_REQUEST_PATTERN.search(normalized_query))
+        requests_direct_output_skill = bool(
+            DIRECT_OUTPUT_SKILL_REQUEST_PATTERN.search(normalized_query)
+        )
         is_relation = bool(RELATION_PATTERN.search(normalized_query))
         is_entity = bool(ENTITY_PATTERN.search(normalized_query))
         is_ingest = bool(INGEST_PATTERN.search(normalized_query))
@@ -462,6 +563,7 @@ class RouteJudge:
             query=normalized_query,
             matched_skill=matched_skill,
             requests_skill_workflow=requests_skill_workflow,
+            requests_direct_output_skill=requests_direct_output_skill,
             needs_specialized_external_capability=needs_specialized_external_capability,
         ):
             skill_constraints = self._build_skill_constraints(
@@ -706,6 +808,12 @@ class RouteJudge:
     ) -> RouteDecision | None:
         if self.llm_client is None or not self.llm_client.is_available():
             return None
+        if self._should_lock_rule_based_route(
+            query=query,
+            base_decision=base_decision,
+            skill_catalog=skill_catalog,
+        ):
+            return None
         if (
             base_decision.strategy == "simple_answer_no_tool"
             and not self._has_external_capabilities(capability_catalog)
@@ -779,6 +887,13 @@ class RouteJudge:
                 return None
         if skill_plan is None and base_decision.skill_plan is not None:
             skill_plan = base_decision.skill_plan
+        resolved_strategy = str(payload.get("strategy", base_decision.strategy))
+        if skill_plan is not None and resolved_strategy in {
+            "factual_qa",
+            "simple_answer_no_tool",
+            "kg_hybrid_entity_fallback",
+        }:
+            resolved_strategy = base_decision.strategy
 
         return RouteDecision(
             need_tools=bool(payload.get("need_tools", bool(tool_sequence))),
@@ -789,7 +904,7 @@ class RouteJudge:
             need_path_explanation=bool(
                 payload.get("need_path_explanation", base_decision.need_path_explanation)
             ),
-            strategy=str(payload.get("strategy", base_decision.strategy)),
+            strategy=resolved_strategy,
             tool_sequence=tool_sequence or base_decision.tool_sequence,
             reason=str(payload.get("reason", base_decision.reason)),
             max_iterations=max(
@@ -1027,6 +1142,8 @@ class RouteJudge:
         best_score, best_skill = ranked[0]
         if best_score >= 6:
             return best_skill
+        if DIRECT_OUTPUT_SKILL_REQUEST_PATTERN.search(query or "") and best_score >= 3:
+            return best_skill
         if SKILL_REQUEST_PATTERN.search(query or "") and best_score >= 3:
             return best_skill
         if SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN.search(query or "") and best_score >= 2:
@@ -1092,11 +1209,7 @@ class RouteJudge:
         if item_name and item_name in query_lower:
             score += 5
 
-        tags = [
-            str(tag).strip().lower()
-            for tag in item.get("tags", [])
-            if isinstance(tag, str)
-        ]
+        tags = cls._collect_search_tags(item)
         for tag in tags:
             if not cls._is_searchable_keyword(tag):
                 continue
@@ -1124,13 +1237,35 @@ class RouteJudge:
         parts = [
             str(item.get("name", "")),
             str(item.get("description", "")),
-            " ".join(str(tag) for tag in item.get("tags", []) if isinstance(tag, str)),
+            " ".join(RouteJudge._collect_search_tags(item)),
             " ".join(str(arg) for arg in item.get("arg_names", []) if isinstance(arg, str)),
             " ".join(
                 str(arg) for arg in item.get("required_args", []) if isinstance(arg, str)
             ),
         ]
         return " ".join(parts).replace("_", " ").replace("-", " ").strip().lower()
+
+    @classmethod
+    def _collect_search_tags(cls, item: dict[str, Any]) -> list[str]:
+        tags: list[str] = []
+        seen: set[str] = set()
+        for value in item.get("tags", []):
+            if not isinstance(value, str):
+                continue
+            normalized = value.strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            tags.append(normalized)
+
+        item_name = str(item.get("name", "")).strip().lower()
+        for alias in SEARCH_ALIASES_BY_NAME.get(item_name, []):
+            normalized = alias.strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            tags.append(normalized)
+        return tags
 
     @staticmethod
     def _extract_query_terms(query: str) -> list[str]:
@@ -1154,6 +1289,7 @@ class RouteJudge:
         query: str,
         matched_skill: dict[str, Any],
         requests_skill_workflow: bool,
+        requests_direct_output_skill: bool,
         needs_specialized_external_capability: bool,
     ) -> bool:
         query_lower = (query or "").strip().lower()
@@ -1165,9 +1301,50 @@ class RouteJudge:
             and RouteJudge._is_finance_skill(matched_skill)
         ):
             return True
-        if requests_skill_workflow or needs_specialized_external_capability:
+        if (
+            requests_skill_workflow
+            or requests_direct_output_skill
+            or needs_specialized_external_capability
+        ):
             return True
         return RouteJudge._score_search_match(query=query, item=matched_skill) >= 6
+
+    @classmethod
+    def _should_lock_rule_based_route(
+        cls,
+        *,
+        query: str,
+        base_decision: RouteDecision,
+        skill_catalog: list[dict[str, Any]],
+    ) -> bool:
+        if base_decision.strategy == "agent_metadata_answer":
+            return True
+        if base_decision.skill_plan is None:
+            return False
+
+        query_text = query or ""
+        query_lower = query_text.strip().lower()
+        skill_name = str(base_decision.skill_plan.skill_name or "").strip().lower()
+        if skill_name and skill_name in query_lower:
+            return True
+        if DIRECT_OUTPUT_SKILL_REQUEST_PATTERN.search(query_text):
+            return True
+        if SKILL_REQUEST_PATTERN.search(query_text):
+            return True
+
+        matched_skill = next(
+            (
+                item
+                for item in skill_catalog
+                if str(item.get("name", "")).strip().lower() == skill_name
+            ),
+            None,
+        )
+        if matched_skill is None:
+            return False
+        return cls._is_financial_market_query(query_text) and cls._is_finance_skill(
+            matched_skill
+        )
 
     @staticmethod
     def _is_financial_market_query(query: str) -> bool:
@@ -1240,10 +1417,47 @@ class RouteJudge:
         if format_hint:
             constraints["format"] = format_hint
             constraints["output_format"] = format_hint
+        else:
+            inferred_output_format = cls._infer_output_format_for_skill(matched_skill)
+            if inferred_output_format:
+                constraints["output_format"] = inferred_output_format
 
         mode_hint = cls._extract_mode_hint(query, cli_args)
         if mode_hint:
             constraints["mode"] = mode_hint
+
+        topic_hint = cls._extract_topic_hint(query)
+        if topic_hint:
+            constraints["topic"] = topic_hint
+            constraints["title"] = topic_hint
+
+        slide_count = cls._extract_slide_count_hint(query)
+        if slide_count:
+            constraints["slide_count"] = slide_count
+
+        style_hint = cls._extract_style_hint(query)
+        if style_hint:
+            constraints["style"] = style_hint
+
+        theme_hint = cls._extract_theme_hint(query)
+        if theme_hint:
+            constraints["theme"] = theme_hint
+
+        language_hint = cls._extract_language_hint(query)
+        if language_hint:
+            constraints["language"] = language_hint
+
+        audience_hint = cls._extract_audience_hint(query)
+        if audience_hint:
+            constraints["audience"] = audience_hint
+
+        template_hint = cls._extract_template_hint(query)
+        if template_hint:
+            constraints["template"] = template_hint
+
+        skill_name = str(matched_skill.get("name", "")).strip().lower()
+        if skill_name in {"pptx", "xlsx", "pdf"} and query.strip():
+            constraints.setdefault("notes", query.strip())
 
         if cls._extract_dry_run_hint(query, cli_args):
             constraints["dry_run"] = True
@@ -1261,7 +1475,6 @@ class RouteJudge:
         if shell_mode:
             constraints["shell_mode"] = shell_mode
 
-        skill_name = str(matched_skill.get("name", "")).strip().lower()
         if skill_name == "xlsx":
             if FORMULA_RECALC_PATTERN.search(query or ""):
                 constraints["operation"] = "recalc"
@@ -1400,6 +1613,94 @@ class RouteJudge:
             return "free_shell"
         if CONSERVATIVE_SHELL_PATTERN.search(query or ""):
             return "conservative"
+        return None
+
+    @staticmethod
+    def _normalize_artifact_text(value: str) -> str | None:
+        normalized = str(value or "").strip().strip(".,;:!?。！？、")
+        normalized = normalized.strip("\"'“”‘’「」『』")
+        return normalized or None
+
+    @classmethod
+    def _extract_topic_hint(cls, query: str) -> str | None:
+        about_match = TOPIC_ABOUT_PATTERN.search(query or "")
+        if about_match is not None:
+            topic = cls._normalize_artifact_text(str(about_match.group("topic") or ""))
+            if topic:
+                return topic
+
+        quoted_matches = [
+            cls._normalize_artifact_text(str(match.group("topic") or ""))
+            for match in TOPIC_QUOTED_PATTERN.finditer(query or "")
+        ]
+        quoted_topics = [item for item in quoted_matches if item]
+        if len(quoted_topics) == 1:
+            return quoted_topics[0]
+        return None
+
+    @staticmethod
+    def _extract_slide_count_hint(query: str) -> str | None:
+        match = SLIDE_COUNT_PATTERN.search(query or "")
+        if match is None:
+            return None
+        value = str(match.group("count") or match.group("count_suffix") or "").strip()
+        return value or None
+
+    @staticmethod
+    def _extract_style_hint(query: str) -> str | None:
+        match = STYLE_HINT_PATTERN.search(query or "")
+        if match is None:
+            return None
+        return str(match.group("style") or "").strip().lower() or None
+
+    @staticmethod
+    def _extract_theme_hint(query: str) -> str | None:
+        match = THEME_HINT_PATTERN.search(query or "")
+        if match is None:
+            return None
+        return str(match.group("theme") or "").strip().lower() or None
+
+    @staticmethod
+    def _extract_language_hint(query: str) -> str | None:
+        match = LANGUAGE_HINT_PATTERN.search(query or "")
+        if match is None:
+            return None
+        raw = str(match.group("language") or "").strip().lower()
+        if raw in {"中英双语", "双语", "bilingual"}:
+            return "bilingual"
+        if raw in {"中文", "chinese"}:
+            return "chinese"
+        if raw in {"英文", "英语", "english"}:
+            return "english"
+        return raw or None
+
+    @classmethod
+    def _extract_audience_hint(cls, query: str) -> str | None:
+        match = AUDIENCE_HINT_PATTERN.search(query or "")
+        if match is None:
+            return None
+        audience = cls._normalize_artifact_text(str(match.group("audience") or ""))
+        if not audience:
+            return None
+        return audience
+
+    @classmethod
+    def _extract_template_hint(cls, query: str) -> str | None:
+        match = TEMPLATE_HINT_PATTERN.search(query or "")
+        if match is None:
+            return None
+        template = cls._normalize_artifact_text(str(match.group("template") or ""))
+        return template
+
+    @staticmethod
+    def _infer_output_format_for_skill(matched_skill: dict[str, Any]) -> str | None:
+        skill_name = str(matched_skill.get("name", "")).strip().lower()
+        if skill_name == "pptx":
+            return "pptx"
+        if skill_name == "xlsx":
+            return "xlsx"
+        if skill_name == "pdf":
+            return "pdf"
         return None
 
     @staticmethod

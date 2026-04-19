@@ -77,6 +77,9 @@ api/
 - Preserve compatibility for `POST /agent/chat + stream=true`; do not replace it casually with a new primary streaming route.
 - Use narrow route-level exception mapping for expected business cases such as `ValueError`, `LookupError`, and `RuntimeError`; let the app-level exception handlers normalize everything else.
 - If you extend public response shapes, keep them explicit in the Pydantic models in `agent_routes.py`.
+- Keep skill-document access progressive:
+  - `GET /agent/skills/{skill_name}` returns skill metadata plus full `SKILL.md`
+  - related files such as `references/*` or `scripts/*` should be fetched later through `GET /agent/skills/{skill_name}/files/{relative_path}` only when the document content makes them relevant
 - Keep CORS and readiness behavior minimal and frontend-oriented unless there is a concrete product need for stronger deployment policy.
 
 ---

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import json
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -16,6 +18,11 @@ from kg_agent.skills.models import (
 
 
 class MCPBasedSkillRuntimeClient:
+    MAX_ARTIFACT_PREVIEW_COUNT = 3
+    MAX_ARTIFACT_PREVIEW_BYTES = 131072
+    MAX_ARTIFACT_TEXT_PREVIEW_CHARS = 1600
+    MAX_ARTIFACT_TABLE_PREVIEW_ROWS = 3
+
     def __init__(
         self,
         *,
@@ -61,6 +68,7 @@ class MCPBasedSkillRuntimeClient:
         payload["runtime"] = self._runtime_metadata(remote_name=self.config.run_tool_name)
         payload["runtime_result"] = structured or data
         payload = self._map_workspace_to_host(payload)
+        payload = self._attach_host_artifact_previews(payload)
         return SkillRunRecord.from_dict(
             payload,
             default_skill_name=request.skill_name,
@@ -107,7 +115,8 @@ class MCPBasedSkillRuntimeClient:
                 run_id=run_id,
                 fallback_reason=message,
             )
-        return self._map_workspace_to_host(self._normalize_run_payload(payload))
+        normalized = self._map_workspace_to_host(self._normalize_run_payload(payload))
+        return self._attach_host_artifact_previews(normalized)
 
     async def _invoke_structured_tool(
         self,
@@ -169,6 +178,52 @@ class MCPBasedSkillRuntimeClient:
             normalized["planning_mode"] = str(command_plan.get("mode", "")).strip()
             if "shell_mode" not in normalized:
                 normalized["shell_mode"] = str(command_plan.get("shell_mode", "")).strip()
+            hints = (
+                dict(command_plan.get("hints", {}))
+                if isinstance(command_plan.get("hints"), dict)
+                else {}
+            )
+            if "shell_mode_requested" not in normalized:
+                normalized["shell_mode_requested"] = hints.get(
+                    "shell_mode_requested",
+                    str(command_plan.get("shell_mode", "")).strip(),
+                )
+            if "shell_mode_effective" not in normalized:
+                normalized["shell_mode_effective"] = hints.get(
+                    "shell_mode_effective",
+                    str(command_plan.get("shell_mode", "")).strip(),
+                )
+            if "shell_mode_escalated" not in normalized:
+                normalized["shell_mode_escalated"] = bool(
+                    hints.get(
+                        "shell_mode_escalated",
+                        normalized.get("shell_mode_requested")
+                        != normalized.get("shell_mode_effective"),
+                    )
+                )
+            if (
+                "shell_mode_escalation_reason" not in normalized
+                and "shell_mode_escalation_reason" in hints
+            ):
+                normalized["shell_mode_escalation_reason"] = hints.get(
+                    "shell_mode_escalation_reason"
+                )
+            if "auto_inferred_constraints" not in normalized and isinstance(
+                hints.get("auto_inferred_constraints"),
+                dict,
+            ):
+                normalized["auto_inferred_constraints"] = dict(
+                    hints["auto_inferred_constraints"]
+                )
+            if "planning_blockers" not in normalized and isinstance(
+                hints.get("planning_blockers"),
+                list,
+            ):
+                normalized["planning_blockers"] = [
+                    dict(item)
+                    for item in hints["planning_blockers"]
+                    if isinstance(item, dict)
+                ]
             if "runtime_target" not in normalized and isinstance(
                 command_plan.get("runtime_target"),
                 dict,
@@ -216,7 +271,7 @@ class MCPBasedSkillRuntimeClient:
         runtime["artifacts_host_fallback"] = True
         runtime["artifacts_host_fallback_reason"] = fallback_reason
         runtime["container_workspace"] = runtime_workspace
-        return self._normalize_run_payload(
+        payload = self._normalize_run_payload(
             {
                 "summary": f"Loaded artifacts for run '{run_id}' from the mounted host workspace.",
                 "run_id": run_id,
@@ -257,6 +312,7 @@ class MCPBasedSkillRuntimeClient:
                 "artifacts": artifacts,
             }
         )
+        return self._attach_host_artifact_previews(payload)
 
     def _map_workspace_to_host(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(payload)
@@ -314,6 +370,25 @@ class MCPBasedSkillRuntimeClient:
         except ValueError:
             relative_path = PurePosixPath(runtime_workspace_path.name)
         return (host_workspace_root / Path(*relative_path.parts)).resolve()
+
+    def _resolve_host_shared_output_path(
+        self,
+        *,
+        runtime_workspace: str,
+        runtime_target: dict[str, Any],
+    ) -> Path | None:
+        if not runtime_workspace:
+            return None
+        run_workspace_path = PurePosixPath(runtime_workspace)
+        run_name = run_workspace_path.name
+        if not run_name:
+            return None
+        workspace_root = str(runtime_target.get("workspace_root", "")).strip() or "/workspace"
+        container_output_path = str(PurePosixPath(workspace_root) / "output" / run_name)
+        return self._resolve_host_workspace_path(
+            runtime_workspace=container_output_path,
+            runtime_target=runtime_target,
+        )
 
     @staticmethod
     def _resolve_host_workspace_mount(
@@ -429,6 +504,194 @@ class MCPBasedSkillRuntimeClient:
                 }
             )
         return artifacts
+
+    def _attach_host_artifact_previews(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        artifacts = normalized.get("artifacts")
+        if not isinstance(artifacts, list) or not artifacts:
+            return normalized
+        runtime = (
+            dict(normalized.get("runtime", {}))
+            if isinstance(normalized.get("runtime"), dict)
+            else {}
+        )
+        runtime_workspace = (
+            str(runtime.get("container_workspace", "")).strip()
+            if isinstance(runtime.get("container_workspace"), str)
+            and str(runtime.get("container_workspace", "")).strip()
+            else str(normalized.get("workspace", "")).strip()
+        )
+        runtime_target = (
+            dict(normalized.get("runtime_target", {}))
+            if isinstance(normalized.get("runtime_target"), dict)
+            else {}
+        )
+        host_workspace = self._resolve_host_workspace_path(
+            runtime_workspace=runtime_workspace,
+            runtime_target=runtime_target,
+        )
+        host_shared_output = self._resolve_host_shared_output_path(
+            runtime_workspace=runtime_workspace,
+            runtime_target=runtime_target,
+        )
+        previews: list[dict[str, Any]] = []
+        for artifact in self._prioritize_preview_candidates(artifacts):
+            artifact_path = str(artifact.get("path", "")).replace("\\", "/").strip()
+            if not artifact_path:
+                continue
+            source_path = self._resolve_host_artifact_path(
+                artifact_path=artifact_path,
+                host_workspace=host_workspace,
+                host_shared_output=host_shared_output,
+            )
+            if source_path is None or not source_path.is_file():
+                continue
+            preview = self._build_artifact_preview(
+                artifact_path=artifact_path,
+                source_path=source_path,
+                size_bytes=int(artifact.get("size_bytes", 0) or 0),
+            )
+            if preview is not None:
+                previews.append(preview)
+            if len(previews) >= self.MAX_ARTIFACT_PREVIEW_COUNT:
+                break
+        if previews:
+            normalized["artifact_previews"] = previews
+        return normalized
+
+    def _prioritize_preview_candidates(
+        self,
+        artifacts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        candidates = [item for item in artifacts if isinstance(item, dict)]
+        return sorted(
+            candidates,
+            key=lambda item: (
+                0
+                if str(item.get("path", "")).replace("\\", "/").startswith("output/")
+                else 1,
+                0
+                if Path(str(item.get("path", ""))).suffix.lower() in {".csv", ".json", ".txt", ".md", ".log"}
+                else 1,
+                str(item.get("path", "")),
+            ),
+        )
+
+    @staticmethod
+    def _resolve_host_artifact_path(
+        *,
+        artifact_path: str,
+        host_workspace: Path | None,
+        host_shared_output: Path | None,
+    ) -> Path | None:
+        normalized = artifact_path.replace("\\", "/").strip()
+        if normalized.startswith("output/"):
+            relative_output = normalized[len("output/") :]
+            if host_shared_output is not None:
+                candidate = (host_shared_output / Path(*PurePosixPath(relative_output).parts)).resolve()
+                if candidate.is_file():
+                    return candidate
+            if host_workspace is not None:
+                candidate = (host_workspace / Path(*PurePosixPath(normalized).parts)).resolve()
+                if candidate.is_file():
+                    return candidate
+            return None
+        if host_workspace is None:
+            return None
+        candidate = (host_workspace / Path(*PurePosixPath(normalized).parts)).resolve()
+        return candidate if candidate.is_file() else None
+
+    def _build_artifact_preview(
+        self,
+        *,
+        artifact_path: str,
+        source_path: Path,
+        size_bytes: int,
+    ) -> dict[str, Any] | None:
+        suffix = source_path.suffix.lower()
+        if size_bytes > self.MAX_ARTIFACT_PREVIEW_BYTES:
+            return None
+        if suffix == ".csv":
+            return self._build_csv_artifact_preview(artifact_path=artifact_path, source_path=source_path)
+        if suffix == ".json":
+            return self._build_json_artifact_preview(artifact_path=artifact_path, source_path=source_path)
+        if suffix in {".txt", ".md", ".log", ".yaml", ".yml"}:
+            return self._build_text_artifact_preview(artifact_path=artifact_path, source_path=source_path)
+        return None
+
+    def _build_csv_artifact_preview(
+        self,
+        *,
+        artifact_path: str,
+        source_path: Path,
+    ) -> dict[str, Any] | None:
+        try:
+            with source_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                if not reader.fieldnames:
+                    return None
+                rows = [dict(row) for row in reader]
+        except Exception:
+            return None
+        head_rows = rows[: self.MAX_ARTIFACT_TABLE_PREVIEW_ROWS]
+        tail_rows = rows[-self.MAX_ARTIFACT_TABLE_PREVIEW_ROWS :] if rows else []
+        return {
+            "path": artifact_path,
+            "kind": "csv",
+            "columns": list(reader.fieldnames),
+            "row_count": len(rows),
+            "head_rows": head_rows,
+            "tail_rows": tail_rows,
+        }
+
+    def _build_json_artifact_preview(
+        self,
+        *,
+        artifact_path: str,
+        source_path: Path,
+    ) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(source_path.read_text(encoding="utf-8"))
+        except Exception:
+            return self._build_text_artifact_preview(
+                artifact_path=artifact_path,
+                source_path=source_path,
+            )
+        preview: dict[str, Any] = {
+            "path": artifact_path,
+            "kind": "json",
+            "json_type": type(payload).__name__,
+        }
+        if isinstance(payload, dict):
+            preview["keys"] = list(payload.keys())[:20]
+            preview["value_preview"] = {
+                key: payload[key]
+                for key in list(payload.keys())[:10]
+            }
+        elif isinstance(payload, list):
+            preview["row_count"] = len(payload)
+            preview["items_preview"] = payload[: self.MAX_ARTIFACT_TABLE_PREVIEW_ROWS]
+        else:
+            preview["value"] = payload
+        return preview
+
+    def _build_text_artifact_preview(
+        self,
+        *,
+        artifact_path: str,
+        source_path: Path,
+    ) -> dict[str, Any] | None:
+        try:
+            text = source_path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+        excerpt = text[: self.MAX_ARTIFACT_TEXT_PREVIEW_CHARS]
+        return {
+            "path": artifact_path,
+            "kind": "text",
+            "excerpt": excerpt,
+            "truncated": len(text) > len(excerpt),
+        }
 
     @staticmethod
     def _is_transport_overflow_error(message: str) -> bool:

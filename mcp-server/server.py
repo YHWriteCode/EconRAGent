@@ -125,6 +125,7 @@ from mcp_server_runtime.workspace import (
     _truncate_log,
     _write_json_atomic,
     _write_mirrored_skill_manifest,
+    _write_skill_context,
     _write_skill_request,
     _write_terminal_snapshot,
 )
@@ -364,6 +365,7 @@ _EXECUTION_MANAGER = RuntimeExecutionManager(
         materialize_skill_workspace_view=_materialize_skill_workspace_view,
         write_mirrored_skill_manifest=_write_mirrored_skill_manifest,
         write_skill_request=_write_skill_request,
+        write_skill_context=_write_skill_context,
         collect_workspace_artifacts=_collect_workspace_artifacts,
         truncate_log=_truncate_log,
         write_terminal_snapshot=_write_terminal_snapshot,

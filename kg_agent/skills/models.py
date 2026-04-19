@@ -401,6 +401,7 @@ class SkillRunRecord:
     exit_code: int | None = None
     failure_reason: str | None = None
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    artifact_previews: list[dict[str, Any]] = field(default_factory=list)
     logs_preview: dict[str, Any] = field(default_factory=dict)
     runtime: dict[str, Any] = field(default_factory=dict)
     runtime_result: dict[str, Any] = field(default_factory=dict)
@@ -420,6 +421,19 @@ class SkillRunRecord:
     cancel_requested: bool = False
 
     def to_public_dict(self) -> dict[str, Any]:
+        hints = dict(self.command_plan.hints)
+        shell_mode_requested = normalize_shell_mode(
+            hints.get(
+                "shell_mode_requested",
+                self.command_plan.constraints.get("shell_mode", self.command_plan.shell_mode),
+            )
+        )
+        shell_mode_effective = normalize_shell_mode(
+            hints.get("shell_mode_effective", self.command_plan.shell_mode)
+        )
+        shell_mode_escalated = bool(
+            hints.get("shell_mode_escalated", shell_mode_requested != shell_mode_effective)
+        )
         payload = {
             "run_id": self.run_id,
             "skill_name": self.skill_name,
@@ -431,6 +445,20 @@ class SkillRunRecord:
             "command_plan": self.command_plan.to_dict(),
             "planning_mode": self.command_plan.mode,
             "shell_mode": self.command_plan.shell_mode,
+            "shell_mode_requested": shell_mode_requested,
+            "shell_mode_effective": shell_mode_effective,
+            "shell_mode_escalated": shell_mode_escalated,
+            "shell_mode_escalation_reason": hints.get("shell_mode_escalation_reason"),
+            "auto_inferred_constraints": dict(hints.get("auto_inferred_constraints", {}))
+            if isinstance(hints.get("auto_inferred_constraints"), dict)
+            else {},
+            "planning_blockers": [
+                dict(item)
+                for item in hints.get("planning_blockers", [])
+                if isinstance(item, dict)
+            ]
+            if isinstance(hints.get("planning_blockers"), list)
+            else [],
             "runtime_target": self.command_plan.runtime_target.to_dict(),
             "workspace": self.workspace,
             "started_at": self.started_at,
@@ -438,6 +466,7 @@ class SkillRunRecord:
             "exit_code": self.exit_code,
             "failure_reason": self.failure_reason,
             "artifacts": [dict(item) for item in self.artifacts],
+            "artifact_previews": [dict(item) for item in self.artifact_previews],
             "logs_preview": dict(self.logs_preview),
             "runtime": dict(self.runtime),
             "runtime_result": dict(self.runtime_result),
@@ -498,6 +527,7 @@ class SkillRunRecord:
             success=bool(data.get("success")),
         )
         artifacts = data.get("artifacts")
+        artifact_previews = data.get("artifact_previews")
         logs_preview = data.get("logs_preview")
         runtime = data.get("runtime")
         runtime_result = data.get("runtime_result")
@@ -563,6 +593,13 @@ class SkillRunRecord:
             artifacts=[
                 dict(item)
                 for item in (artifacts if isinstance(artifacts, list) else [])
+                if isinstance(item, dict)
+            ],
+            artifact_previews=[
+                dict(item)
+                for item in (
+                    artifact_previews if isinstance(artifact_previews, list) else []
+                )
                 if isinstance(item, dict)
             ],
             logs_preview=dict(logs_preview) if isinstance(logs_preview, dict) else {},

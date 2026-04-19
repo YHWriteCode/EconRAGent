@@ -78,6 +78,7 @@ class RuntimeExecutionDeps:
     materialize_skill_workspace_view: Callable[..., list[str]]
     write_mirrored_skill_manifest: Callable[..., None]
     write_skill_request: Callable[..., Path]
+    write_skill_context: Callable[..., Path]
     collect_workspace_artifacts: Callable[[Path], list[dict[str, Any]]]
     truncate_log: Callable[[str], tuple[str, bool]]
     write_terminal_snapshot: Callable[..., None]
@@ -670,6 +671,7 @@ class RuntimeExecutionManager:
         started_at: str,
         workspace_dir: Path,
         request_file: Path,
+        context_file: Path,
         generated_files: list[str],
         preflight: dict[str, Any],
         shell_command: str,
@@ -698,10 +700,6 @@ class RuntimeExecutionManager:
             bootstrap_history: list[dict[str, Any]] = []
             bootstrap_stdout_parts: list[str] = []
             bootstrap_stderr_parts: list[str] = []
-            repairable_free_shell = (
-                command_plan.shell_mode == "free_shell"
-                and command_plan.mode in {"free_shell", "generated_script"}
-            )
 
             current_plan = command_plan
             current_preflight = preflight
@@ -709,6 +707,17 @@ class RuntimeExecutionManager:
             current_generated_files = list(generated_files)
             current_bootstrap_pending = bool(current_plan.bootstrap_commands)
             current_env = dict(env)
+
+            def _can_attempt_llm_repair(plan: SkillCommandPlan) -> bool:
+                if plan.mode == "explicit":
+                    return False
+                llm_client = self.deps.get_llm_client()
+                return bool(
+                    llm_client is not None
+                    and llm_client.is_available()
+                    and not self.deps.is_cancel_requested(run_id)
+                    and repair_attempt_count < self.deps.max_repair_attempts
+                )
 
             while True:
                 final_plan = current_plan
@@ -725,6 +734,7 @@ class RuntimeExecutionManager:
                         constraints=request.constraints,
                         runtime_target=request.runtime_target,
                         request_file=request_file,
+                        context_file=context_file,
                         loaded_skill=loaded_skill,
                         command_plan=current_plan,
                         materialize_skill_env=not is_dry_run(request.constraints),
@@ -745,7 +755,137 @@ class RuntimeExecutionManager:
                         workspace_dir=workspace_dir,
                         stderr=str(exc),
                     )
-                    break
+                    can_repair_env = _can_attempt_llm_repair(current_plan)
+                    if not can_repair_env:
+                        break
+
+                    snapshot_index = len(repair_history) + 1
+                    repair_attempted = True
+                    failed_attempt_record = self.deps.skill_run_record_cls(
+                        skill_name=request.skill_name,
+                        run_status="failed",
+                        success=False,
+                        summary=(
+                            f"Skill environment attempt {snapshot_index} for skill "
+                            f"'{request.skill_name}' failed."
+                        ),
+                        command_plan=current_plan,
+                        run_id=run_id,
+                        command=current_command,
+                        workspace=str(workspace_dir),
+                        started_at=started_at,
+                        finished_at=self.deps.utc_now(),
+                        failure_reason="skill_env_unavailable",
+                        artifacts=self.deps.collect_workspace_artifacts(workspace_dir),
+                        logs_preview=final_execution["logs_preview"],
+                        runtime=self.runtime_metadata_with_skill_env(
+                            runtime=self.durable_runtime_metadata(
+                                free_shell_repair_limit=self.deps.max_repair_attempts,
+                            ),
+                            skill_env_spec=current_skill_env_spec,
+                        ),
+                        preflight=current_preflight,
+                        repair_attempted=True,
+                        repair_attempt_count=repair_attempt_count,
+                        repair_attempt_limit=self.deps.max_repair_attempts,
+                        repair_history=list(repair_history),
+                        bootstrap_attempted=bootstrap_attempted,
+                        bootstrap_succeeded=bootstrap_succeeded,
+                        bootstrap_attempt_count=bootstrap_attempt_count,
+                        bootstrap_attempt_limit=self.deps.max_bootstrap_attempts,
+                        bootstrap_history=list(bootstrap_history),
+                    )
+                    failed_attempt_payload = self.deps.build_run_record_payload(
+                        record=failed_attempt_record,
+                        goal=request.goal,
+                        user_query=request.user_query,
+                        constraints=request.constraints,
+                        payload=skill_payload,
+                        loaded_skill=loaded_skill,
+                    )
+                    failed_attempt_payload["request_file"] = str(request_file)
+                    failed_attempt_payload["context_file"] = str(context_file)
+                    failed_attempt_payload["generated_files"] = list(current_generated_files)
+                    failed_attempt_payload["logs"] = {
+                        "stdout": "",
+                        "stderr": str(exc),
+                    }
+                    snapshot_run_id = self.store_attempt_snapshot(
+                        base_run_id=run_id,
+                        suffix=f"attempt-{snapshot_index}",
+                        record=failed_attempt_payload,
+                    )
+                    if repaired_from_run_id is None:
+                        repaired_from_run_id = snapshot_run_id
+                    repair_history.append(
+                        {
+                            "attempt_index": snapshot_index,
+                            "snapshot_run_id": snapshot_run_id,
+                            "stage": "environment",
+                            "plan_mode": current_plan.mode,
+                            "entrypoint": current_plan.entrypoint,
+                            "generated_files": [item.path for item in current_plan.generated_files],
+                            "command": current_command,
+                            "preflight_status": current_preflight.get("status"),
+                            "preflight_failure_reason": current_preflight.get("failure_reason"),
+                            "failure_reason": "skill_env_unavailable",
+                            "exit_code": None,
+                            "started_at": started_at,
+                            "finished_at": self.deps.utc_now(),
+                            "duration_s": None,
+                            "stdout_tail": "",
+                            "stderr_tail": str(exc)[-2000:],
+                        }
+                    )
+                    repair_attempt_count += 1
+
+                    try:
+                        repaired_plan = await self.deps.attempt_repair_plan(
+                            loaded_skill=loaded_skill,
+                            request=request,
+                            command_plan=current_plan,
+                            command=current_command or "",
+                            failure_stage="environment",
+                            exit_code=None,
+                            stdout="",
+                            stderr=str(exc),
+                            preflight=current_preflight,
+                            repair_history=repair_history,
+                            llm_client=self.deps.get_llm_client(),
+                        )
+                    except Exception:
+                        repaired_plan = None
+                    if repaired_plan is None:
+                        break
+
+                    if current_generated_files:
+                        self.remove_workspace_files(
+                            workspace_dir=workspace_dir,
+                            relative_paths=current_generated_files,
+                        )
+                    current_plan = repaired_plan
+                    current_preflight, current_generated_files = self.deps.run_preflight(
+                        workspace_dir=workspace_dir,
+                        command_plan=current_plan,
+                        env=current_env,
+                    )
+                    current_command = self.deps.materialize_shell_command(
+                        loaded_skill=loaded_skill,
+                        command_plan=current_plan,
+                        workspace_dir=workspace_dir,
+                    )
+                    current_bootstrap_pending = bool(current_plan.bootstrap_commands)
+                    if not current_command:
+                        current_preflight = {
+                            **dict(current_preflight),
+                            "status": "manual_required",
+                            "ok": False,
+                            "failure_reason": (
+                                current_preflight.get("failure_reason")
+                                or "command_materialization_failed"
+                            ),
+                        }
+                    continue
 
                 if current_plan.bootstrap_commands and current_bootstrap_pending:
                     if bootstrap_attempt_count >= self.deps.max_bootstrap_attempts:
@@ -840,11 +980,7 @@ class RuntimeExecutionManager:
                     final_execution = self.failed_execution_payload(
                         workspace_dir=workspace_dir
                     )
-                    can_repair_preflight = (
-                        repairable_free_shell
-                        and not self.deps.is_cancel_requested(run_id)
-                        and repair_attempt_count < self.deps.max_repair_attempts
-                    )
+                    can_repair_preflight = _can_attempt_llm_repair(current_plan)
                     if not can_repair_preflight:
                         break
 
@@ -893,6 +1029,7 @@ class RuntimeExecutionManager:
                         loaded_skill=loaded_skill,
                     )
                     failed_attempt_payload["request_file"] = str(request_file)
+                    failed_attempt_payload["context_file"] = str(context_file)
                     failed_attempt_payload["generated_files"] = list(current_generated_files)
                     failed_attempt_payload["logs"] = {"stdout": "", "stderr": ""}
                     snapshot_run_id = self.store_attempt_snapshot(
@@ -982,10 +1119,9 @@ class RuntimeExecutionManager:
                     execution.get("cancelled") or execution.get("cancel_requested")
                 )
                 can_repair_execution = (
-                    repairable_free_shell
+                    _can_attempt_llm_repair(current_plan)
                     and not execution["success"]
                     and not execution_cancelled
-                    and repair_attempt_count < self.deps.max_repair_attempts
                 )
                 if not can_repair_execution:
                     break
@@ -1036,6 +1172,7 @@ class RuntimeExecutionManager:
                     loaded_skill=loaded_skill,
                 )
                 failed_attempt_payload["request_file"] = str(request_file)
+                failed_attempt_payload["context_file"] = str(context_file)
                 failed_attempt_payload["generated_files"] = list(current_generated_files)
                 failed_attempt_payload["logs"] = {
                     "stdout": execution["stdout"],
@@ -1217,6 +1354,7 @@ class RuntimeExecutionManager:
                 loaded_skill=loaded_skill,
             )
             response["request_file"] = str(request_file)
+            response["context_file"] = str(context_file)
             response["generated_files"] = generated_files
             response["timed_out"] = bool(final_execution.get("timed_out", False))
             response["logs"] = {
@@ -1270,6 +1408,7 @@ class RuntimeExecutionManager:
                 loaded_skill=loaded_skill,
             )
             response["request_file"] = str(request_file)
+            response["context_file"] = str(context_file)
             response["generated_files"] = generated_files
             response["logs"] = {"stdout": "", "stderr": str(exc)}
             try:
@@ -1302,6 +1441,7 @@ class RuntimeExecutionManager:
         started_at: str,
         workspace_dir: Path,
         request_file: Path,
+        context_file: Path,
         generated_files: list[str],
         preflight: dict[str, Any],
         shell_command: str,
@@ -1326,6 +1466,7 @@ class RuntimeExecutionManager:
             "started_at": started_at,
             "workspace_dir": str(workspace_dir),
             "request_file": str(request_file),
+            "context_file": str(context_file),
             "generated_files": list(generated_files),
             "preflight": dict(preflight),
             "shell_command": shell_command,
@@ -1370,6 +1511,7 @@ class RuntimeExecutionManager:
         run_id = f"skill-run-{uuid.uuid4().hex}"
         started_at = self.deps.utc_now()
         request_file: Path | None = None
+        context_file: Path | None = None
         effective_runtime_target = command_plan.runtime_target
 
         cleanup_workspace_here = cleanup_workspace
@@ -1388,24 +1530,46 @@ class RuntimeExecutionManager:
                 goal=request.goal,
                 user_query=request.user_query,
                 constraints=request.constraints,
+                workspace=request.workspace,
+                runtime_target=effective_runtime_target.to_dict(),
+                command_plan=command_plan.to_dict(),
             )
-            env, skill_env_spec = self.deps.build_run_env(
-                skill_dir=Path(skill_payload["path"]).resolve(),
+            context_file = self.deps.write_skill_context(
                 workspace_dir=workspace_dir,
-                goal=request.goal,
-                user_query=request.user_query,
-                constraints=request.constraints,
-                runtime_target=effective_runtime_target,
-                request_file=request_file,
-                loaded_skill=loaded_skill,
-                command_plan=command_plan,
-                materialize_skill_env=False,
+                skill_payload=skill_payload,
             )
-            preflight, generated_files = self.deps.run_preflight(
-                workspace_dir=workspace_dir,
-                command_plan=command_plan,
-                env=env,
-            )
+            initial_skill_env_error: str | None = None
+            try:
+                env, skill_env_spec = self.deps.build_run_env(
+                    skill_dir=Path(skill_payload["path"]).resolve(),
+                    workspace_dir=workspace_dir,
+                    goal=request.goal,
+                    user_query=request.user_query,
+                    constraints=request.constraints,
+                    runtime_target=effective_runtime_target,
+                    request_file=request_file,
+                    context_file=context_file,
+                    loaded_skill=loaded_skill,
+                    command_plan=command_plan,
+                    materialize_skill_env=False,
+                )
+                preflight, generated_files = self.deps.run_preflight(
+                    workspace_dir=workspace_dir,
+                    command_plan=command_plan,
+                    env=env,
+                )
+            except SkillServerError as exc:
+                initial_skill_env_error = str(exc)
+                env = os.environ.copy()
+                skill_env_spec = {"error": initial_skill_env_error}
+                preflight = {
+                    "status": "manual_required",
+                    "ok": False,
+                    "failure_reason": "skill_env_unavailable",
+                    "required_tools": [],
+                    "generated_files": [],
+                }
+                generated_files = []
             shell_command = self.deps.materialize_shell_command(
                 loaded_skill=loaded_skill,
                 command_plan=command_plan,
@@ -1423,8 +1587,7 @@ class RuntimeExecutionManager:
 
             can_auto_repair_preflight = (
                 not is_dry_run(request.constraints)
-                and command_plan.shell_mode == "free_shell"
-                and command_plan.mode in {"free_shell", "generated_script"}
+                and command_plan.mode != "explicit"
                 and self.deps.get_llm_client().is_available()
             )
             can_auto_bootstrap_preflight = (
@@ -1463,9 +1626,13 @@ class RuntimeExecutionManager:
                     loaded_skill=loaded_skill,
                 )
                 response["request_file"] = str(request_file)
+                response["context_file"] = str(context_file)
                 response["generated_files"] = generated_files
                 response["mirrored_skill_files"] = mirrored_skill_files
-                response["logs"] = {"stdout": "", "stderr": ""}
+                response["logs"] = {
+                    "stdout": "",
+                    "stderr": initial_skill_env_error or "",
+                }
                 self.store_run_record(response)
                 return self.deps.prepare_transport_payload(response)
 
@@ -1515,9 +1682,13 @@ class RuntimeExecutionManager:
                 skill_env_spec=skill_env_spec,
             )
             running_payload["request_file"] = str(request_file)
+            running_payload["context_file"] = str(context_file)
             running_payload["generated_files"] = generated_files
             running_payload["mirrored_skill_files"] = mirrored_skill_files
-            running_payload["logs"] = {"stdout": "", "stderr": ""}
+            running_payload["logs"] = {
+                "stdout": "",
+                "stderr": initial_skill_env_error or "",
+            }
             self.store_run_record(running_payload)
             job_context = self.build_worker_job_context(
                 request=request,
@@ -1526,6 +1697,7 @@ class RuntimeExecutionManager:
                 started_at=started_at,
                 workspace_dir=workspace_dir,
                 request_file=request_file,
+                context_file=context_file,
                 generated_files=generated_files,
                 preflight=preflight,
                 shell_command=shell_command,
@@ -1576,6 +1748,7 @@ class RuntimeExecutionManager:
                     loaded_skill=loaded_skill,
                 )
                 failed_payload["request_file"] = str(request_file)
+                failed_payload["context_file"] = str(context_file)
                 failed_payload["generated_files"] = generated_files
                 failed_payload["mirrored_skill_files"] = mirrored_skill_files
                 failed_payload["logs"] = {"stdout": "", "stderr": ""}
@@ -1667,6 +1840,7 @@ class RuntimeExecutionManager:
         started_at = str(job_context.get("started_at") or self.deps.utc_now())
         workspace_dir = Path(str(job_context.get("workspace_dir", ""))).resolve()
         request_file = Path(str(job_context.get("request_file", ""))).resolve()
+        context_file = Path(str(job_context.get("context_file", ""))).resolve()
         generated_files = [
             str(item)
             for item in (
@@ -1736,6 +1910,7 @@ class RuntimeExecutionManager:
                 loaded_skill=loaded_skill,
             )
             cancelled_payload["request_file"] = str(request_file)
+            cancelled_payload["context_file"] = str(context_file)
             cancelled_payload["generated_files"] = generated_files
             cancelled_payload["logs"] = {"stdout": "", "stderr": ""}
             try:
@@ -1766,6 +1941,7 @@ class RuntimeExecutionManager:
             constraints=request.constraints,
             runtime_target=runtime_target,
             request_file=request_file,
+            context_file=context_file,
             loaded_skill=loaded_skill,
             command_plan=command_plan,
             materialize_skill_env=False,
@@ -1779,6 +1955,7 @@ class RuntimeExecutionManager:
             started_at=started_at,
             workspace_dir=workspace_dir,
             request_file=request_file,
+            context_file=context_file,
             generated_files=generated_files,
             preflight=preflight,
             shell_command=shell_command,

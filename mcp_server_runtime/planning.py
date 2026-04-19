@@ -115,7 +115,8 @@ def _build_free_shell_repair_prompt(
     repair_history: list[dict[str, Any]],
 ) -> tuple[str, str]:
     system_prompt = (
-        "You repair failed free-shell skill execution plans. "
+        "You repair failed skill execution plans. "
+        "When a conservative plan is stuck, you may upgrade it into a free-shell or generated-script plan. "
         "Return strict JSON only. "
         "Do not explain outside the JSON payload."
     )
@@ -152,8 +153,8 @@ def _build_free_shell_repair_prompt(
         f"{stdout[-5000:]}\n\n"
         "stderr:\n"
         f"{stderr[-5000:]}\n\n"
-        "Skill docs excerpt:\n"
-        f"{loaded_skill.skill_md[:7000]}\n\n"
+        "Full SKILL.md content:\n"
+        f"{loaded_skill.skill_md}\n\n"
         "Rules:\n"
         "1. Prefer the minimal repair that fixes the observed failure.\n"
         "2. Preserve the declared runtime target.\n"
@@ -162,9 +163,13 @@ def _build_free_shell_repair_prompt(
         "5. When you return generated_files, you may omit command and instead set entrypoint plus optional cli_args.\n"
         "6. When the task involves substantial Python logic, prefer generated_files plus entrypoint over a long python -c one-liner.\n"
         "7. If the failure is caused by missing dependencies or tools and setup can be done safely, return bootstrap_commands and explain them in bootstrap_reason.\n"
-        "8. For Python package bootstrap, prefer workspace-local commands such as python -m pip install --target ./.skill_bootstrap/site-packages <packages>.\n"
-        "9. If the current failure is in preflight, fix the plan itself instead of restating the same invalid command.\n"
-        "10. If the failure cannot be repaired safely within the remaining repair budget, return manual_required.\n"
+        "8. Treat natural-language dependency guidance anywhere in SKILL.md as valid repair input, even when there is no explicit Dependencies section.\n"
+        "9. For isolated dependency bootstrap, prefer the provided bootstrap env variables instead of global installs. For Python packages, prefer commands such as python -m pip install --target \"$SKILL_BOOTSTRAP_SITE_PACKAGES\" <packages> on POSIX or python -m pip install --target $env:SKILL_BOOTSTRAP_SITE_PACKAGES <packages> on PowerShell. Plain python -m pip install <packages> is also acceptable because PIP_TARGET is preconfigured.\n"
+        "10. For Node/global CLI bootstrap, prefer the provided bootstrap root via NPM_CONFIG_PREFIX instead of system-global npm installs.\n"
+        "11. If the current failure is in preflight, fix the plan itself instead of restating the same invalid command.\n"
+        "12. Treat the original goal, user query, structured constraints, and full SKILL.md as durable context. Prior repair history represents CLI execution history; use it to iteratively refine the next command instead of restarting from scratch.\n"
+        "13. If the original request is vague but recoverable with low-risk defaults, fill them and continue instead of returning manual_required.\n"
+        "14. If the failure cannot be repaired safely within the remaining repair budget, return manual_required.\n"
         "Keep JSON valid and do not include markdown fences."
     )
     return system_prompt, user_prompt
@@ -416,7 +421,7 @@ async def _attempt_repair_plan(
         constraints=dict(base_plan.constraints),
         command=base_plan.command,
         mode=base_plan.mode,
-        shell_mode=base_plan.shell_mode,
+        shell_mode="free_shell",
         rationale=base_plan.rationale,
         entrypoint=base_plan.entrypoint,
         cli_args=list(base_plan.cli_args),
@@ -428,6 +433,31 @@ async def _attempt_repair_plan(
         hints={
             **dict(command_plan.hints),
             "planner": "free_shell",
+            "shell_mode_requested": dict(command_plan.hints).get(
+                "shell_mode_requested",
+                command_plan.shell_mode,
+            ),
+            "shell_mode_effective": "free_shell",
+            "shell_mode_escalated": (
+                str(
+                    dict(command_plan.hints).get(
+                        "shell_mode_requested",
+                        command_plan.shell_mode,
+                    )
+                ).strip().lower()
+                != "free_shell"
+            ),
+            "shell_mode_escalation_reason": (
+                str(base_plan.failure_reason or "").strip()
+                or f"runtime_{failure_stage}_repair"
+            ),
+            "planning_blockers": [
+                {
+                    "failure_reason": str(base_plan.failure_reason or "").strip() or None,
+                    "missing_fields": list(base_plan.missing_fields),
+                    "rationale": str(base_plan.rationale or "").strip() or None,
+                }
+            ],
             "required_tools": required_tools,
             "warnings": (
                 [

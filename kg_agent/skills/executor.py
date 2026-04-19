@@ -111,8 +111,9 @@ class SkillExecutor:
                     skill_name=skill_name,
                     run_status="manual_required",
                     success=False,
-                    summary=(
-                        f"Skill '{skill_name}' needs additional execution detail before it can run."
+                    summary=command_plan.rationale
+                    or (
+                        f"Skill '{skill_name}' could not be planned automatically."
                     ),
                     command_plan=command_plan,
                     command=command_plan.command,

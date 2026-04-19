@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import calendar
+import json
 import os
 import re
 import shlex
+import textwrap
 from dataclasses import dataclass
 from datetime import date, timedelta
+from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Protocol
 
@@ -37,7 +40,6 @@ ENV_VAR_PATTERN = re.compile(
 )
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
 MAX_SCRIPT_PREVIEW_CHARS = 1400
-MAX_MARKDOWN_EXCERPT_CHARS = 9000
 MAX_GENERATED_FILE_COUNT = 5
 MAX_GENERATED_FILE_BYTES = 64000
 MAX_BOOTSTRAP_COMMAND_COUNT = 4
@@ -132,6 +134,14 @@ GENERIC_INFERABLE_CONSTRAINT_KEYS = {
     "input_paths",
     "format",
     "output_format",
+    "topic",
+    "title",
+    "language",
+    "audience",
+    "style",
+    "theme",
+    "slide_count",
+    "template",
     "mode",
     "dry_run",
     "plan_only",
@@ -158,6 +168,85 @@ SCRIPT_FIRST_REQUEST_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+AUTO_FREE_SHELL_FALLBACK_FAILURE_REASONS = {
+    "manual_command_required",
+    "missing_required_args",
+    "environment_not_prepared",
+}
+AUTO_FREE_SHELL_CREATION_ONLY_FAILURE_REASONS = {
+    "missing_input_path",
+}
+NON_ESCALATABLE_MANUAL_FAILURE_REASONS = {
+    "missing_credential",
+    "ambiguous_target_file",
+}
+CREATION_REQUEST_PATTERN = re.compile(
+    r"("
+    r"create|build|make|generate|draft|compose|produce|"
+    r"\u751f\u6210|\u521b\u5efa|\u5236\u4f5c|\u505a(?:\u4e00\u4e2a|\u4e2a)?|\u5199(?:\u4e00\u4e2a|\u4e2a)?"
+    r")",
+    re.IGNORECASE,
+)
+PPTX_HISTORY_REQUEST_PATTERN = re.compile(
+    r"("
+    r"起源|发展|演进|历史|里程碑|时间线|"
+    r"origin|history|evolution|timeline|milestone"
+    r")",
+    re.IGNORECASE,
+)
+PPTX_GENERATIVE_AI_PATTERN = re.compile(
+    r"("
+    r"生成式人工智能|生成式ai|生成式 AI|生成式模型|大模型|"
+    r"generative\s+ai|foundation\s+model|large\s+language\s+model|llm"
+    r")",
+    re.IGNORECASE,
+)
+PPTX_DEFAULT_TEMPLATE_B64_PATH = Path(__file__).with_name("pptx_default_template.b64")
+PPTX_DEFAULT_SLIDE_COUNT = 10
+PPTX_MIN_SLIDE_COUNT = 4
+PPTX_MAX_SLIDE_COUNT = 14
+PPTX_THEME_PALETTES = {
+    "charcoal_minimal": {
+        "name": "charcoal_minimal",
+        "dark": "36454F",
+        "light": "F7F7F5",
+        "accent": "212121",
+        "accent_soft": "D7DADD",
+        "text_dark": "1F2933",
+        "text_light": "FFFFFF",
+        "muted": "667085",
+    },
+    "midnight_executive": {
+        "name": "midnight_executive",
+        "dark": "1E2761",
+        "light": "F5F8FF",
+        "accent": "5B8DEF",
+        "accent_soft": "D8E4FF",
+        "text_dark": "1D2433",
+        "text_light": "FFFFFF",
+        "muted": "5B6475",
+    },
+    "forest_moss": {
+        "name": "forest_moss",
+        "dark": "2C5F2D",
+        "light": "F6FAF2",
+        "accent": "97BC62",
+        "accent_soft": "E1EFD0",
+        "text_dark": "23331F",
+        "text_light": "FFFFFF",
+        "muted": "60715A",
+    },
+    "coral_energy": {
+        "name": "coral_energy",
+        "dark": "2F3C7E",
+        "light": "FFF8F2",
+        "accent": "F96167",
+        "accent_soft": "FDE0D9",
+        "text_dark": "2B2F38",
+        "text_light": "FFFFFF",
+        "muted": "6B7280",
+    },
+}
 FINANCIAL_PIPELINE_REQUEST_PATTERN = re.compile(
     r"("
     r"backtest|"
@@ -515,6 +604,13 @@ def _sanitize_inferred_constraint_value(key: str, value: Any) -> Any:
     if normalized_key in {
         "format",
         "output_format",
+        "topic",
+        "title",
+        "language",
+        "audience",
+        "style",
+        "theme",
+        "template",
         "mode",
         "dep",
         "indep",
@@ -524,6 +620,11 @@ def _sanitize_inferred_constraint_value(key: str, value: Any) -> Any:
         "operation",
     }:
         return _normalize_simple_string(value)
+    if normalized_key == "slide_count":
+        if isinstance(value, (int, float)) and int(value) > 0:
+            return str(int(value))
+        candidate = str(value or "").strip()
+        return candidate if candidate.isdigit() and int(candidate) > 0 else None
     if isinstance(value, str):
         return _normalize_simple_string(value)
     return None
@@ -1643,6 +1744,54 @@ def load_script_previews(
     return ranked[: max(1, limit)]
 
 
+def _compact_file_inventory_for_free_shell(
+    file_inventory: list[dict[str, Any]],
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    candidates = [
+        dict(item)
+        for item in file_inventory
+        if isinstance(item, dict)
+    ]
+    prioritized = sorted(
+        candidates,
+        key=lambda item: (
+            0
+            if str(item.get("kind", "")).strip() in {"skill_doc", "script", "markdown", "reference"}
+            else 1,
+            0
+            if str(item.get("path", "")).replace("\\", "/") == "SKILL.md"
+            else 1,
+            str(item.get("path", "")),
+        ),
+    )
+    return prioritized[: max(1, limit)]
+
+
+def _compact_script_previews_for_free_shell(
+    script_previews: list[dict[str, Any]],
+    *,
+    limit: int = 2,
+    preview_chars: int = 500,
+) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    for item in script_previews[: max(1, limit)]:
+        if not isinstance(item, dict):
+            continue
+        compacted.append(
+            {
+                "path": str(item.get("path", "")).strip(),
+                "score": item.get("score"),
+                "preview": _truncate_text(
+                    str(item.get("preview", "")),
+                    max_chars=preview_chars,
+                ),
+            }
+        )
+    return compacted
+
+
 def _clone_plan_with_shell_mode(
     plan: SkillCommandPlan,
     *,
@@ -1661,10 +1810,142 @@ def _clone_plan_with_shell_mode(
         entrypoint=plan.entrypoint,
         cli_args=list(plan.cli_args),
         generated_files=list(plan.generated_files),
+        bootstrap_commands=list(plan.bootstrap_commands),
+        bootstrap_reason=plan.bootstrap_reason,
         missing_fields=list(plan.missing_fields),
         failure_reason=plan.failure_reason,
         hints=dict(plan.hints),
     )
+
+
+def _clone_plan_with_hints(
+    plan: SkillCommandPlan,
+    *,
+    hints: dict[str, Any],
+) -> SkillCommandPlan:
+    return SkillCommandPlan(
+        skill_name=plan.skill_name,
+        goal=plan.goal,
+        user_query=plan.user_query,
+        runtime_target=plan.runtime_target,
+        constraints=dict(plan.constraints),
+        command=plan.command,
+        mode=plan.mode,
+        shell_mode=plan.shell_mode,
+        rationale=plan.rationale,
+        entrypoint=plan.entrypoint,
+        cli_args=list(plan.cli_args),
+        generated_files=list(plan.generated_files),
+        bootstrap_commands=list(plan.bootstrap_commands),
+        bootstrap_reason=plan.bootstrap_reason,
+        missing_fields=list(plan.missing_fields),
+        failure_reason=plan.failure_reason,
+        hints=hints,
+    )
+
+
+def _should_attempt_auto_free_shell_plan(
+    plan: SkillCommandPlan,
+    *,
+    loaded_skill: LoadedSkill,
+    request: SkillExecutionRequest,
+) -> bool:
+    if not plan.is_manual_required:
+        return False
+    failure_reason = str(plan.failure_reason or "").strip().lower()
+    if failure_reason in NON_ESCALATABLE_MANUAL_FAILURE_REASONS:
+        return False
+    if failure_reason in AUTO_FREE_SHELL_FALLBACK_FAILURE_REASONS:
+        return True
+    if failure_reason in AUTO_FREE_SHELL_CREATION_ONLY_FAILURE_REASONS:
+        return _is_creation_or_generation_request(loaded_skill=loaded_skill, request=request)
+    return False
+
+
+def _build_plan_blockers(plan: SkillCommandPlan) -> list[dict[str, Any]]:
+    failure_reason = str(plan.failure_reason or "").strip()
+    missing_fields = [str(item) for item in plan.missing_fields if str(item).strip()]
+    rationale = str(plan.rationale or "").strip()
+    if not any([failure_reason, missing_fields, rationale]):
+        return []
+    return [
+        {
+            "failure_reason": failure_reason or None,
+            "missing_fields": missing_fields,
+            "rationale": rationale or None,
+        }
+    ]
+
+
+def _finalize_plan_metadata(
+    plan: SkillCommandPlan,
+    *,
+    requested_shell_mode: SkillShellMode,
+    constraint_inference_metadata: dict[str, Any] | None,
+    planning_blockers: list[dict[str, Any]] | None = None,
+    escalation_reason: str | None = None,
+) -> SkillCommandPlan:
+    hints = dict(plan.hints)
+    inferred_constraints = {}
+    if isinstance(constraint_inference_metadata, dict):
+        applied = constraint_inference_metadata.get("applied")
+        if isinstance(applied, dict):
+            inferred_constraints = {
+                str(key): value for key, value in applied.items() if str(key).strip()
+            }
+    blockers = (
+        [dict(item) for item in planning_blockers if isinstance(item, dict)]
+        if isinstance(planning_blockers, list)
+        else _build_plan_blockers(plan)
+    )
+    effective_shell_mode = normalize_shell_mode(plan.shell_mode)
+    requested_normalized = normalize_shell_mode(requested_shell_mode)
+    shell_mode_escalated = requested_normalized != effective_shell_mode
+    hints["shell_mode_requested"] = requested_normalized
+    hints["shell_mode_effective"] = effective_shell_mode
+    hints["shell_mode_escalated"] = shell_mode_escalated
+    if escalation_reason:
+        hints["shell_mode_escalation_reason"] = escalation_reason
+    elif shell_mode_escalated and "shell_mode_escalation_reason" not in hints:
+        hints["shell_mode_escalation_reason"] = str(plan.failure_reason or "").strip() or None
+    if inferred_constraints:
+        hints["auto_inferred_constraints"] = inferred_constraints
+    if blockers:
+        hints["planning_blockers"] = blockers
+    return _clone_plan_with_hints(plan, hints=hints)
+
+
+def _is_creation_or_generation_request(
+    *,
+    loaded_skill: LoadedSkill,
+    request: SkillExecutionRequest,
+) -> bool:
+    constraints = dict(request.constraints or {})
+    if extract_input_paths(constraints):
+        return False
+    if any(
+        key in constraints
+        for key in (
+            "topic",
+            "title",
+            "output_format",
+            "slide_count",
+            "style",
+            "theme",
+            "language",
+            "audience",
+            "template",
+        )
+    ):
+        return True
+    query_text = "\n".join(
+        [
+            str(request.goal or ""),
+            str(request.user_query or ""),
+            loaded_skill.skill.name,
+        ]
+    )
+    return bool(CREATION_REQUEST_PATTERN.search(query_text))
 
 
 def _build_preferred_shipped_script_plan(
@@ -1792,6 +2073,1023 @@ def _build_preferred_shipped_script_plan(
     )
 
 
+@lru_cache(maxsize=1)
+def _load_pptx_default_template_b64() -> str | None:
+    try:
+        payload = PPTX_DEFAULT_TEMPLATE_B64_PATH.read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+    return payload or None
+
+
+def _is_pptx_creation_request(
+    *,
+    loaded_skill: LoadedSkill,
+    request: SkillExecutionRequest,
+) -> bool:
+    if loaded_skill.skill.name.strip().lower() != "pptx":
+        return False
+    if not _is_creation_or_generation_request(loaded_skill=loaded_skill, request=request):
+        return False
+    constraints = dict(request.constraints or {})
+    if extract_input_paths(constraints):
+        return False
+    template = str(constraints.get("template", "") or "").strip()
+    if template:
+        return False
+    output_format = str(constraints.get("output_format", "pptx") or "").strip().lower()
+    return output_format in {"", "ppt", "pptx", "slides", "presentation", "deck"}
+
+
+def _looks_like_chinese(text: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", text))
+
+
+def _normalize_slide_count(value: Any, *, default: int = PPTX_DEFAULT_SLIDE_COUNT) -> int:
+    try:
+        candidate = int(str(value).strip())
+    except (TypeError, ValueError):
+        candidate = default
+    return max(PPTX_MIN_SLIDE_COUNT, min(PPTX_MAX_SLIDE_COUNT, candidate))
+
+
+def _normalize_presentation_title(value: Any, *, fallback: str) -> str:
+    title = str(value or "").strip()
+    if title:
+        return title
+    return fallback.strip() or "Presentation"
+
+
+def _sanitize_output_filename(title: str) -> str:
+    normalized = re.sub(r"\s+", "_", str(title or "").strip())
+    normalized = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", normalized, flags=re.UNICODE)
+    normalized = normalized.strip("._")
+    if not normalized:
+        normalized = "presentation"
+    if not normalized.lower().endswith(".pptx"):
+        normalized = f"{normalized}.pptx"
+    return normalized[:120]
+
+
+def _resolve_pptx_output_path(constraints: dict[str, Any], *, title: str) -> str:
+    raw_output = str(constraints.get("output_path", "") or "").strip()
+    if raw_output:
+        candidate = raw_output.replace("\\", "/")
+        if ":" in candidate[:3] or candidate.startswith("/"):
+            candidate = candidate.split("/")[-1]
+        if not candidate.lower().endswith(".pptx"):
+            candidate = f"{candidate}.pptx"
+        return candidate or f"output/{_sanitize_output_filename(title)}"
+    return f"output/{_sanitize_output_filename(title)}"
+
+
+def _select_pptx_palette(theme: str, style: str) -> dict[str, str]:
+    normalized_theme = str(theme or "").strip().lower().replace("-", "_")
+    if normalized_theme in PPTX_THEME_PALETTES:
+        return dict(PPTX_THEME_PALETTES[normalized_theme])
+    normalized_style = str(style or "").strip().lower()
+    if normalized_style in {"academic", "professional", "business"}:
+        return dict(PPTX_THEME_PALETTES["charcoal_minimal"])
+    if normalized_style in {"executive", "board"}:
+        return dict(PPTX_THEME_PALETTES["midnight_executive"])
+    if normalized_style in {"creative", "bold"}:
+        return dict(PPTX_THEME_PALETTES["coral_energy"])
+    return dict(PPTX_THEME_PALETTES["charcoal_minimal"])
+
+
+def _build_generational_ai_outline(
+    *,
+    title: str,
+    topic: str,
+    language: str,
+) -> list[dict[str, Any]]:
+    if language == "zh":
+        return [
+            {
+                "kind": "title",
+                "title": title,
+                "subtitle": "从概率生成模型到多模态基础模型的演进脉络",
+                "kicker": "AI / HISTORY / EVOLUTION",
+            },
+            {
+                "kind": "content",
+                "title": "为什么生成式人工智能成为新一轮技术平台",
+                "bullets": [
+                    "生成式人工智能的核心不只是“会生成内容”，而是把知识压缩、推理和交互整合到统一模型中。",
+                    "算力、数据和 Transformer 架构的叠加，显著提升了模型的通用性、质量和可部署性。",
+                    "产品形态正在从“单点生成”走向“工具调用 + Agent 协作 + 多模态工作流”。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "理论起点：从统计生成到早期神经网络",
+                "bullets": [
+                    "20 世纪中后期，统计语言模型、概率图模型和隐变量方法奠定了“生成”问题的数学基础。",
+                    "玻尔兹曼机、自编码思想和早期连接主义尝试，为后续深度生成模型提供了结构启发。",
+                    "当时的主要瓶颈在于数据规模、算力供给和训练稳定性，导致生成质量长期受限。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "深度学习复兴：表示学习重新激活生成能力",
+                "bullets": [
+                    "2006 年后，深层网络训练技巧改进，让表征学习从手工特征转向端到端学习。",
+                    "大规模数据集与 GPU 训练基础设施逐步成熟，模型开始具备跨任务迁移能力。",
+                    "生成模型由“研究样例”走向“可复用组件”，为之后的突破积累条件。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "关键跃迁：VAE、GAN、Seq2Seq 与 Attention",
+                "bullets": [
+                    "VAE 把生成过程与潜变量建模结合，提升了连续潜空间表达能力。",
+                    "GAN 显著提高了图像生成的逼真度，并推动了生成质量评价标准的变化。",
+                    "Seq2Seq 与 Attention 让文本生成从短句拓展到翻译、摘要和对话等复杂任务。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "基础模型时代：Transformer 与 GPT 系列",
+                "bullets": [
+                    "Transformer 把长距离依赖建模效率提升到可大规模预训练的水平。",
+                    "GPT、BERT 等预训练范式证明：统一大模型可以覆盖理解、生成与推理任务。",
+                    "从参数规模到指令对齐，再到工具使用，模型能力开始呈现平台化增长。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "多模态扩展：从文本走向图像、音频与视频",
+                "bullets": [
+                    "扩散模型推动图像生成质量和可控性大幅提升，重塑创意生产流程。",
+                    "语音合成、音乐生成和视频生成把生成式 AI 从文本助手扩展为内容引擎。",
+                    "多模态统一模型正成为下一阶段竞争焦点，目标是共享表示与跨模态协同。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "产业落地：办公、研发、营销与行业场景",
+                "bullets": [
+                    "在办公场景中，生成式 AI 提升检索、写作、汇报与知识复用效率。",
+                    "在软件研发中，代码补全、测试生成和文档维护正形成新的开发范式。",
+                    "金融、教育、医疗和制造等行业则更关注可解释性、合规性与流程嵌入。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "风险与治理：幻觉、版权、安全与成本",
+                "bullets": [
+                    "事实幻觉与推理不稳定仍然是高价值业务流程落地的核心风险。",
+                    "训练数据版权、隐私边界和模型输出责任，要求企业建立明确的治理机制。",
+                    "部署成本、推理延迟和评测体系，决定了大模型从试点到规模化的速度。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "下一阶段：Agent 化、工具调用与行业专用模型",
+                "bullets": [
+                    "未来竞争重点会从“单模型能力”转向“模型 + 工具 + 工作流”的系统能力。",
+                    "Agent 将承担规划、检索、执行和反馈闭环，使模型更接近可交付的生产力单元。",
+                    f"{topic} 的叙事主线，可以概括为：理论突破、工程放大、产品化扩散与治理同步演进。",
+                ],
+            },
+        ]
+    return [
+        {
+            "kind": "title",
+            "title": title,
+            "subtitle": "From probabilistic modeling to multimodal foundation models",
+            "kicker": "AI / HISTORY / EVOLUTION",
+        },
+        {
+            "kind": "content",
+            "title": "Why generative AI became a platform shift",
+            "bullets": [
+                "Generative AI combines content generation, reasoning, retrieval, and interaction inside unified models.",
+                "The convergence of data scale, GPU infrastructure, and Transformer architectures unlocked broad generality.",
+                "The market is moving from isolated generation tools to agentic, multimodal production workflows.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Origins: statistical generation and early neural ideas",
+            "bullets": [
+                "Statistical language models, probabilistic graphs, and latent-variable methods framed generation mathematically.",
+                "Boltzmann machines and early autoencoding ideas seeded later deep generative architectures.",
+                "Limited compute and data kept early systems narrow, unstable, and difficult to scale.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Deep learning revival reactivated generation",
+            "bullets": [
+                "Training improvements after 2006 made deeper representation learning practical again.",
+                "Large datasets and GPU stacks turned generative methods into reusable building blocks.",
+                "End-to-end learning reduced handcrafted features and improved transfer across tasks.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Milestones: VAE, GAN, Seq2Seq, and Attention",
+            "bullets": [
+                "VAEs linked generation to structured latent spaces and stable optimization.",
+                "GANs sharply improved perceptual realism, especially for image synthesis.",
+                "Seq2Seq and attention expanded text generation into translation, summarization, and dialogue.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Foundation model era: Transformer and GPT",
+            "bullets": [
+                "Transformers made large-scale pretraining and long-range dependency modeling efficient.",
+                "Pretraining showed that one large model family could support understanding and generation together.",
+                "Instruction tuning and tool use turned model scale into a product platform.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Multimodal expansion beyond text",
+            "bullets": [
+                "Diffusion models pushed image quality and controllability to production-ready levels.",
+                "Speech, music, and video generation extended the category from assistant to content engine.",
+                "Shared multimodal representations now define the next frontier of model competition.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Where value is created today",
+            "bullets": [
+                "Knowledge work, software delivery, and marketing workflows are the fastest-moving adoption zones.",
+                "Industry deployments focus on reliability, compliance, and deep workflow integration.",
+                "The strongest value comes from combining models with enterprise context and execution tools.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Risk and governance remain decisive",
+            "bullets": [
+                "Hallucinations, unstable reasoning, and weak evaluation can block high-stakes deployment.",
+                "Copyright, privacy, and accountability rules shape how models are trained and used.",
+                "Inference cost, latency, and observability determine whether pilots become operating systems.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "What comes next",
+            "bullets": [
+                "Competition is shifting from single-model capability to system capability.",
+                "Agentic orchestration and tool use will define the next wave of enterprise leverage.",
+                f"The arc of {topic} is best read as theory, scale, productization, and governance evolving together.",
+            ],
+        },
+    ]
+
+
+def _build_generic_pptx_outline(
+    *,
+    title: str,
+    topic: str,
+    language: str,
+) -> list[dict[str, Any]]:
+    if language == "zh":
+        return [
+            {
+                "kind": "title",
+                "title": title,
+                "subtitle": "结构化概览、关键判断与行动建议",
+                "kicker": "AUTO-GENERATED DECK",
+            },
+            {
+                "kind": "content",
+                "title": "主题概览",
+                "bullets": [
+                    f"{topic} 的分析应先统一定义边界、对象和业务目标。",
+                    "高质量演示文稿需要把背景、现状、核心问题和行动建议拆分为独立页面。",
+                    "本 deck 采用“背景 - 分析 - 价值 - 风险 - 展望”的通用结构。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "背景与驱动因素",
+                "bullets": [
+                    "先明确宏观环境、技术条件或市场变化，再解释主题为何值得关注。",
+                    "驱动因素通常来自需求变化、成本结构变化和能力边界变化。",
+                    "这一页的重点是建立问题的重要性，而不是提前给出答案。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "当前格局",
+                "bullets": [
+                    "用 3 到 4 个维度描述现状，例如参与者、流程、工具、竞争结构或用户行为。",
+                    "避免无结构堆信息，优先呈现可比较、可归类、可复述的框架。",
+                    "这一页承担“把复杂现状变成可管理结构”的作用。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "关键方法与构成模块",
+                "bullets": [
+                    "拆出该主题的核心方法、流程节点或能力模块，让听众知道系统如何运转。",
+                    "如果存在输入、处理、输出链路，建议按链路顺序组织信息。",
+                    "把抽象概念翻译成流程和模块，能显著提升可理解性。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "价值创造点",
+                "bullets": [
+                    "从效率、质量、收入、风险控制或体验提升等维度说明实际收益。",
+                    "尽量避免空泛表述，用“对谁、改善什么、为什么成立”来组织要点。",
+                    "这一页的目标是让听众形成业务上的“值得做”判断。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "主要挑战与约束",
+                "bullets": [
+                    "同时呈现机会和限制，能提升 deck 的可信度和决策价值。",
+                    "约束可能来自数据、流程、组织协同、法规、成本或技术成熟度。",
+                    "建议把挑战写成“风险点 + 影响 + 应对方向”的形式。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "实施路径",
+                "bullets": [
+                    "把落地方案拆成阶段性动作，例如试点、验证、扩展和运营优化。",
+                    "为每个阶段定义目标、关键资源和验收标准，降低执行模糊度。",
+                    "这样能把抽象主题转成可推进的行动方案。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "未来趋势",
+                "bullets": [
+                    "从技术、竞争、用户预期和政策环境四个维度看下一阶段变化。",
+                    "趋势页不是预测细节，而是帮助听众形成方向性判断。",
+                    "建议把趋势与当前能力建设的优先级联系起来。",
+                ],
+            },
+            {
+                "kind": "content",
+                "title": "总结",
+                "bullets": [
+                    f"{topic} 的核心价值，在于把复杂问题压缩成统一框架和可执行路径。",
+                    "一份好的总结页应同时回答：现在发生了什么、为什么重要、接下来做什么。",
+                    "如果需要继续深化，可在此基础上扩展案例、数据或实施细节。",
+                ],
+            },
+        ]
+    return [
+        {
+            "kind": "title",
+            "title": title,
+            "subtitle": "A structured overview with key judgments and action points",
+            "kicker": "AUTO-GENERATED DECK",
+        },
+        {
+            "kind": "content",
+            "title": "Topic overview",
+            "bullets": [
+                f"{topic} is easiest to explain when the scope, audience, and decision goal are made explicit first.",
+                "A strong presentation separates context, current state, core mechanisms, and next actions.",
+                "This deck follows a background, analysis, value, risk, and outlook structure.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Context and drivers",
+            "bullets": [
+                "Start with the forces that make the topic important right now.",
+                "Typical drivers include user demand, cost structure shifts, regulation, and technical capability changes.",
+                "The job of this slide is to establish urgency before giving recommendations.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Current landscape",
+            "bullets": [
+                "Describe the current state through a small set of stable dimensions.",
+                "Turn a messy situation into a frame that can be compared, repeated, and discussed.",
+                "This creates a shared map for the rest of the deck.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Core methods and building blocks",
+            "bullets": [
+                "Break the topic into the major processes, capabilities, or system components.",
+                "If there is an input-process-output chain, follow that order.",
+                "Concrete modules are easier to discuss than abstract claims.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Where value is created",
+            "bullets": [
+                "Explain the value in terms of efficiency, quality, growth, control, or user experience.",
+                "Each point should answer who benefits, what changes, and why it matters.",
+                "This is the slide that converts analysis into business relevance.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Constraints and risks",
+            "bullets": [
+                "A credible deck shows both upside and friction.",
+                "Constraints may come from data, workflow design, cost, policy, or organizational readiness.",
+                "Frame each issue as a risk, its effect, and a response direction.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Execution path",
+            "bullets": [
+                "Turn the topic into staged actions such as pilot, validation, rollout, and optimization.",
+                "Each stage should have a goal, key inputs, and a decision checkpoint.",
+                "This reduces ambiguity and helps the audience move from interest to action.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Future outlook",
+            "bullets": [
+                "Look ahead through technology, competition, regulation, and user behavior.",
+                "The point is not precision but directional clarity.",
+                "Link the outlook to what should be built or prioritized now.",
+            ],
+        },
+        {
+            "kind": "content",
+            "title": "Summary",
+            "bullets": [
+                f"{topic} becomes more actionable when it is reduced to a clear frame and operating plan.",
+                "A good close answers what changed, why it matters, and what should happen next.",
+                "From here, the deck can be extended with data, cases, or implementation detail.",
+            ],
+        },
+    ]
+
+
+def _fit_outline_to_slide_count(
+    slides: list[dict[str, Any]],
+    *,
+    slide_count: int,
+) -> list[dict[str, Any]]:
+    if slide_count >= len(slides):
+        extras = [
+            {
+                "kind": "content",
+                "title": f"附录 {index}" if _looks_like_chinese(slides[0].get("title", "")) else f"Appendix {index}",
+                "bullets": [
+                    "补充延展案例，用于支持主线判断。" if _looks_like_chinese(slides[0].get("title", "")) else "Extended supporting example for the main narrative.",
+                    "可进一步加入数据、图表或代表性案例。" if _looks_like_chinese(slides[0].get("title", "")) else "Add data, charts, or representative cases here.",
+                    "该页作为强默认生成的占位扩展页面。" if _looks_like_chinese(slides[0].get("title", "")) else "This page acts as a default expansion slot.",
+                ],
+            }
+            for index in range(1, slide_count - len(slides) + 1)
+        ]
+        return [*slides, *extras]
+    if slide_count <= 1:
+        return slides[:1]
+    if slide_count == 2:
+        return [slides[0], slides[-1]]
+    middle = slides[1:-1]
+    keep_middle = middle[: max(0, slide_count - 2)]
+    return [slides[0], *keep_middle, slides[-1]]
+
+
+def _build_pptx_outline(
+    *,
+    title: str,
+    topic: str,
+    language: str,
+    slide_count: int,
+    request_text: str,
+) -> list[dict[str, Any]]:
+    if PPTX_GENERATIVE_AI_PATTERN.search(request_text) or PPTX_HISTORY_REQUEST_PATTERN.search(
+        request_text
+    ):
+        base = _build_generational_ai_outline(
+            title=title,
+            topic=topic,
+            language=language,
+        )
+    else:
+        base = _build_generic_pptx_outline(
+            title=title,
+            topic=topic,
+            language=language,
+        )
+    return _fit_outline_to_slide_count(base, slide_count=slide_count)
+
+
+def _build_pptx_fallback_script(
+    *,
+    config: dict[str, Any],
+    slides: list[dict[str, Any]],
+) -> str:
+    script_template = textwrap.dedent(
+        r"""
+        from __future__ import annotations
+
+        import base64
+        import io
+        import json
+        import re
+        import zipfile
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from xml.sax.saxutils import escape
+
+        CONFIG = json.loads(r'''__CONFIG_JSON__''')
+        SLIDES = json.loads(r'''__SLIDES_JSON__''')
+        SLIDE_WIDTH = 9144000
+        SLIDE_HEIGHT = 5143500
+        OFFICE_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+        SLIDE_LAYOUT_REL = f"{OFFICE_REL_NS}/slideLayout"
+        SLIDE_REL = f"{OFFICE_REL_NS}/slide"
+        LANG_TAG = "zh-CN" if str(CONFIG.get("language", "en")).lower().startswith("zh") else "en-US"
+        LATIN_FONT = "Aptos"
+        EAST_ASIA_FONT = "Microsoft YaHei" if LANG_TAG.startswith("zh") else "Aptos"
+
+        def _emu(inches: float) -> int:
+            return int(round(inches * 914400))
+
+        def _run_props(size: int, color: str, *, bold: bool = False) -> str:
+            bold_attr = ' b="1"' if bold else ""
+            return (
+                f'<a:rPr lang="{LANG_TAG}" sz="{size}"{bold_attr}>'
+                f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
+                f'<a:latin typeface="{LATIN_FONT}"/>'
+                f'<a:ea typeface="{EAST_ASIA_FONT}"/>'
+                f'<a:cs typeface="{LATIN_FONT}"/>'
+                f'</a:rPr>'
+            )
+
+        def _paragraph(text: str, *, size: int, color: str, bold: bool = False, bullet: bool = False, align: str = "l") -> str:
+            escaped = escape(str(text or ""))
+            if bullet:
+                ppr = f'<a:pPr marL="{_emu(0.42)}" indent="-{_emu(0.18)}" algn="{align}"><a:buChar char="•"/></a:pPr>'
+            else:
+                ppr = f'<a:pPr algn="{align}"><a:buNone/></a:pPr>'
+            rpr = _run_props(size=size, color=color, bold=bold)
+            return f'<a:p>{ppr}<a:r>{rpr}<a:t>{escaped}</a:t></a:r><a:endParaRPr lang="{LANG_TAG}" sz="{size}"/></a:p>'
+
+        def _textbox(shape_id: int, name: str, *, x: int, y: int, cx: int, cy: int, paragraphs: list[str], fill: str | None = None, line: str | None = None) -> str:
+            fill_xml = (
+                f'<a:solidFill><a:srgbClr val="{fill}"/></a:solidFill>'
+                if fill
+                else '<a:noFill/>'
+            )
+            line_xml = (
+                f'<a:ln><a:solidFill><a:srgbClr val="{line}"/></a:solidFill></a:ln>'
+                if line
+                else '<a:ln><a:noFill/></a:ln>'
+            )
+            body = ''.join(paragraphs) or f'<a:p><a:endParaRPr lang="{LANG_TAG}"/></a:p>'
+            return (
+                '<p:sp>'
+                '<p:nvSpPr>'
+                f'<p:cNvPr id="{shape_id}" name="{escape(name)}"/>'
+                '<p:cNvSpPr/>'
+                '<p:nvPr/>'
+                '</p:nvSpPr>'
+                '<p:spPr>'
+                f'<a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
+                '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+                f'{fill_xml}{line_xml}'
+                '</p:spPr>'
+                '<p:txBody>'
+                '<a:bodyPr wrap="square" rtlCol="0"><a:normAutofit/></a:bodyPr>'
+                '<a:lstStyle/>'
+                f'{body}'
+                '</p:txBody>'
+                '</p:sp>'
+            )
+
+        def _shape(shape_id: int, name: str, *, x: int, y: int, cx: int, cy: int, fill: str, line: str | None = None) -> str:
+            return (
+                '<p:sp>'
+                '<p:nvSpPr>'
+                f'<p:cNvPr id="{shape_id}" name="{escape(name)}"/>'
+                '<p:cNvSpPr/>'
+                '<p:nvPr/>'
+                '</p:nvSpPr>'
+                '<p:spPr>'
+                f'<a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>'
+                '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>'
+                f'<a:solidFill><a:srgbClr val="{fill}"/></a:solidFill>'
+                + (f'<a:ln><a:solidFill><a:srgbClr val="{line}"/></a:solidFill></a:ln>' if line else '<a:ln><a:noFill/></a:ln>')
+                + '</p:spPr>'
+                '<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody>'
+                '</p:sp>'
+            )
+
+        def _title_slide_xml(slide: dict[str, object], index: int) -> str:
+            palette = dict(CONFIG["palette"])
+            shapes = [
+                _shape(2, f"Background {index}", x=0, y=0, cx=SLIDE_WIDTH, cy=SLIDE_HEIGHT, fill=palette["dark"]),
+                _shape(3, f"Accent {index}", x=_emu(0.65), y=_emu(0.85), cx=_emu(1.4), cy=_emu(0.12), fill=palette["accent"]),
+                _textbox(
+                    4,
+                    f"Title {index}",
+                    x=_emu(0.8),
+                    y=_emu(1.2),
+                    cx=_emu(8.4),
+                    cy=_emu(1.2),
+                    paragraphs=[_paragraph(str(slide.get("title", "")), size=3000, color=palette["text_light"], bold=True)],
+                ),
+                _textbox(
+                    5,
+                    f"Subtitle {index}",
+                    x=_emu(0.82),
+                    y=_emu(2.55),
+                    cx=_emu(7.7),
+                    cy=_emu(1.4),
+                    paragraphs=[_paragraph(str(slide.get("subtitle", "")), size=1800, color="E6E8EB")],
+                ),
+                _textbox(
+                    6,
+                    f"Kicker {index}",
+                    x=_emu(0.82),
+                    y=_emu(4.65),
+                    cx=_emu(2.8),
+                    cy=_emu(0.42),
+                    paragraphs=[_paragraph(str(slide.get("kicker", "AUTO-GENERATED DECK")), size=1100, color=palette["accent_soft"], bold=True)],
+                ),
+            ]
+            return _slide_document(shapes)
+
+        def _content_slide_xml(slide: dict[str, object], index: int) -> str:
+            palette = dict(CONFIG["palette"])
+            bullet_paragraphs = []
+            for bullet in list(slide.get("bullets", []) or [])[:4]:
+                bullet_paragraphs.append(_paragraph(str(bullet), size=1700, color=palette["text_dark"], bullet=True))
+            if not bullet_paragraphs:
+                bullet_paragraphs.append(_paragraph("Content pending.", size=1700, color=palette["text_dark"]))
+            shapes = [
+                _shape(2, f"Background {index}", x=0, y=0, cx=SLIDE_WIDTH, cy=SLIDE_HEIGHT, fill=palette["light"]),
+                _shape(3, f"Header {index}", x=0, y=0, cx=SLIDE_WIDTH, cy=_emu(0.7), fill=palette["dark"]),
+                _shape(4, f"Accent Block {index}", x=_emu(0.82), y=_emu(1.1), cx=_emu(0.18), cy=_emu(2.9), fill=palette["accent"]),
+                _textbox(
+                    5,
+                    f"Title {index}",
+                    x=_emu(0.82),
+                    y=_emu(0.14),
+                    cx=_emu(7.0),
+                    cy=_emu(0.36),
+                    paragraphs=[_paragraph(str(slide.get("title", "")), size=2200, color=palette["text_light"], bold=True)],
+                ),
+                _textbox(
+                    6,
+                    f"Slide Number {index}",
+                    x=_emu(8.65),
+                    y=_emu(0.16),
+                    cx=_emu(0.42),
+                    cy=_emu(0.32),
+                    paragraphs=[_paragraph(f"{index}", size=1200, color=palette["accent_soft"], bold=True, align="ctr")],
+                ),
+                _textbox(
+                    7,
+                    f"Bullets {index}",
+                    x=_emu(1.15),
+                    y=_emu(1.05),
+                    cx=_emu(7.4),
+                    cy=_emu(3.35),
+                    paragraphs=bullet_paragraphs,
+                ),
+                _textbox(
+                    8,
+                    f"Footer {index}",
+                    x=_emu(1.15),
+                    y=_emu(4.55),
+                    cx=_emu(7.0),
+                    cy=_emu(0.38),
+                    paragraphs=[_paragraph(str(CONFIG.get("topic", "")), size=1000, color=palette["muted"])],
+                ),
+            ]
+            return _slide_document(shapes)
+
+        def _slide_document(shapes: list[str]) -> str:
+            joined = ''.join(shapes)
+            return (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+                'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+                '<p:cSld><p:spTree>'
+                '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>'
+                '<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>'
+                f'{joined}'
+                '</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>'
+            )
+
+        def _slide_relationship_xml() -> str:
+            return (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<Relationships xmlns="{PACKAGE_REL_NS}">'
+                f'<Relationship Id="rId1" Type="{SLIDE_LAYOUT_REL}" Target="../slideLayouts/slideLayout7.xml"/>'
+                '</Relationships>'
+            )
+
+        def _build_content_types_xml(slide_count: int) -> str:
+            overrides = ''.join(
+                f'<Override PartName="/ppt/slides/slide{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
+                for index in range(1, slide_count + 1)
+            )
+            return (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Default Extension="xml" ContentType="application/xml"/>'
+                '<Default Extension="jpeg" ContentType="image/jpeg"/>'
+                '<Default Extension="bin" ContentType="application/vnd.openxmlformats-officedocument.presentationml.printerSettings"/>'
+                '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
+                '<Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>'
+                '<Override PartName="/ppt/presProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"/>'
+                '<Override PartName="/ppt/viewProps.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml"/>'
+                '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>'
+                '<Override PartName="/ppt/tableStyles.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout3.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout4.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout5.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout6.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout7.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout8.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout9.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout10.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/ppt/slideLayouts/slideLayout11.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>'
+                '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+                '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+                f'{overrides}'
+                '</Types>'
+            )
+
+        def _build_app_xml(slides: list[dict[str, object]]) -> str:
+            titles = ''.join(f'<vt:lpstr>{escape(str(item.get("title", "")))}</vt:lpstr>' for item in slides)
+            titles_size = len(slides) + 1
+            return (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+                'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+                '<TotalTime>1</TotalTime><Words>0</Words><Application>OpenAI Codex PPTX Fallback</Application>'
+                '<PresentationFormat>On-screen Show (16:9)</PresentationFormat>'
+                '<Paragraphs>0</Paragraphs>'
+                f'<Slides>{len(slides)}</Slides>'
+                '<Notes>0</Notes><HiddenSlides>0</HiddenSlides><MMClips>0</MMClips><ScaleCrop>false</ScaleCrop>'
+                '<HeadingPairs><vt:vector size="4" baseType="variant">'
+                '<vt:variant><vt:lpstr>Theme</vt:lpstr></vt:variant>'
+                '<vt:variant><vt:i4>1</vt:i4></vt:variant>'
+                '<vt:variant><vt:lpstr>Slide Titles</vt:lpstr></vt:variant>'
+                f'<vt:variant><vt:i4>{len(slides)}</vt:i4></vt:variant>'
+                '</vt:vector></HeadingPairs>'
+                f'<TitlesOfParts><vt:vector size="{titles_size}" baseType="lpstr"><vt:lpstr>Office Theme</vt:lpstr>{titles}</vt:vector></TitlesOfParts>'
+                '<Company></Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc>'
+                '<HyperlinkBase></HyperlinkBase><HyperlinksChanged>false</HyperlinksChanged><AppVersion>16.0000</AppVersion>'
+                '</Properties>'
+            )
+
+        def _build_core_xml() -> str:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            title = escape(str(CONFIG.get("title", "")))
+            subject = escape(str(CONFIG.get("topic", "")))
+            description = escape(str(CONFIG.get("description", "")))
+            return (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+                'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+                'xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+                f'<dc:title>{title}</dc:title><dc:subject>{subject}</dc:subject>'
+                '<dc:creator>OpenAI Codex</dc:creator><cp:keywords></cp:keywords>'
+                f'<dc:description>{description}</dc:description><cp:lastModifiedBy>OpenAI Codex</cp:lastModifiedBy>'
+                '<cp:revision>1</cp:revision>'
+                f'<dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created>'
+                f'<dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified>'
+                '<cp:category></cp:category></cp:coreProperties>'
+            )
+
+        def _update_presentation_xml(presentation_xml: str, slide_count: int) -> str:
+            slide_id_list = '<p:sldIdLst>' + ''.join(
+                f'<p:sldId id="{255 + index}" r:id="rId{99 + index}"/>'
+                for index in range(1, slide_count + 1)
+            ) + '</p:sldIdLst>'
+            if '<p:sldIdLst>' in presentation_xml:
+                presentation_xml = re.sub(r'<p:sldIdLst>.*?</p:sldIdLst>', slide_id_list, presentation_xml, count=1)
+            else:
+                presentation_xml = presentation_xml.replace('</p:sldMasterIdLst>', f'</p:sldMasterIdLst>{slide_id_list}', 1)
+            return re.sub(
+                r'<p:sldSz cx="\d+" cy="\d+" type="[^"]*"/>',
+                '<p:sldSz cx="9144000" cy="5143500" type="screen16x9"/>',
+                presentation_xml,
+                count=1,
+            )
+
+        def _update_presentation_rels_xml(rels_xml: str, slide_count: int) -> str:
+            slide_rels = ''.join(
+                f'<Relationship Id="rId{99 + index}" Type="{SLIDE_REL}" Target="slides/slide{index}.xml"/>'
+                for index in range(1, slide_count + 1)
+            )
+            return rels_xml.replace('</Relationships>', f'{slide_rels}</Relationships>', 1)
+
+        def _build_outline_markdown(slides: list[dict[str, object]]) -> str:
+            lines = [f"# {CONFIG['title']}", ""]
+            for idx, slide in enumerate(slides, start=1):
+                lines.append(f"## {idx}. {slide.get('title', '')}")
+                subtitle = str(slide.get("subtitle", "") or "").strip()
+                if subtitle:
+                    lines.append(subtitle)
+                for bullet in list(slide.get("bullets", []) or []):
+                    lines.append(f"- {bullet}")
+                lines.append("")
+            return "\n".join(lines).strip() + "\n"
+
+        def main() -> None:
+            output_path = Path(str(CONFIG["output_path"]))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            outline_path = Path(str(CONFIG["outline_path"]))
+            outline_path.parent.mkdir(parents=True, exist_ok=True)
+            template_b64 = Path(__file__).with_name("template.b64").read_text(encoding="ascii")
+
+            template_entries: dict[str, bytes] = {}
+            with zipfile.ZipFile(io.BytesIO(base64.b64decode(template_b64))) as template_zip:
+                for info in template_zip.infolist():
+                    template_entries[info.filename] = template_zip.read(info.filename)
+
+            template_entries["[Content_Types].xml"] = _build_content_types_xml(len(SLIDES)).encode("utf-8")
+            template_entries["ppt/presentation.xml"] = _update_presentation_xml(
+                template_entries["ppt/presentation.xml"].decode("utf-8"),
+                len(SLIDES),
+            ).encode("utf-8")
+            template_entries["ppt/_rels/presentation.xml.rels"] = _update_presentation_rels_xml(
+                template_entries["ppt/_rels/presentation.xml.rels"].decode("utf-8"),
+                len(SLIDES),
+            ).encode("utf-8")
+            template_entries["docProps/app.xml"] = _build_app_xml(SLIDES).encode("utf-8")
+            template_entries["docProps/core.xml"] = _build_core_xml().encode("utf-8")
+
+            slide_rels_xml = _slide_relationship_xml().encode("utf-8")
+            for index, slide in enumerate(SLIDES, start=1):
+                if str(slide.get("kind", "")).strip().lower() == "title":
+                    slide_xml = _title_slide_xml(slide, index)
+                else:
+                    slide_xml = _content_slide_xml(slide, index)
+                template_entries[f"ppt/slides/slide{index}.xml"] = slide_xml.encode("utf-8")
+                template_entries[f"ppt/slides/_rels/slide{index}.xml.rels"] = slide_rels_xml
+
+            with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as out_zip:
+                for name in sorted(template_entries):
+                    out_zip.writestr(name, template_entries[name])
+
+            outline_path.write_text(_build_outline_markdown(SLIDES), encoding="utf-8")
+            print(f"Created {output_path.as_posix()}")
+            print(f"Outline {outline_path.as_posix()}")
+
+        if __name__ == "__main__":
+            main()
+        """
+    ).strip()
+    script = script_template.replace(
+        "__CONFIG_JSON__",
+        json.dumps(config, ensure_ascii=False, indent=2),
+    )
+    script = script.replace(
+        "__SLIDES_JSON__",
+        json.dumps(slides, ensure_ascii=False, indent=2),
+    )
+    return script + "\n"
+
+
+def _build_deterministic_pptx_fallback_plan(
+    *,
+    loaded_skill: LoadedSkill,
+    request: SkillExecutionRequest,
+    shell_hints: dict[str, Any],
+    failure_reason: str | None,
+) -> SkillCommandPlan | None:
+    fallback_flag = request.constraints.get("allow_deterministic_fallback")
+    env_flag = os.environ.get("KG_AGENT_ENABLE_DETERMINISTIC_SKILL_FALLBACK", "")
+    fallback_enabled = False
+    if isinstance(fallback_flag, bool):
+        fallback_enabled = fallback_flag
+    elif isinstance(fallback_flag, str):
+        fallback_enabled = fallback_flag.strip().lower() in {"1", "true", "yes", "on"}
+    elif env_flag.strip():
+        fallback_enabled = env_flag.strip().lower() in {"1", "true", "yes", "on"}
+    if not fallback_enabled:
+        return None
+    if not _is_pptx_creation_request(loaded_skill=loaded_skill, request=request):
+        return None
+    template_b64 = _load_pptx_default_template_b64()
+    if not template_b64:
+        return None
+
+    constraints = dict(request.constraints or {})
+    topic = _normalize_presentation_title(
+        constraints.get("topic") or constraints.get("title") or request.goal or request.user_query,
+        fallback="Presentation",
+    )
+    title = _normalize_presentation_title(
+        constraints.get("title"),
+        fallback=topic,
+    )
+    request_text = "\n".join(
+        [request.goal, request.user_query, json.dumps(constraints, ensure_ascii=False)]
+    )
+    language = str(constraints.get("language", "") or "").strip().lower()
+    if language not in {"zh", "zh-cn", "en", "en-us"}:
+        language = "zh" if _looks_like_chinese(request_text) else "en"
+    style = str(constraints.get("style", "") or "").strip() or (
+        "professional" if language.startswith("zh") else "professional"
+    )
+    theme = str(constraints.get("theme", "") or "").strip() or "charcoal_minimal"
+    slide_count = _normalize_slide_count(constraints.get("slide_count"))
+    output_path = _resolve_pptx_output_path(constraints, title=title)
+    outline_path = output_path.rsplit(".", 1)[0] + ".md"
+    palette = _select_pptx_palette(theme, style)
+    slides = _build_pptx_outline(
+        title=title,
+        topic=topic,
+        language=("zh" if language.startswith("zh") else "en"),
+        slide_count=slide_count,
+        request_text=request_text,
+    )
+    script_config = {
+        "title": title,
+        "topic": topic,
+        "language": "zh" if language.startswith("zh") else "en",
+        "style": style,
+        "theme": theme,
+        "palette": palette,
+        "output_path": output_path,
+        "outline_path": outline_path,
+        "description": f"Auto-generated PPTX deck for {topic}",
+    }
+    enriched_constraints = {
+        **constraints,
+        "title": title,
+        "topic": topic,
+        "language": script_config["language"],
+        "style": style,
+        "theme": theme,
+        "slide_count": str(slide_count),
+        "output_path": output_path,
+        "output_format": "pptx",
+    }
+    generated_files = [
+        SkillGeneratedFile(
+            path=".skill_generated/main.py",
+            content=_build_pptx_fallback_script(
+                config=script_config,
+                slides=slides,
+            ),
+            description="Deterministic PPTX builder that creates a slide deck from a bundled template.",
+        ),
+        SkillGeneratedFile(
+            path=".skill_generated/template.b64",
+            content=template_b64,
+            description="Bundled default PPTX template encoded as base64.",
+        ),
+    ]
+    command = build_portable_script_command(
+        ".skill_generated/main.py",
+        [],
+        runtime_target=request.runtime_target,
+    )
+    return SkillCommandPlan(
+        skill_name=request.skill_name,
+        goal=request.goal,
+        user_query=request.user_query,
+        runtime_target=request.runtime_target,
+        constraints=enriched_constraints,
+        command=command,
+        mode="generated_script",
+        shell_mode="free_shell",
+        rationale=(
+            "Fell back to a deterministic local PPTX generator because free-shell planning "
+            "could not produce a runnable command plan."
+        ),
+        entrypoint=".skill_generated/main.py",
+        cli_args=[],
+        generated_files=generated_files,
+        bootstrap_commands=[],
+        bootstrap_reason="",
+        missing_fields=[],
+        failure_reason=None,
+        hints={
+            **shell_hints,
+            "planner": "deterministic_pptx_fallback",
+            "required_tools": ["python"],
+            "deterministic_fallback": True,
+            "deterministic_fallback_reason": str(failure_reason or "").strip() or None,
+            "deterministic_output_path": output_path,
+        },
+    )
+
+
 class SkillCommandPlanner:
     def __init__(
         self,
@@ -1819,8 +3117,7 @@ class SkillCommandPlanner:
         if not allowed_keys:
             return dict(request.constraints or {}), None
 
-        _, body = split_skill_markdown(loaded_skill.skill_md)
-        skill_md_excerpt = _truncate_text(body, max_chars=MAX_MARKDOWN_EXCERPT_CHARS)
+        skill_md_excerpt = loaded_skill.skill_md
         script_previews = load_script_previews(
             loaded_skill,
             query_text="\n".join(
@@ -1894,7 +3191,11 @@ class SkillCommandPlanner:
         request: SkillExecutionRequest,
     ) -> SkillCommandPlan:
         constraints = dict(request.constraints or {})
-        shell_mode = resolve_shell_mode(constraints, default=self.default_shell_mode)
+        requested_shell_mode = resolve_shell_mode(
+            dict(request.constraints or {}),
+            default=self.default_shell_mode,
+        )
+        shell_mode = requested_shell_mode
         runtime_target = SkillRuntimeTarget.from_dict(
             request.runtime_target.to_dict(),
             default=self.default_runtime_target,
@@ -1944,7 +3245,64 @@ class SkillCommandPlanner:
             shell_hints=shell_hints,
         )
         if shell_mode != "free_shell":
-            return conservative_plan
+            if not _should_attempt_auto_free_shell_plan(
+                conservative_plan,
+                loaded_skill=loaded_skill,
+                request=normalized_request,
+            ):
+                return _finalize_plan_metadata(
+                    conservative_plan,
+                    requested_shell_mode=requested_shell_mode,
+                    constraint_inference_metadata=constraint_inference_metadata,
+                )
+            planning_blockers = _build_plan_blockers(conservative_plan)
+            free_shell_request = SkillExecutionRequest(
+                skill_name=normalized_request.skill_name,
+                goal=normalized_request.goal,
+                user_query=normalized_request.user_query,
+                workspace=normalized_request.workspace,
+                shell_mode="free_shell",
+                runtime_target=normalized_request.runtime_target,
+                constraints=dict(normalized_request.constraints),
+            )
+            free_shell_plan = await self._plan_free_shell(
+                loaded_skill=loaded_skill,
+                request=free_shell_request,
+                shell_hints=shell_hints,
+                fallback_plan=conservative_plan,
+            )
+            if not free_shell_plan.is_manual_required:
+                return _finalize_plan_metadata(
+                    free_shell_plan,
+                    requested_shell_mode=requested_shell_mode,
+                    constraint_inference_metadata=constraint_inference_metadata,
+                    planning_blockers=planning_blockers,
+                    escalation_reason=str(conservative_plan.failure_reason or "").strip()
+                    or "auto_free_shell_fallback",
+                )
+            deterministic_fallback_plan = _build_deterministic_pptx_fallback_plan(
+                loaded_skill=loaded_skill,
+                request=free_shell_request,
+                shell_hints=shell_hints,
+                failure_reason=free_shell_plan.failure_reason or conservative_plan.failure_reason,
+            )
+            if deterministic_fallback_plan is not None:
+                return _finalize_plan_metadata(
+                    deterministic_fallback_plan,
+                    requested_shell_mode=requested_shell_mode,
+                    constraint_inference_metadata=constraint_inference_metadata,
+                    planning_blockers=planning_blockers,
+                    escalation_reason=str(conservative_plan.failure_reason or "").strip()
+                    or "auto_free_shell_fallback",
+                )
+            return _finalize_plan_metadata(
+                free_shell_plan,
+                requested_shell_mode=requested_shell_mode,
+                constraint_inference_metadata=constraint_inference_metadata,
+                planning_blockers=planning_blockers,
+                escalation_reason=str(conservative_plan.failure_reason or "").strip()
+                or "auto_free_shell_fallback",
+            )
         preferred_shipped_plan = _build_preferred_shipped_script_plan(
             loaded_skill=loaded_skill,
             request=normalized_request,
@@ -1952,7 +3310,11 @@ class SkillCommandPlanner:
             shell_mode=shell_mode,
         )
         if preferred_shipped_plan is not None:
-            return preferred_shipped_plan
+            return _finalize_plan_metadata(
+                preferred_shipped_plan,
+                requested_shell_mode=requested_shell_mode,
+                constraint_inference_metadata=constraint_inference_metadata,
+            )
         free_shell_plan = await self._plan_free_shell(
             loaded_skill=loaded_skill,
             request=normalized_request,
@@ -1960,16 +3322,41 @@ class SkillCommandPlanner:
             fallback_plan=conservative_plan,
         )
         if not free_shell_plan.is_manual_required:
-            return free_shell_plan
+            return _finalize_plan_metadata(
+                free_shell_plan,
+                requested_shell_mode=requested_shell_mode,
+                constraint_inference_metadata=constraint_inference_metadata,
+            )
+        deterministic_fallback_plan = _build_deterministic_pptx_fallback_plan(
+            loaded_skill=loaded_skill,
+            request=normalized_request,
+            shell_hints=shell_hints,
+            failure_reason=free_shell_plan.failure_reason,
+        )
+        if deterministic_fallback_plan is not None:
+            return _finalize_plan_metadata(
+                deterministic_fallback_plan,
+                requested_shell_mode=requested_shell_mode,
+                constraint_inference_metadata=constraint_inference_metadata,
+            )
         if (
             not conservative_plan.is_manual_required
-            and free_shell_plan.failure_reason in {"llm_not_available", "llm_planning_failed"}
+            and free_shell_plan.failure_reason
+            in {"llm_not_available_for_free_shell", "llm_planning_failed"}
         ):
-            return _clone_plan_with_shell_mode(
-                conservative_plan,
-                shell_mode="free_shell",
+            return _finalize_plan_metadata(
+                _clone_plan_with_shell_mode(
+                    conservative_plan,
+                    shell_mode="free_shell",
+                ),
+                requested_shell_mode=requested_shell_mode,
+                constraint_inference_metadata=constraint_inference_metadata,
             )
-        return free_shell_plan
+        return _finalize_plan_metadata(
+            free_shell_plan,
+            requested_shell_mode=requested_shell_mode,
+            constraint_inference_metadata=constraint_inference_metadata,
+        )
 
     def _plan_conservative(
         self,
@@ -2146,7 +3533,7 @@ class SkillCommandPlanner:
                     "planner": "free_shell",
                     "warnings": ["No utility LLM is available for free-shell planning."],
                 },
-                failure_reason="llm_not_available",
+                failure_reason="llm_not_available_for_free_shell",
                 missing_fields=[],
                 rationale=(
                     "Free-shell planning requires an available utility LLM because the skill "
@@ -2173,37 +3560,59 @@ class SkillCommandPlanner:
             query_text=query_text,
             limit=4,
         )
-        skill_md_excerpt = _truncate_text(
-            loaded_skill.skill_md,
-            max_chars=MAX_MARKDOWN_EXCERPT_CHARS,
-        )
-        system_prompt, user_prompt = build_skill_free_shell_planner_prompt(
-            skill_name=request.skill_name,
-            goal=request.goal,
-            user_query=request.user_query,
-            runtime_target=request.runtime_target.to_dict(),
-            constraints=request.constraints,
-            shell_hints=shell_hints,
-            file_inventory=[item.to_dict() for item in loaded_skill.file_inventory],
-            skill_md_excerpt=skill_md_excerpt,
-            script_previews=script_previews,
-            python_examples=python_examples,
-            conservative_plan=fallback_plan.to_dict(),
-        )
-        try:
-            payload = await self.llm_client.complete_json(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                temperature=0.0,
-                max_tokens=1800,
+        skill_md_excerpt = loaded_skill.skill_md
+        file_inventory = [item.to_dict() for item in loaded_skill.file_inventory]
+        prompt_attempts = [
+            {
+                "label": "full_context",
+                "file_inventory": file_inventory,
+                "script_previews": script_previews,
+                "python_examples": python_examples,
+            },
+            {
+                "label": "compact_context",
+                "file_inventory": _compact_file_inventory_for_free_shell(file_inventory),
+                "script_previews": _compact_script_previews_for_free_shell(script_previews),
+                "python_examples": [],
+            },
+        ]
+        payload: dict[str, Any] | None = None
+        planning_errors: list[str] = []
+        for attempt in prompt_attempts:
+            system_prompt, user_prompt = build_skill_free_shell_planner_prompt(
+                skill_name=request.skill_name,
+                goal=request.goal,
+                user_query=request.user_query,
+                runtime_target=request.runtime_target.to_dict(),
+                constraints=request.constraints,
+                shell_hints=shell_hints,
+                file_inventory=attempt["file_inventory"],
+                skill_md_excerpt=skill_md_excerpt,
+                script_previews=attempt["script_previews"],
+                python_examples=attempt["python_examples"],
+                conservative_plan=fallback_plan.to_dict(),
             )
-        except Exception as exc:
+            try:
+                payload = await self.llm_client.complete_json(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=0.0,
+                    max_tokens=1800,
+                )
+                shell_hints = {
+                    **shell_hints,
+                    "planner_context_mode": str(attempt["label"]),
+                }
+                break
+            except Exception as exc:
+                planning_errors.append(f"{attempt['label']}: {exc}")
+        if payload is None:
             return self._manual_required_plan(
                 request=request,
                 shell_hints={
                     **shell_hints,
                     "planner": "free_shell",
-                    "warnings": [f"Free-shell planning failed: {exc}"],
+                    "warnings": [f"Free-shell planning failed: {item}" for item in planning_errors],
                 },
                 failure_reason="llm_planning_failed",
                 missing_fields=list(fallback_plan.missing_fields),

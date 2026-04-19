@@ -526,6 +526,7 @@ async def test_runtime_service_returns_shell_plan_for_complex_skill_without_comm
     monkeypatch,
 ):
     module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", _UnavailableLLM())
 
     result = await module.run_skill_task(
         skill_name="xlsx",
@@ -546,6 +547,86 @@ async def test_runtime_service_returns_shell_plan_for_complex_skill_without_comm
     assert status["run_status"] == "manual_required"
     assert status["status"] == "needs_shell_command"
     assert status["failure_reason"] == result["failure_reason"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_reports_llm_unavailable_for_pptx_by_default_without_deterministic_fallback(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", _UnavailableLLM())
+
+    result = await module.run_skill_task(
+        skill_name="pptx",
+        goal="创建一个关于生成式人工智能起源发展的演示文稿",
+        user_query="请生成一个关于生成式人工智能起源发展的PPT",
+        constraints={"topic": "生成式人工智能起源发展", "output_format": "pptx"},
+        wait_for_completion=True,
+    )
+
+    assert result["success"] is False
+    assert result["run_status"] == "manual_required"
+    assert result["failure_reason"] == "llm_not_available_for_free_shell"
+    assert result["command_plan"]["mode"] == "manual_required"
+    assert result["shell_mode_requested"] == "conservative"
+    assert result["shell_mode_effective"] == "free_shell"
+    assert result["shell_mode_escalated"] is True
+    assert result["planning_blockers"][0]["failure_reason"] == "manual_command_required"
+    assert result["command_plan"]["hints"]["planner"] == "free_shell"
+    assert result["artifacts"] == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_can_execute_deterministic_pptx_fallback_when_explicitly_enabled(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", _UnavailableLLM())
+
+    result = await module.run_skill_task(
+        skill_name="pptx",
+        goal="创建一个关于生成式人工智能起源发展的演示文稿",
+        user_query="请生成一个关于生成式人工智能起源发展的PPT",
+        constraints={
+            "topic": "生成式人工智能起源发展",
+            "output_format": "pptx",
+            "allow_deterministic_fallback": True,
+        },
+        wait_for_completion=True,
+    )
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    assert result["failure_reason"] is None
+    assert result["command_plan"]["mode"] == "generated_script"
+    assert result["command_plan"]["hints"]["planner"] == "deterministic_pptx_fallback"
+    artifact_paths = {item["path"] for item in result["artifacts"]}
+    assert any(path.endswith(".pptx") for path in artifact_paths)
+    assert any(path.endswith(".md") for path in artifact_paths)
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_still_reports_llm_unavailable_when_no_fallback_exists(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", _UnavailableLLM())
+
+    result = await module.run_skill_task(
+        skill_name="pptx",
+        goal="Create a deck from a provided template",
+        user_query="make a branded ppt deck",
+        constraints={"output_format": "pptx", "template": "brand-template.pptx"},
+    )
+
+    assert result["success"] is False
+    assert result["run_status"] == "manual_required"
+    assert result["failure_reason"] == "llm_not_available_for_free_shell"
+    assert result["shell_mode_effective"] == "free_shell"
+    assert result["shell_mode_escalated"] is True
 
 
 @pytest.mark.asyncio
@@ -763,6 +844,60 @@ async def test_runtime_service_collects_shared_output_artifacts_when_configured(
     assert expected_output.read_text(encoding="utf-8").strip() == "shared output ok"
     assert fake_output_path.exists() is False
     assert "output/rewritten.txt" in {item["path"] for item in result["artifacts"]}
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_mirrors_run_local_output_dir_into_shared_output_root(
+    tmp_path: Path,
+    monkeypatch,
+):
+    shared_output_root = (tmp_path / "skill_output").resolve()
+    monkeypatch.setenv("MCP_OUTPUT_DIR", str(shared_output_root))
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    result = await module.run_skill_task(
+        skill_name="example-skill",
+        goal="Write the report into the run-local output directory",
+        user_query="store output in output/",
+        constraints={},
+        command_plan={
+            "skill_name": "example-skill",
+            "goal": "Write the report into the run-local output directory",
+            "user_query": "store output in output/",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": True,
+                "supports_python": False,
+            },
+            "constraints": {},
+            "command": (
+                "New-Item -ItemType Directory -Force -Path 'output' | Out-Null; "
+                "Set-Content -LiteralPath 'output/rewritten.txt' -Value 'mirrored output ok'"
+            ),
+            "mode": "explicit",
+            "shell_mode": "conservative",
+            "entrypoint": None,
+            "cli_args": [],
+            "generated_files": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {},
+        },
+        wait_for_completion=True,
+    )
+
+    run_workspace = Path(result["workspace"]).resolve()
+    local_output = run_workspace / "output" / "rewritten.txt"
+    mirrored_output = shared_output_root / run_workspace.name / "rewritten.txt"
+
+    assert local_output.is_file()
+    assert local_output.read_text(encoding="utf-8").strip() == "mirrored output ok"
+    assert mirrored_output.is_file()
+    assert mirrored_output.read_text(encoding="utf-8").strip() == "mirrored output ok"
+    assert [item["path"] for item in result["artifacts"]].count("output/rewritten.txt") == 1
 
 
 @pytest.mark.asyncio
@@ -1643,6 +1778,75 @@ async def test_runtime_service_bootstraps_missing_tool_before_execution(
 
 
 @pytest.mark.asyncio
+async def test_runtime_service_uses_shared_envs_bootstrap_root_for_free_shell(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    result = await module.run_skill_task(
+        skill_name="pdf",
+        goal="Use a shared bootstrap root under envs for free-shell setup",
+        user_query="free shell bootstrap should be reusable",
+        constraints={"shell_mode": "free_shell"},
+        wait_for_completion=True,
+        command_plan={
+            "skill_name": "pdf",
+            "goal": "Use a shared bootstrap root under envs for free-shell setup",
+            "user_query": "free shell bootstrap should be reusable",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {"shell_mode": "free_shell"},
+            "command": (
+                "python -c \"from pathlib import Path; import os; "
+                "root=Path(os.environ['SKILL_BOOTSTRAP_ROOT']); "
+                "Path('bootstrap-root.txt').write_text(str(root), encoding='utf-8'); "
+                "Path('bootstrap-shared.txt').write_text(os.environ['SKILL_BOOTSTRAP_SHARED'], encoding='utf-8'); "
+                "Path('marker-seen.txt').write_text((root/'marker.txt').read_text(encoding='utf-8'), encoding='utf-8')\""
+            ),
+            "mode": "free_shell",
+            "shell_mode": "free_shell",
+            "rationale": "Inspect the resolved bootstrap root.",
+            "generated_files": [],
+            "bootstrap_commands": [
+                (
+                    "python -c \"from pathlib import Path; import os; "
+                    "root=Path(os.environ['SKILL_BOOTSTRAP_ROOT']); "
+                    "root.mkdir(parents=True, exist_ok=True); "
+                    "(root/'marker.txt').write_text('ok', encoding='utf-8')\""
+                )
+            ],
+            "bootstrap_reason": "Prepare a shared bootstrap marker.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "free_shell", "required_tools": ["python"]},
+        },
+    )
+
+    run_workspace = Path(result["workspace"]).resolve()
+    bootstrap_root = Path(
+        (run_workspace / "bootstrap-root.txt").read_text(encoding="utf-8").strip()
+    ).resolve()
+    expected_envs_root = (tmp_path / "runtime-workspace" / "envs").resolve()
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    assert result["bootstrap_attempted"] is True
+    assert (run_workspace / "bootstrap-shared.txt").read_text(encoding="utf-8").strip() == "true"
+    assert (run_workspace / "marker-seen.txt").read_text(encoding="utf-8").strip() == "ok"
+    assert expected_envs_root in bootstrap_root.parents
+    assert "bootstrap" in bootstrap_root.parts
+    assert run_workspace not in bootstrap_root.parents
+    assert (bootstrap_root / "marker.txt").read_text(encoding="utf-8").strip() == "ok"
+
+
+@pytest.mark.asyncio
 async def test_runtime_service_uses_command_plan_runtime_target_for_bootstrap_network_policy(
     tmp_path: Path,
     monkeypatch,
@@ -1816,6 +2020,169 @@ async def test_runtime_service_repairs_failed_free_shell_execution_successfully(
     assert result["repair_history"][0]["stage"] == "execution"
     assert result["repaired_from_run_id"].endswith(":attempt-1")
     assert (Path(result["workspace"]) / "repaired.txt").read_text(encoding="utf-8") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_can_upgrade_failed_conservative_execution_to_free_shell(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    repair_llm = _StubLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/main.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": (
+                        "from pathlib import Path\n"
+                        "Path('auto-free-shell.txt').write_text('ok', encoding='utf-8')\n"
+                        "print('auto free shell repaired')\n"
+                    ),
+                    "description": "Generated repair entrypoint.",
+                }
+            ],
+            "rationale": "Upgrade the failed conservative plan into a generated free-shell repair.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python"],
+            "warnings": [],
+        }
+    )
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", repair_llm)
+
+    result = await module.run_skill_task(
+        skill_name="example-skill",
+        goal="Repair a failed conservative command",
+        user_query="build the example workflow",
+        constraints={},
+        wait_for_completion=True,
+        command_plan={
+            "skill_name": "example-skill",
+            "goal": "Repair a failed conservative command",
+            "user_query": "build the example workflow",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {},
+            "command": "python -c \"import sys; print('boom'); sys.exit(1)\"",
+            "mode": "inferred",
+            "shell_mode": "conservative",
+            "rationale": "Fail first, then auto-upgrade.",
+            "generated_files": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "locked_shipped_script", "required_tools": ["python"]},
+        },
+    )
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    assert result["repair_attempted"] is True
+    assert result["repair_succeeded"] is True
+    assert result["repair_attempt_count"] == 1
+    assert result["shell_mode"] == "free_shell"
+    assert result["command_plan"]["shell_mode"] == "free_shell"
+    assert result["repair_history"][0]["stage"] == "execution"
+    assert (Path(result["workspace"]) / "auto-free-shell.txt").read_text(
+        encoding="utf-8"
+    ) == "ok"
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_can_upgrade_skill_env_failure_to_free_shell(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    repair_llm = _StubLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/main.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": (
+                        "from pathlib import Path\n"
+                        "Path('env-repaired.txt').write_text('ok', encoding='utf-8')\n"
+                        "print('env repaired')\n"
+                    ),
+                    "description": "Generated repair entrypoint.",
+                }
+            ],
+            "rationale": "Upgrade the failed conservative env setup into a generated free-shell repair.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python"],
+            "warnings": [],
+        }
+    )
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", repair_llm)
+
+    original_build_run_env = module._EXECUTION_MANAGER.deps.build_run_env
+
+    def _failing_build_run_env(**kwargs):
+        command_plan = kwargs.get("command_plan")
+        if (
+            command_plan is not None
+            and getattr(command_plan, "shell_mode", "") == "conservative"
+        ):
+            raise module.SkillServerError("simulated skill env failure")
+        return original_build_run_env(**kwargs)
+
+    module._EXECUTION_MANAGER.deps.build_run_env = _failing_build_run_env
+
+    result = await module.run_skill_task(
+        skill_name="example-skill",
+        goal="Repair a conservative skill env failure",
+        user_query="build the example workflow",
+        constraints={},
+        wait_for_completion=True,
+        command_plan={
+            "skill_name": "example-skill",
+            "goal": "Repair a conservative skill env failure",
+            "user_query": "build the example workflow",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {},
+            "command": "python -c \"print('will not run')\"",
+            "mode": "inferred",
+            "shell_mode": "conservative",
+            "rationale": "Env setup fails first, then auto-upgrade.",
+            "generated_files": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "locked_shipped_script", "required_tools": ["python"]},
+        },
+    )
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    assert result["repair_attempted"] is True
+    assert result["repair_succeeded"] is True
+    assert result["repair_attempt_count"] == 1
+    assert result["shell_mode"] == "free_shell"
+    assert result["command_plan"]["shell_mode"] == "free_shell"
+    assert result["repair_history"][0]["stage"] in {"environment", "preflight"}
+    assert (Path(result["workspace"]) / "env-repaired.txt").read_text(
+        encoding="utf-8"
+    ) == "ok"
 
 
 @pytest.mark.asyncio

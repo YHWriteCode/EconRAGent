@@ -14,7 +14,13 @@ from kg_agent.config import (
     ToolConfig,
 )
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
-from kg_agent.skills import SkillLoader, SkillPlan, SkillRegistry
+from kg_agent.skills import (
+    SkillCommandPlanner,
+    SkillExecutor,
+    SkillLoader,
+    SkillPlan,
+    SkillRegistry,
+)
 from kg_agent.tools.base import ToolDefinition, ToolResult
 
 
@@ -126,6 +132,22 @@ class _StubSkillExecutor:
             "status": "completed",
             "artifacts": [],
         }
+
+
+class _StubPlannerLLM:
+    def __init__(self, payloads):
+        if isinstance(payloads, list):
+            self.payloads = [dict(item) for item in payloads]
+        else:
+            self.payloads = [dict(payloads)]
+
+    def is_available(self):
+        return True
+
+    async def complete_json(self, **kwargs):
+        if not self.payloads:
+            raise RuntimeError("No stub payload remaining")
+        return self.payloads.pop(0)
 
 
 @pytest.mark.asyncio
@@ -711,6 +733,77 @@ async def test_agent_core_waits_for_running_skill_to_reach_terminal_status():
     assert skill_executor.status_calls == ["run-99"]
     assert skill_executor.logs_calls == ["run-99"]
     assert skill_executor.artifact_calls == ["run-99"]
+
+
+@pytest.mark.asyncio
+async def test_agent_core_exact_ppt_request_auto_escalates_skill_instead_of_generic_manual_stop():
+    llm = _StubPlannerLLM(
+        [
+            {
+                "constraints": {
+                    "topic": "生成式人工智能起源发展",
+                    "title": "生成式人工智能起源发展",
+                    "output_format": "pptx",
+                    "slide_count": "10",
+                },
+                "reason": "Promoted the request into direct artifact defaults.",
+                "confidence": "high",
+            },
+            {
+                "mode": "generated_script",
+                "command": None,
+                "entrypoint": ".skill_generated/main.py",
+                "cli_args": [],
+                "generated_files": [
+                    {
+                        "path": ".skill_generated/main.py",
+                        "content": "print('build pptx deck')\n",
+                        "description": "Generated PPTX workflow entrypoint.",
+                    }
+                ],
+                "rationale": "Use the PPTX docs to assemble a generated deck workflow.",
+                "missing_fields": [],
+                "failure_reason": None,
+                "required_tools": ["python"],
+                "warnings": [],
+            },
+        ]
+    )
+    skill_registry = SkillRegistry(Path("skills"))
+    skill_loader = SkillLoader(skill_registry)
+    skill_executor = SkillExecutor(
+        registry=skill_registry,
+        loader=skill_loader,
+        command_planner=SkillCommandPlanner(llm_client=llm),
+    )
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        skill_executor=skill_executor,
+    )
+
+    response = await agent.chat(
+        query='请帮我做一个关于“生成式人工智能起源发展”的PPT',
+        session_id="ppt-auto-escalation-session",
+        use_memory=False,
+        debug=True,
+    )
+
+    assert response.tool_calls[0]["tool"] == "skill:pptx"
+    assert response.tool_calls[0]["success"] is True
+    assert response.tool_calls[0]["data"]["run_status"] == "planned"
+    assert response.tool_calls[0]["data"]["command_plan"]["mode"] == "generated_script"
+    assert response.tool_calls[0]["data"]["shell_mode_effective"] == "free_shell"
+    assert response.tool_calls[0]["data"]["shell_mode_escalated"] is True
+    assert (
+        response.tool_calls[0]["data"]["command_plan"]["constraints"]["topic"]
+        == "生成式人工智能起源发展"
+    )
+    assert response.tool_calls[0]["summary"] != "Skill 'pptx' needs more execution detail before it can run."
 
 
 @pytest.mark.asyncio

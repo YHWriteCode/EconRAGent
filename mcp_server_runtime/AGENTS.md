@@ -129,6 +129,8 @@ Also preserve these behavioral constraints:
 - shell execution must remain bounded by timeout, bootstrap, and repair limits
 - explicit shell commands and CLI-arg entrypoints that target the runtime workspace root must be rewritten into the concrete run workspace before execution, except for the configured shared output root when `MCP_OUTPUT_DIR` is enabled
 - Docker-facing `/workspace/...` run paths should remain mappable back to host-visible bind-mount paths when the runtime is mounted from the host
+- free-shell bootstrap/setup should remain isolated from the image-global environment; use the runtime-provided bootstrap env vars rather than mutating global Python/npm state
+- runtime workspaces should separate minimal execution input from skill-document context; keep `skill_invocation.json` and `skill_context.json` distinct even if `SKILL_REQUEST_FILE` remains as a compatibility alias to the invocation file
 
 ---
 
@@ -144,6 +146,9 @@ Also preserve these behavioral constraints:
   - outputs requested under runtime-root absolute paths end up inside the active run workspace
   - host-side artifact fallback still works after any workspace-path remapping
   - shared output paths under `/workspace/output/...` still land in the configured shared output root and are visible in run artifacts
+- If a change touches bootstrap or dependency setup, verify both:
+  - free-shell bootstrap lands in the shared env/bootstrap area rather than the image-global environment
+  - runtime env vars such as `SKILL_BOOTSTRAP_*`, `PIP_TARGET`, and `NPM_CONFIG_PREFIX` still point at the intended isolated bootstrap root
 - If a change adds new package files, keep Docker packaging and `pyproject.toml` package discovery updated.
 
 ---
@@ -154,4 +159,12 @@ Also preserve these behavioral constraints:
 - `execution.py` uses injected callbacks so it can stay decoupled from the file-entrypoint facade.
 - `queue.py` owns the in-process worker table, but `server.py` re-exports that state through `QUEUE_WORKER_PROCESSES` for tests and compatibility.
 - `store.py` owns the SQLite schema and in-memory mirror, but `server.py` re-exports `RUN_STORE` and helper functions for compatibility.
+- `envs.py` now supports two isolated dependency surfaces:
+  - declared per-skill shared venvs keyed by dependency files such as `runtime_requirements`, `requirements.lock`, or `requirements.txt`
+  - shared free-shell bootstrap roots under `ENVS_ROOT/bootstrap/...` exposed through `SKILL_BOOTSTRAP_*`, `PIP_TARGET`, and `NPM_CONFIG_PREFIX`
+- `planning.py` and repair planning consume the full `SKILL.md`, not only a truncated excerpt. Natural-language dependency/setup guidance anywhere in the document can drive free-shell bootstrap commands.
+- `workspace.py` stages the execution loop as two files rather than one mixed blob:
+  - `skill_invocation.json` for the durable request/execution payload
+  - `skill_context.json` for the full `SKILL.md`
 - `envs.py` and `planning.py` cooperatively rewrite runtime-root absolute command paths. General `/workspace/...` paths become run-local paths, while `/workspace/output/...` can be redirected into `MCP_OUTPUT_DIR/<run-id>/...` so user-visible artifacts persist in a shared host directory such as the repository-root `skill_output/`.
+- `workspace.py` mirrors run-local `output/` files into the configured shared output root and deduplicates public `output/...` artifact paths so callers see a stable artifact list.

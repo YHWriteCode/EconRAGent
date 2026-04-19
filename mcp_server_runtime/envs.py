@@ -555,6 +555,51 @@ def _bootstrap_workspace_paths(workspace_dir: Path) -> dict[str, Path]:
     }
 
 
+def _bootstrap_cache_key(loaded_skill: LoadedSkill) -> str:
+    payload = "\n".join(
+        [
+            loaded_skill.skill.name,
+            str(loaded_skill.skill.path.resolve()),
+            loaded_skill.skill_md,
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _normalize_bootstrap_skill_name(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "").strip().lower())
+    normalized = normalized.strip("-._")
+    return normalized or "skill"
+
+
+def _shared_bootstrap_paths(loaded_skill: LoadedSkill) -> dict[str, Path]:
+    skill_name = _normalize_bootstrap_skill_name(loaded_skill.skill.name)
+    cache_key = _bootstrap_cache_key(loaded_skill)
+    root = (ENVS_ROOT / "bootstrap" / f"{skill_name}-{cache_key}").resolve()
+    return {
+        "root": root,
+        "bin": (root / "bin").resolve(),
+        "scripts": (root / "Scripts").resolve(),
+        "site_packages": (root / "site-packages").resolve(),
+    }
+
+
+def _resolve_bootstrap_paths(
+    *,
+    workspace_dir: Path,
+    loaded_skill: LoadedSkill | None,
+    command_plan: SkillCommandPlan | None,
+) -> tuple[dict[str, Path], bool]:
+    use_shared_bootstrap = bool(
+        loaded_skill is not None
+        and isinstance(command_plan, SkillCommandPlan)
+        and command_plan.shell_mode == "free_shell"
+    )
+    if use_shared_bootstrap and loaded_skill is not None:
+        return _shared_bootstrap_paths(loaded_skill), True
+    return _bootstrap_workspace_paths(workspace_dir), False
+
+
 def _build_script_shell_command(
     *,
     skill_dir: Path,
@@ -734,12 +779,17 @@ def _build_run_env(
     constraints: dict[str, Any],
     runtime_target: SkillRuntimeTarget,
     request_file: Path,
+    context_file: Path | None = None,
     loaded_skill: LoadedSkill | None = None,
     command_plan: SkillCommandPlan | None = None,
     materialize_skill_env: bool = False,
 ) -> tuple[dict[str, str], dict[str, Any] | None]:
     env = os.environ.copy()
-    bootstrap_paths = _bootstrap_workspace_paths(workspace_dir)
+    bootstrap_paths, shared_bootstrap = _resolve_bootstrap_paths(
+        workspace_dir=workspace_dir,
+        loaded_skill=loaded_skill,
+        command_plan=command_plan,
+    )
     for path in bootstrap_paths.values():
         path.mkdir(parents=True, exist_ok=True)
     skill_env_spec = (
@@ -789,6 +839,8 @@ def _build_run_env(
     env["PIP_CACHE_DIR"] = str(PIP_CACHE_ROOT)
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     env["PIP_FIND_LINKS"] = str(WHEELHOUSE_ROOT)
+    env["NPM_CONFIG_PREFIX"] = str(bootstrap_paths["root"])
+    env["npm_config_prefix"] = str(bootstrap_paths["root"])
     if skill_env_spec is not None and bool(skill_env_spec.get("ready")):
         env["VIRTUAL_ENV"] = str(skill_env_spec["env_path"])
         env["SKILL_VENV_BIN"] = str(skill_env_spec["bin_dir"])
@@ -805,11 +857,14 @@ def _build_run_env(
             "SKILL_USER_QUERY": user_query,
             "SKILL_CONSTRAINTS_JSON": json.dumps(constraints, ensure_ascii=False),
             "SKILL_REQUEST_FILE": str(request_file),
+            "SKILL_INVOCATION_FILE": str(request_file),
+            "SKILL_CONTEXT_FILE": str(context_file or ""),
             "SKILL_NETWORK_ALLOWED": "true" if runtime_target.network_allowed else "false",
             "SKILL_BOOTSTRAP_ROOT": str(bootstrap_paths["root"]),
             "SKILL_BOOTSTRAP_BIN": str(bootstrap_paths["bin"]),
             "SKILL_BOOTSTRAP_SCRIPTS": str(bootstrap_paths["scripts"]),
             "SKILL_BOOTSTRAP_SITE_PACKAGES": str(bootstrap_paths["site_packages"]),
+            "SKILL_BOOTSTRAP_SHARED": "true" if shared_bootstrap else "false",
             "PIP_TARGET": str(bootstrap_paths["site_packages"]),
             "HOME": str(workspace_dir),
         }
