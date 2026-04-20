@@ -361,6 +361,7 @@ _EXECUTION_MANAGER = RuntimeExecutionManager(
         serialized_utility_llm_stub_cls=_SerializedUtilityLLMStub,
         get_llm_client=lambda: UTILITY_LLM_CLIENT,
         set_llm_client=_set_utility_llm_client,
+        refresh_llm_client=lambda: runtime_config._build_utility_llm_client(),
         prepare_transport_payload=_prepare_transport_payload,
         materialize_skill_workspace_view=_materialize_skill_workspace_view,
         write_mirrored_skill_manifest=_write_mirrored_skill_manifest,

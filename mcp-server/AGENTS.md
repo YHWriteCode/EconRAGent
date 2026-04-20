@@ -123,6 +123,7 @@ Docker-backed callers may still see `/workspace/...` inside runtime-target metad
 - Keep workspace writes under `MCP_WORKSPACE_DIR`; skill source content under `MCP_SKILLS_DIR` should stay read-only.
 - Preserve runtime-root path rewriting for explicit commands and CLI-arg-based entrypoints. General `/workspace/...` outputs should stay run-scoped, but `/workspace/output/...` should follow the configured shared output root when that feature is enabled.
 - Keep shell execution bounded by explicit timeout, bootstrap, and repair limits. Do not turn this server into an unbounded autonomous shell agent.
+- Durable workers must be able to refresh their utility LLM client before deciding whether free-shell repair is available. Do not assume the process-global client inherited at worker start is still healthy.
 - Maintain compatibility wrappers such as `read_skill_docs` and `execute_skill_script` only as thin shims around the newer coarse-grained runtime APIs.
 - Preserve CLI compatibility for `--queue-worker`, `--worker-run-id`, `--prefetch-skill-wheels`, and `--prefetch-all-skill-wheels`.
 - Preserve MCP tool names, resource URIs, and response payload shapes. `kg_agent` clients normalize these fields directly.
@@ -143,3 +144,4 @@ Docker-backed callers may still see `/workspace/...` inside runtime-target metad
 - Artifact fallback and host-workspace mapping only work well when Docker uses a host-visible bind mount for `/workspace` or `/workspace/runs`; named volumes or remote workers are not recoverable from the host side. A separate bind mount for `/workspace/output` is supported for shared user-visible outputs.
 - The supported deployment pattern is still stdio MCP over `docker run` or `docker compose run`, not a long-lived HTTP or SSE runtime service.
 - Legacy compatibility wrappers still exist for older callers, but they are no longer the primary runtime surface.
+- Runtime code changes that affect durable-worker repair or bootstrap behavior require both a new image and replacement of any old queue-worker processes. Rebuilding the image alone is not enough if old workers are still running the previous code path.

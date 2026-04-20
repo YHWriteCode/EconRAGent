@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
+import shutil
+import types
 import uuid
 from pathlib import Path
 
@@ -70,10 +73,80 @@ class _StubLLM:
             raise RuntimeError("No stub payload remaining")
         return self.payloads.pop(0)
 
+    async def complete_text(self, **kwargs):
+        self.calls.append(kwargs)
+        if not self.payloads:
+            raise RuntimeError("No stub payload remaining")
+        return json.dumps(self.payloads.pop(0), ensure_ascii=False)
+
 
 class _UnavailableLLM:
     def is_available(self) -> bool:
         return False
+
+
+class _JsonFailThenTextSuccessLLM:
+    def __init__(self, payload: dict):
+        self.payload = dict(payload)
+        self.calls: list[dict] = []
+        self.text_calls: list[dict] = []
+
+    def is_available(self) -> bool:
+        return True
+
+    async def complete_json(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError("json transport timed out")
+
+    async def complete_text(self, **kwargs):
+        self.text_calls.append(kwargs)
+        return json.dumps(self.payload, ensure_ascii=False)
+
+
+class _JsonAndTextFailLLM:
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.text_calls: list[dict] = []
+
+    def is_available(self) -> bool:
+        return True
+
+    async def complete_json(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError("json transport timed out")
+
+    async def complete_text(self, **kwargs):
+        self.text_calls.append(kwargs)
+        raise RuntimeError("text transport timed out")
+
+
+class _MalformedTextThenCompactRepairLLM:
+    def __init__(self, payload: dict):
+        self.payload = dict(payload)
+        self.calls: list[dict] = []
+        self.text_calls: list[dict] = []
+        self._repair_sent = False
+
+    def is_available(self) -> bool:
+        return True
+
+    async def complete_json(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError("json transport timed out")
+
+    async def complete_text(self, **kwargs):
+        self.text_calls.append(kwargs)
+        if not self._repair_sent:
+            self._repair_sent = True
+            return (
+                '{'
+                '"mode":"generated_script",'
+                '"entrypoint":".skill_generated/create_presentation.py",'
+                '"cli_args":[],'
+                '"generated_files":[{"path":".skill_generated/create_presentation.py",'
+                '"content":"#!/usr/bin/env python3\\nprint(\\"hello'
+            )
+        return json.dumps(self.payload, ensure_ascii=False)
 
 
 def test_runtime_service_uses_non_login_shell_for_posix_exec(
@@ -86,6 +159,35 @@ def test_runtime_service_uses_non_login_shell_for_posix_exec(
     argv = module._build_shell_exec_argv("python scripts/analyze_stock_trend.py")
 
     assert argv == ["/bin/sh", "-c", "python scripts/analyze_stock_trend.py"]
+
+
+def test_runtime_service_materializes_generated_js_entrypoint_with_node(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    loaded_skill = module._build_loaded_skill("pptx")
+    workspace_dir = (tmp_path / "generated-js-workspace").resolve()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    command = module._materialize_shell_command(
+        loaded_skill=loaded_skill,
+        command_plan=module.SkillCommandPlan(
+            skill_name="pptx",
+            goal="Create a PPT",
+            user_query="make a deck",
+            runtime_target=module.DEFAULT_RUNTIME_TARGET,
+            mode="generated_script",
+            entrypoint=".skill_generated/create_ppt.js",
+            cli_args=["--topic", "科幻小说起源发展"],
+        ),
+        workspace_dir=workspace_dir,
+    )
+
+    assert command is not None
+    assert "node" in command.lower()
+    assert str((workspace_dir / ".skill_generated" / "create_ppt.js").resolve()) in command
+    assert "--topic" in command
 
 
 def test_runtime_service_utility_llm_client_falls_back_to_main_model_env(
@@ -302,6 +404,83 @@ def test_runtime_service_build_run_env_falls_back_to_online_install_when_wheelho
         for command in calls
     )
     assert any(command[:4] == [module.sys.executable, "-m", "pip", "download"] for command in calls)
+
+
+def test_runtime_service_build_run_env_reuses_bootstrap_node_runtime_and_node_path(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    loaded_skill = module._build_loaded_skill("pptx")
+    workspace_dir = (tmp_path / "workspace-node-runtime").resolve()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    request_file = workspace_dir / "skill_invocation.json"
+
+    initial_env, _ = module._build_run_env(
+        skill_dir=loaded_skill.skill.path.resolve(),
+        workspace_dir=workspace_dir,
+        goal="Create a PPT",
+        user_query="生成一个关于科幻小说起源发展的PPT",
+        constraints={"shell_mode": "free_shell"},
+        runtime_target=module.DEFAULT_RUNTIME_TARGET,
+        request_file=request_file,
+        loaded_skill=loaded_skill,
+        command_plan=module.SkillCommandPlan(
+            skill_name="pptx",
+            goal="Create a PPT",
+            user_query="生成一个关于科幻小说起源发展的PPT",
+            runtime_target=module.DEFAULT_RUNTIME_TARGET,
+            mode="generated_script",
+            shell_mode="free_shell",
+            entrypoint=".skill_generated/create_presentation.py",
+            bootstrap_commands=["npm install -g pptxgenjs"],
+            hints={"planner": "free_shell", "required_tools": ["python", "node", "npm"]},
+        ),
+        materialize_skill_env=False,
+    )
+
+    bootstrap_root = Path(initial_env["SKILL_BOOTSTRAP_ROOT"]).resolve()
+    platform_tag = "win-x64" if os.name == "nt" else "linux-x64"
+    node_runtime_root = (bootstrap_root / ".node-runtime" / f"node-v20.19.5-{platform_tag}").resolve()
+    node_bin_dir = node_runtime_root if os.name == "nt" else (node_runtime_root / "bin").resolve()
+    node_bin_dir.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        (node_bin_dir / "node.exe").write_text("", encoding="utf-8")
+        (node_bin_dir / "npm.cmd").write_text("", encoding="utf-8")
+    else:
+        (node_bin_dir / "node").write_text("", encoding="utf-8")
+        (node_bin_dir / "npm").write_text("", encoding="utf-8")
+    node_modules_dir = (bootstrap_root / "lib" / "node_modules").resolve()
+    node_modules_dir.mkdir(parents=True, exist_ok=True)
+
+    env, _ = module._build_run_env(
+        skill_dir=loaded_skill.skill.path.resolve(),
+        workspace_dir=workspace_dir,
+        goal="Create a PPT",
+        user_query="生成一个关于科幻小说起源发展的PPT",
+        constraints={"shell_mode": "free_shell"},
+        runtime_target=module.DEFAULT_RUNTIME_TARGET,
+        request_file=request_file,
+        loaded_skill=loaded_skill,
+        command_plan=module.SkillCommandPlan(
+            skill_name="pptx",
+            goal="Create a PPT",
+            user_query="生成一个关于科幻小说起源发展的PPT",
+            runtime_target=module.DEFAULT_RUNTIME_TARGET,
+            mode="generated_script",
+            shell_mode="free_shell",
+            entrypoint=".skill_generated/create_presentation.py",
+            bootstrap_commands=["npm install -g pptxgenjs"],
+            hints={"planner": "free_shell", "required_tools": ["python", "node", "npm"]},
+        ),
+        materialize_skill_env=False,
+    )
+
+    path_entries = env["PATH"].split(os.pathsep)
+    assert str(node_bin_dir) in path_entries
+    assert env["NODE_PATH"].split(os.pathsep)[0] == str(node_modules_dir)
+    assert env["NPM_CONFIG_CACHE"].startswith(str(bootstrap_root))
+    assert env["npm_config_cache"].startswith(str(bootstrap_root))
 
 
 def test_materialize_shell_command_rewrites_workspace_root_cli_args(
@@ -541,7 +720,7 @@ async def test_runtime_service_returns_shell_plan_for_complex_skill_without_comm
     assert result["execution_mode"] == "shell"
     assert result["runtime_target"]["platform"] == "linux"
     assert result["command_plan"]["mode"] == "manual_required"
-    assert result["command_plan"]["hints"]["runnable_scripts"]
+    assert "runnable_scripts" not in result["command_plan"]["hints"]
 
     status = module.get_run_status(result["run_id"])
     assert status["run_status"] == "manual_required"
@@ -550,7 +729,7 @@ async def test_runtime_service_returns_shell_plan_for_complex_skill_without_comm
 
 
 @pytest.mark.asyncio
-async def test_runtime_service_reports_llm_unavailable_for_pptx_by_default_without_deterministic_fallback(
+async def test_runtime_service_reports_llm_unavailable_for_pptx_when_free_shell_llm_is_missing(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -574,26 +753,57 @@ async def test_runtime_service_reports_llm_unavailable_for_pptx_by_default_witho
     assert result["shell_mode_escalated"] is True
     assert result["planning_blockers"][0]["failure_reason"] == "manual_command_required"
     assert result["command_plan"]["hints"]["planner"] == "free_shell"
+    assert result["manual_required_kind"] == "technical_blocked"
+    assert "free-shell planning" in str(result["planner_error_summary"]).lower()
+    assert "technical planning blocker" in str(result["notes"]).lower()
+    assert "file_inventory" not in result
+    assert "shell_hints" not in result
+    assert "references" not in result
+    assert "runnable_scripts" not in result["command_plan"]["hints"]
+    assert isinstance(result["command_plan"]["hints"]["planner_error_summary"], str)
+    assert all(
+        isinstance(item, str) for item in result["command_plan"]["hints"].get("warnings", [])
+    )
+    assert isinstance(result["planning_blockers"][0]["rationale"], str)
     assert result["artifacts"] == []
 
 
 @pytest.mark.asyncio
-async def test_runtime_service_can_execute_deterministic_pptx_fallback_when_explicitly_enabled(
+async def test_runtime_service_can_execute_micro_context_text_first_plan(
     tmp_path: Path,
     monkeypatch,
 ):
     module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
-    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", _UnavailableLLM())
+    monkeypatch.setattr(
+        module,
+        "UTILITY_LLM_CLIENT",
+        _JsonFailThenTextSuccessLLM(
+            {
+                "mode": "generated_script",
+                "command": None,
+                "entrypoint": ".skill_generated/main.py",
+                "cli_args": [],
+                "generated_files": [
+                    {
+                        "path": ".skill_generated/main.py",
+                        "content": "print('build pptx deck')\n",
+                        "description": "Generated PPTX workflow entrypoint.",
+                    }
+                ],
+                "rationale": "Recovered with micro-context text planning.",
+                "missing_fields": [],
+                "failure_reason": None,
+                "required_tools": ["python"],
+                "warnings": [],
+            }
+        ),
+    )
 
     result = await module.run_skill_task(
         skill_name="pptx",
         goal="创建一个关于生成式人工智能起源发展的演示文稿",
         user_query="请生成一个关于生成式人工智能起源发展的PPT",
-        constraints={
-            "topic": "生成式人工智能起源发展",
-            "output_format": "pptx",
-            "allow_deterministic_fallback": True,
-        },
+        constraints={"topic": "生成式人工智能起源发展", "output_format": "pptx"},
         wait_for_completion=True,
     )
 
@@ -601,10 +811,87 @@ async def test_runtime_service_can_execute_deterministic_pptx_fallback_when_expl
     assert result["run_status"] == "completed"
     assert result["failure_reason"] is None
     assert result["command_plan"]["mode"] == "generated_script"
-    assert result["command_plan"]["hints"]["planner"] == "deterministic_pptx_fallback"
-    artifact_paths = {item["path"] for item in result["artifacts"]}
-    assert any(path.endswith(".pptx") for path in artifact_paths)
-    assert any(path.endswith(".md") for path in artifact_paths)
+    assert result["command_plan"]["hints"]["planner"] == "free_shell"
+    assert result["command_plan"]["hints"]["planner_context_mode"] == "micro_context"
+    assert result["command_plan"]["hints"]["planner_transport"] == "text_first"
+    assert result["planner_context_mode"] == "micro_context"
+    assert result["planner_transport"] == "text_first"
+    assert len(result["command_plan"]["hints"]["planner_attempts"]) == 4
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_reports_planning_failure_only_after_all_free_shell_attempts(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", _JsonAndTextFailLLM())
+
+    result = await module.run_skill_task(
+        skill_name="pptx",
+        goal="创建一个关于生成式人工智能起源发展的演示文稿",
+        user_query="请生成一个关于生成式人工智能起源发展的PPT",
+        constraints={"topic": "生成式人工智能起源发展", "output_format": "pptx"},
+        wait_for_completion=True,
+    )
+
+    assert result["success"] is False
+    assert result["run_status"] == "manual_required"
+    assert result["failure_reason"] == "llm_planning_failed"
+    assert result["manual_required_kind"] == "technical_blocked"
+    assert result["command_plan"]["hints"]["planner"] == "free_shell"
+    assert result["command_plan"]["hints"]["planner_context_mode"] == "micro_context"
+    assert result["command_plan"]["hints"]["planner_transport"] == "text_first"
+    assert len(result["command_plan"]["hints"]["planner_attempts"]) == 4
+    assert "deterministic_pptx_fallback" not in json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_can_compact_repair_truncated_text_first_plan(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    monkeypatch.setattr(
+        module,
+        "UTILITY_LLM_CLIENT",
+        _MalformedTextThenCompactRepairLLM(
+            {
+                "mode": "generated_script",
+                "command": None,
+                "entrypoint": ".skill_generated/main.py",
+                "cli_args": [],
+                "generated_files": [
+                    {
+                        "path": ".skill_generated/main.py",
+                        "content": "print('compact repair')\n",
+                        "description": "Compact repaired PPTX workflow entrypoint.",
+                    }
+                ],
+                "rationale": "Recovered by compacting a truncated generated-script plan.",
+                "missing_fields": [],
+                "failure_reason": None,
+                "required_tools": ["python"],
+                "warnings": [],
+            }
+        ),
+    )
+
+    result = await module.run_skill_task(
+        skill_name="pptx",
+        goal="创建一个关于科幻小说起源发展的演示文稿",
+        user_query="请生成一个关于科幻小说起源发展的PPT",
+        constraints={"topic": "科幻小说起源发展", "output_format": "pptx"},
+        wait_for_completion=True,
+    )
+
+    assert result["success"] is True
+    assert result["run_status"] == "completed"
+    assert result["failure_reason"] is None
+    assert result["command_plan"]["mode"] == "generated_script"
+    assert result["command_plan"]["hints"]["planner"] == "free_shell"
+    assert result["command_plan"]["hints"]["planner_context_mode"] == "micro_context"
+    assert result["command_plan"]["hints"]["planner_transport"] == "text_first"
 
 
 @pytest.mark.asyncio
@@ -627,6 +914,7 @@ async def test_runtime_service_still_reports_llm_unavailable_when_no_fallback_ex
     assert result["failure_reason"] == "llm_not_available_for_free_shell"
     assert result["shell_mode_effective"] == "free_shell"
     assert result["shell_mode_escalated"] is True
+    assert result["manual_required_kind"] == "technical_blocked"
 
 
 @pytest.mark.asyncio
@@ -1706,6 +1994,67 @@ async def test_runtime_service_preflight_fails_when_required_tools_are_missing(
     assert result["preflight"]["required_tools"][0]["available"] is False
 
 
+def test_runtime_service_preflight_allows_bootstrap_pending_required_tools(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    workspace_dir = (tmp_path / "preflight-bootstrap-pending").resolve()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    command_plan = module.SkillCommandPlan.from_dict(
+        {
+            "skill_name": "pptx",
+            "goal": "Generate a deck",
+            "user_query": "生成“科幻小说起源发展”的PPT文件",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": True,
+                "supports_python": True,
+            },
+            "constraints": {"output_format": "pptx"},
+            "command": "python .skill_generated/create_presentation.py",
+            "mode": "generated_script",
+            "shell_mode": "free_shell",
+            "entrypoint": ".skill_generated/create_presentation.py",
+            "generated_files": [
+                {
+                    "path": ".skill_generated/create_presentation.py",
+                    "content": "print('ok')\n",
+                    "description": "stub presentation generator",
+                }
+            ],
+            "bootstrap_commands": ["npm install -g pptxgenjs"],
+            "bootstrap_reason": "Install pptxgenjs before execution.",
+            "hints": {"planner": "free_shell", "required_tools": ["node", "npm", "python"]},
+        },
+        skill_name="pptx",
+        goal="Generate a deck",
+        user_query="生成“科幻小说起源发展”的PPT文件",
+        runtime_target=module.DEFAULT_RUNTIME_TARGET,
+        constraints={"output_format": "pptx"},
+    )
+
+    preflight, written_paths = module._run_preflight(
+        workspace_dir=workspace_dir,
+        command_plan=command_plan,
+        env={"PATH": str(Path(module.sys.executable).resolve().parent)},
+    )
+
+    assert preflight["ok"] is True
+    assert preflight["failure_reason"] is None
+    assert written_paths == [".skill_generated/create_presentation.py"]
+    required_tools = {item["name"]: item for item in preflight["required_tools"]}
+    assert required_tools["node"]["available"] is False
+    assert required_tools["node"]["bootstrap_pending"] is True
+    assert required_tools["npm"]["available"] is False
+    assert required_tools["npm"]["bootstrap_pending"] is True
+    assert required_tools["python"]["available"] is True
+    assert required_tools["python"]["bootstrap_pending"] is False
+
+
 @pytest.mark.asyncio
 async def test_runtime_service_bootstraps_missing_tool_before_execution(
     tmp_path: Path,
@@ -1844,6 +2193,85 @@ async def test_runtime_service_uses_shared_envs_bootstrap_root_for_free_shell(
     assert "bootstrap" in bootstrap_root.parts
     assert run_workspace not in bootstrap_root.parents
     assert (bootstrap_root / "marker.txt").read_text(encoding="utf-8").strip() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_auto_provisions_node_runtime_before_npm_bootstrap(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    provision_calls: list[dict] = []
+    workspace_dir = (tmp_path / "node-bootstrap-workspace").resolve()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    async def _fake_ensure_bootstrap_node_runtime(self, *, env: dict[str, str], timeout_s: int):
+        provision_calls.append({"timeout_s": timeout_s, "bootstrap_root": env.get("SKILL_BOOTSTRAP_ROOT")})
+        bootstrap_bin = Path(env["SKILL_BOOTSTRAP_BIN"]).resolve()
+        bootstrap_bin.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            (bootstrap_bin / "node.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+            (bootstrap_bin / "npm.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+        else:
+            for name in ("node", "npm"):
+                target = bootstrap_bin / name
+                target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                target.chmod(0o755)
+        env["PATH"] = str(bootstrap_bin) + os.pathsep + str(env.get("PATH", ""))
+        started_at = self.deps.utc_now()
+        finished_at = self.deps.utc_now()
+        return {
+            "success": True,
+            "stdout": "[bootstrap runtime] Installed Node.js runtime for npm bootstrap\n",
+            "stderr": "",
+            "failure_reason": None,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "duration_s": 0.0,
+        }
+
+    monkeypatch.setattr(
+        module._EXECUTION_MANAGER,
+        "ensure_bootstrap_node_runtime",
+        types.MethodType(_fake_ensure_bootstrap_node_runtime, module._EXECUTION_MANAGER),
+    )
+    bootstrap_root = (workspace_dir / "bootstrap-root").resolve()
+    env = dict(os.environ)
+    env.update(
+        {
+            "SKILL_BOOTSTRAP_ROOT": str(bootstrap_root),
+            "SKILL_BOOTSTRAP_BIN": str((bootstrap_root / "bin").resolve()),
+            "SKILL_NETWORK_ALLOWED": "true",
+            "HOME": str(workspace_dir),
+            "NPM_CONFIG_PREFIX": str(bootstrap_root),
+            "npm_config_prefix": str(bootstrap_root),
+        }
+    )
+
+    result = await module._execute_bootstrap_commands(
+        commands=["npm install -g pptxgenjs"],
+        workspace_dir=workspace_dir,
+        env=env,
+        timeout_s=60,
+    )
+
+    assert result["success"] is True
+    assert provision_calls
+    assert "[bootstrap runtime] Installed Node.js runtime" in result["logs_preview"]["stdout"]
+    assert shutil.which("npm", path=env["PATH"]) is not None
+
+
+def test_runtime_service_normalizes_bootstrap_pip_install_for_reuse(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+
+    command = 'python -m pip install --target "$SKILL_BOOTSTRAP_SITE_PACKAGES" lxml'
+    normalized = module._EXECUTION_MANAGER._normalize_bootstrap_command_for_reuse(command)
+
+    assert "--upgrade" in normalized
+    assert "--upgrade-strategy only-if-needed" in normalized
 
 
 @pytest.mark.asyncio
@@ -2020,6 +2448,298 @@ async def test_runtime_service_repairs_failed_free_shell_execution_successfully(
     assert result["repair_history"][0]["stage"] == "execution"
     assert result["repaired_from_run_id"].endswith(":attempt-1")
     assert (Path(result["workspace"]) / "repaired.txt").read_text(encoding="utf-8") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_refreshes_unavailable_repair_llm_for_execution_repair(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    refreshed_llm = _StubLLM(
+        {
+            "mode": "free_shell",
+            "command": (
+                "python -c \"from pathlib import Path; "
+                "Path('refreshed-repair.txt').write_text('ok', encoding='utf-8'); "
+                "print('refreshed repair')\""
+            ),
+            "generated_files": [],
+            "rationale": "Use the refreshed client to repair the failed command.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python"],
+            "warnings": [],
+        }
+    )
+    monkeypatch.setattr(module, "UTILITY_LLM_CLIENT", _UnavailableLLM())
+    module._EXECUTION_MANAGER.deps.refresh_llm_client = lambda: refreshed_llm
+
+    payload, loaded_skill, request = module._build_skill_runtime_context(
+        "pdf",
+        "Repair a failed command after refreshing the repair client",
+        "free shell mode",
+        None,
+        {"shell_mode": "free_shell"},
+    )
+    command_plan = module.SkillCommandPlan.from_dict(
+        {
+            "skill_name": "pdf",
+            "goal": "Repair a failed command after refreshing the repair client",
+            "user_query": "free shell mode",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {"shell_mode": "free_shell"},
+            "command": "python -c \"import sys; print('boom'); sys.exit(1)\"",
+            "mode": "free_shell",
+            "shell_mode": "free_shell",
+            "rationale": "Fail first, then refresh the repair client.",
+            "generated_files": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "free_shell", "required_tools": ["python"]},
+        },
+        skill_name="pdf",
+        goal="Repair a failed command after refreshing the repair client",
+        user_query="free shell mode",
+        runtime_target=module.DEFAULT_RUNTIME_TARGET,
+        constraints={"shell_mode": "free_shell"},
+    )
+    workspace_dir = (tmp_path / "runtime-refresh-repair").resolve()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    module._materialize_skill_workspace_view(
+        loaded_skill=loaded_skill,
+        workspace_dir=workspace_dir,
+    )
+    request_file = module._write_skill_request(
+        workspace_dir=workspace_dir,
+        skill_payload=payload,
+        goal=request.goal,
+        user_query=request.user_query,
+        constraints=request.constraints,
+        workspace=request.workspace,
+        runtime_target=command_plan.runtime_target.to_dict(),
+        command_plan=command_plan.to_dict(),
+    )
+    context_file = module._write_skill_context(
+        workspace_dir=workspace_dir,
+        skill_payload=payload,
+    )
+    env, skill_env_spec = module._build_run_env(
+        skill_dir=loaded_skill.skill.path.resolve(),
+        workspace_dir=workspace_dir,
+        goal=request.goal,
+        user_query=request.user_query,
+        constraints=request.constraints,
+        runtime_target=request.runtime_target,
+        request_file=request_file,
+        context_file=context_file,
+        loaded_skill=loaded_skill,
+        command_plan=command_plan,
+        materialize_skill_env=False,
+    )
+    preflight, generated_files = module._run_preflight(
+        workspace_dir=workspace_dir,
+        command_plan=command_plan,
+        env=env,
+    )
+    shell_command = module._materialize_shell_command(
+        loaded_skill=loaded_skill,
+        command_plan=command_plan,
+        workspace_dir=workspace_dir,
+    )
+
+    result = await module._EXECUTION_MANAGER.complete_shell_run(
+        skill_payload=payload,
+        loaded_skill=loaded_skill,
+        request=request,
+        command_plan=command_plan,
+        run_id=f"skill-run-{uuid.uuid4().hex}",
+        started_at=module._utc_now(),
+        workspace_dir=workspace_dir,
+        request_file=request_file,
+        context_file=context_file,
+        generated_files=generated_files,
+        preflight=preflight,
+        shell_command=shell_command,
+        env=env,
+        skill_env_spec=skill_env_spec,
+        timeout_s=module.DEFAULT_RUN_TIMEOUT_S,
+        cleanup_workspace=False,
+        worker_started_at=module._utc_now(),
+    )
+
+    assert result["success"] is True
+    assert result["repair_attempted"] is True
+    assert result["repair_succeeded"] is True
+    assert result["repair_attempt_count"] == 1
+    assert result["repair_history"][0]["stage"] == "execution"
+    assert module.UTILITY_LLM_CLIENT is refreshed_llm
+    assert (workspace_dir / "refreshed-repair.txt").read_text(encoding="utf-8") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_runtime_service_marks_worker_starting_before_durable_execution(
+    tmp_path: Path,
+    monkeypatch,
+):
+    module = _load_runtime_service_module(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    payload, loaded_skill, request = module._build_skill_runtime_context(
+        "pdf",
+        "Advance claimed runs into worker_starting before execution",
+        "free shell mode",
+        None,
+        {"shell_mode": "free_shell"},
+    )
+    command_plan = module.SkillCommandPlan.from_dict(
+        {
+            "skill_name": "pdf",
+            "goal": "Advance claimed runs into worker_starting before execution",
+            "user_query": "free shell mode",
+            "runtime_target": {
+                "platform": "linux",
+                "shell": "/bin/sh",
+                "workspace_root": "/workspace",
+                "workdir": "/workspace",
+                "network_allowed": False,
+                "supports_python": True,
+            },
+            "constraints": {"shell_mode": "free_shell"},
+            "command": "python -c \"print('ok')\"",
+            "mode": "free_shell",
+            "shell_mode": "free_shell",
+            "rationale": "Simple no-op command.",
+            "generated_files": [],
+            "missing_fields": [],
+            "failure_reason": None,
+            "hints": {"planner": "free_shell", "required_tools": ["python"]},
+        },
+        skill_name="pdf",
+        goal="Advance claimed runs into worker_starting before execution",
+        user_query="free shell mode",
+        runtime_target=module.DEFAULT_RUNTIME_TARGET,
+        constraints={"shell_mode": "free_shell"},
+    )
+    workspace_dir = (tmp_path / "worker-starting-workspace").resolve()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    module._materialize_skill_workspace_view(
+        loaded_skill=loaded_skill,
+        workspace_dir=workspace_dir,
+    )
+    request_file = module._write_skill_request(
+        workspace_dir=workspace_dir,
+        skill_payload=payload,
+        goal=request.goal,
+        user_query=request.user_query,
+        constraints=request.constraints,
+        workspace=request.workspace,
+        runtime_target=command_plan.runtime_target.to_dict(),
+        command_plan=command_plan.to_dict(),
+    )
+    context_file = module._write_skill_context(
+        workspace_dir=workspace_dir,
+        skill_payload=payload,
+    )
+    preflight = {
+        "status": "ok",
+        "ok": True,
+        "failure_reason": None,
+        "required_tools": [],
+        "generated_files": [],
+    }
+    run_id = f"skill-run-{uuid.uuid4().hex}"
+    started_at = module._utc_now()
+    running_record = module.SkillRunRecord(
+        skill_name=request.skill_name,
+        run_status="running",
+        success=True,
+        summary="Queued durable run for worker-starting test.",
+        command_plan=command_plan,
+        run_id=run_id,
+        command=command_plan.command,
+        workspace=str(workspace_dir),
+        started_at=started_at,
+        runtime=module._durable_runtime_metadata(queue_state="claimed"),
+        preflight=preflight,
+    )
+    running_payload = module._build_run_record_payload(
+        record=running_record,
+        goal=request.goal,
+        user_query=request.user_query,
+        constraints=request.constraints,
+        payload=payload,
+        loaded_skill=loaded_skill,
+    )
+    running_payload["request_file"] = str(request_file)
+    running_payload["context_file"] = str(context_file)
+    running_payload["generated_files"] = []
+    running_payload["logs"] = {"stdout": "", "stderr": ""}
+    module._store_run_record(running_payload)
+    job_context = module._EXECUTION_MANAGER.build_worker_job_context(
+        request=request,
+        command_plan=command_plan,
+        run_id=run_id,
+        started_at=started_at,
+        workspace_dir=workspace_dir,
+        request_file=request_file,
+        context_file=context_file,
+        generated_files=[],
+        preflight=preflight,
+        shell_command=command_plan.command or "",
+        timeout_s=module.DEFAULT_RUN_TIMEOUT_S,
+        cleanup_workspace=False,
+    )
+    module._upsert_run_row(
+        run_id=run_id,
+        record=running_payload,
+        job_context=job_context,
+        queue_state="claimed",
+        worker_pid=None,
+        active_process_pid=None,
+        cancel_requested=False,
+        heartbeat=False,
+    )
+
+    observed: dict[str, object] = {}
+    original_complete_shell_run = module._EXECUTION_MANAGER.complete_shell_run
+
+    async def _fake_complete_shell_run(self, **kwargs):
+        row = module._load_run_row(run_id)
+        record = module._load_run_record(run_id)
+        observed["row_queue_state"] = str(row["queue_state"]) if row is not None else None
+        observed["runtime_queue_state"] = (
+            str(record.get("runtime", {}).get("queue_state"))
+            if isinstance(record, dict)
+            else None
+        )
+        return {
+            "success": True,
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+            "logs_preview": {"stdout": "", "stderr": ""},
+            "artifacts": [],
+            "duration_s": 0.0,
+        }
+
+    module._EXECUTION_MANAGER.complete_shell_run = types.MethodType(
+        _fake_complete_shell_run,
+        module._EXECUTION_MANAGER,
+    )
+    try:
+        result = await module._run_durable_worker(run_id)
+    finally:
+        module._EXECUTION_MANAGER.complete_shell_run = original_complete_shell_run
+
+    assert result == 0
+    assert observed["row_queue_state"] == "worker_starting"
+    assert observed["runtime_queue_state"] == "worker_starting"
 
 
 @pytest.mark.asyncio

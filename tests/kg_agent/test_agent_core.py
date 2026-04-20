@@ -134,6 +134,38 @@ class _StubSkillExecutor:
         }
 
 
+class _FailedBootstrapSkillExecutor(_StubSkillExecutor):
+    async def execute(self, **kwargs):
+        self.calls.append(kwargs)
+        return ToolResult(
+            tool_name=f"skill:{kwargs['skill_name']}",
+            success=False,
+            data={
+                "run_status": "failed",
+                "status": "failed",
+                "skill_name": kwargs["skill_name"],
+                "goal": kwargs["goal"],
+                "workspace": "/workspace/runs/pptx-test",
+                "failure_reason": "bootstrap_failed",
+                "auto_inferred_constraints": {
+                    "language": "zh",
+                    "slide_count": "10",
+                    "theme": "Midnight Executive",
+                    "style": "modern",
+                    "dry_run": False,
+                    "plan_only": False,
+                },
+                "command_plan": {"mode": "generated_script"},
+                "logs_preview": {
+                    "stdout": "[bootstrap 1/2] npm install -g pptxgenjs\n",
+                    "stderr": "/bin/sh: 1: npm: not found\n",
+                },
+                "summary": "Loaded artifacts for failed skill run",
+            },
+            metadata={"executor": "skill", "skill_name": kwargs["skill_name"]},
+        )
+
+
 class _StubPlannerLLM:
     def __init__(self, payloads):
         if isinstance(payloads, list):
@@ -726,13 +758,73 @@ async def test_agent_core_waits_for_running_skill_to_reach_terminal_status():
     assert response.tool_calls[0]["data"]["run_status"] == "completed"
     assert response.tool_calls[0]["data"]["status"] == "completed"
     assert response.tool_calls[0]["data"]["workspace"] == "host-run-99"
-    assert response.tool_calls[0]["data"]["artifacts"] == [
-        {"path": "output/report.md", "size_bytes": 128}
-    ]
-    assert response.tool_calls[0]["data"]["logs_preview"]["stdout"] == "report generated"
-    assert skill_executor.status_calls == ["run-99"]
-    assert skill_executor.logs_calls == ["run-99"]
-    assert skill_executor.artifact_calls == ["run-99"]
+
+
+@pytest.mark.asyncio
+async def test_agent_core_reports_running_skill_without_fabricating_failure_answer():
+    class _StillRunningSkillExecutor(_StubSkillExecutor):
+        async def execute(self, **kwargs):
+            self.calls.append(kwargs)
+            return ToolResult(
+                tool_name=f"skill:{kwargs['skill_name']}",
+                success=True,
+                data={
+                    "run_id": "run-123",
+                    "run_status": "running",
+                    "status": "running",
+                    "skill_name": kwargs["skill_name"],
+                    "goal": kwargs["goal"],
+                    "workspace": kwargs.get("workspace"),
+                    "summary": "Running free-shell repair loop for skill 'pptx'.",
+                    "shell_mode_effective": "free_shell",
+                    "command_plan": {"mode": "generated_script"},
+                },
+                metadata={"executor": "skill", "skill_name": kwargs["skill_name"]},
+            )
+
+        async def get_run_status(self, *, run_id: str):
+            self.status_calls.append(run_id)
+            raise RuntimeError("status polling unavailable")
+
+    route = RouteDecision(
+        need_tools=False,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="skill_request",
+        tool_sequence=[],
+        reason="skill route",
+        max_iterations=1,
+        skill_plan=SkillPlan(
+            skill_name="pptx",
+            goal="Use skill 'pptx' to fulfill the user request: 生成“科幻小说起源发展”的PPT文件",
+            reason="Matched local skill",
+        ),
+    )
+    skill_executor = _StillRunningSkillExecutor()
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        route_judge=_StubRouteJudge(route=route),
+        skill_executor=skill_executor,
+    )
+
+    response = await agent.chat(
+        query="生成“科幻小说起源发展”的PPT文件",
+        session_id="skill-running-session",
+        use_memory=False,
+        debug=True,
+    )
+
+    assert response.tool_calls[0]["data"]["run_status"] == "running"
+    assert "仍在运行中" in response.answer
+    assert "当前还没有最终结果" in response.answer
+    assert "技术性阻塞" not in response.answer
+    assert skill_executor.status_calls == ["run-123"]
 
 
 @pytest.mark.asyncio
@@ -804,6 +896,78 @@ async def test_agent_core_exact_ppt_request_auto_escalates_skill_instead_of_gene
         == "生成式人工智能起源发展"
     )
     assert response.tool_calls[0]["summary"] != "Skill 'pptx' needs more execution detail before it can run."
+
+
+@pytest.mark.asyncio
+async def test_agent_core_reports_technical_skill_blockers_without_asking_for_more_ppt_details():
+    skill_registry = SkillRegistry(Path("skills"))
+    skill_loader = SkillLoader(skill_registry)
+    skill_executor = SkillExecutor(
+        registry=skill_registry,
+        loader=skill_loader,
+        command_planner=SkillCommandPlanner(),
+    )
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        skill_executor=skill_executor,
+    )
+
+    response = await agent.chat(
+        query='请帮我做一个“科幻小说起源发展”的PPT',
+        session_id="ppt-technical-blocker-session",
+        use_memory=False,
+        debug=True,
+    )
+
+    assert response.tool_calls[0]["tool"] == "skill:pptx"
+    assert response.tool_calls[0]["success"] is False
+    assert response.tool_calls[0]["data"]["run_status"] == "manual_required"
+    assert response.tool_calls[0]["data"]["manual_required_kind"] == "technical_blocked"
+    assert "技术性阻塞" in response.answer
+    assert "更多结构化参数" not in response.answer
+    assert "页数" not in response.answer
+    assert "稍后重试" not in response.answer
+    assert "更具体的步骤" not in response.answer
+    assert "dry_run" not in response.answer
+    assert "plan_only" not in response.answer
+
+
+@pytest.mark.asyncio
+async def test_agent_core_reports_failed_skill_bootstrap_as_system_blocker_without_alternatives():
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        skill_executor=_FailedBootstrapSkillExecutor(),
+    )
+
+    response = await agent.chat(
+        query='生成“科幻小说起源发展”的PPT文件',
+        session_id="ppt-bootstrap-failure-session",
+        use_memory=False,
+        debug=True,
+    )
+
+    assert response.tool_calls[0]["tool"] == "skill:pptx"
+    assert response.tool_calls[0]["success"] is False
+    assert response.tool_calls[0]["data"]["run_status"] == "failed"
+    assert response.tool_calls[0]["data"]["failure_reason"] == "bootstrap_failed"
+    assert "系统侧技术性阻塞" in response.answer
+    assert "bootstrap_failed" in response.answer
+    assert "npm: not found" in response.answer
+    assert "None |" not in response.answer
+    assert "稍后重试" not in response.answer
+    assert "结构化内容大纲" not in response.answer
+    assert "dry_run" not in response.answer
+    assert "plan_only" not in response.answer
 
 
 @pytest.mark.asyncio

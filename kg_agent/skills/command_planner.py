@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import calendar
 import json
 import os
@@ -8,7 +9,6 @@ import shlex
 import textwrap
 from dataclasses import dataclass
 from datetime import date, timedelta
-from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Protocol
 
@@ -31,8 +31,13 @@ CODE_FENCE_PATTERN = re.compile(
     r"```(?P<language>[A-Za-z0-9_+-]*)\s*\n(?P<code>.*?)```",
     re.IGNORECASE | re.DOTALL,
 )
-CREDENTIAL_KEYWORD_PATTERN = re.compile(
-    r"(api[_ -]?key|access[_ -]?token|credential|secret|password|auth token)",
+EXPLICIT_CREDENTIAL_REQUIREMENT_PATTERN = re.compile(
+    r"("
+    r"required credentials?|"
+    r"requires? (?:an? )?(?:api[_ -]?key|access[_ -]?token|credential|secret|password|auth token)|"
+    r"provide (?:an? |your )?(?:api[_ -]?key|access[_ -]?token|credential|secret|password|auth token)|"
+    r"set (?:an? |your )?(?:api[_ -]?key|access[_ -]?token|credential|secret|password|auth token)"
+    r")",
     re.IGNORECASE,
 )
 ENV_VAR_PATTERN = re.compile(
@@ -49,6 +54,105 @@ MAX_FREE_SHELL_TOTAL_EXAMPLE_CHARS = 12000
 INLINE_PYTHON_SCRIPT_PROMOTION_MIN_EXAMPLES = 3
 INLINE_PYTHON_SCRIPT_PROMOTION_MIN_CHARS = 120
 PREFERRED_GENERATED_ENTRYPOINT_NAMES = ("main.py", "run.py", "app.py", "script.py")
+ENTRYPOINT_SCRIPT_SUFFIXES = {".py", ".sh", ".bash", ".ps1"}
+NON_ENTRY_SCRIPT_DIR_NAMES = {"schemas", "helpers", "validators", "__pycache__"}
+TEXT_DOCUMENT_SUFFIXES = {".md", ".markdown", ".txt", ".rst", ".adoc"}
+NODE_TOOL_NAMES = {"node", "npm", "npx", "yarn", "pnpm"}
+NODE_RUNTIME_SUFFIXES = {".js", ".mjs", ".cjs"}
+KNOWN_NODE_PACKAGE_NAMES = {"pptxgenjs"}
+PIP_INSTALL_OPTION_NAMES_WITH_VALUE = {
+    "-r",
+    "--requirement",
+    "-c",
+    "--constraint",
+    "-i",
+    "--index-url",
+    "--extra-index-url",
+    "--find-links",
+    "--trusted-host",
+    "--timeout",
+    "--retries",
+    "--target",
+    "-t",
+    "--prefix",
+    "--cache-dir",
+    "--proxy",
+    "--cert",
+    "--client-cert",
+    "--log",
+    "--report",
+    "--python-version",
+    "--platform",
+    "--implementation",
+    "--abi",
+    "--src",
+    "--root",
+}
+NODE_BOOTSTRAP_PATTERN = re.compile(
+    r"\b(?:node|npm|npx|yarn|pnpm)\b",
+    re.IGNORECASE,
+)
+NODE_CONTENT_MARKERS = (
+    "pptxgenjs",
+    "require(",
+    "react-icons",
+    "reactdomserver",
+    "sharp(",
+    "subprocess.run(['node'",
+    'subprocess.run(["node"',
+    "subprocess.run(['npm'",
+    'subprocess.run(["npm"',
+    "node ",
+    "npm ",
+    "npx ",
+    "yarn ",
+    "pnpm ",
+)
+DOC_BUNDLE_MAX_HOPS = 2
+DOC_BUNDLE_MAX_FOLLOWUPS = 4
+DOC_BUNDLE_COMPACT_FOLLOWUP_LIMIT = 2
+DOC_BUNDLE_COMPACT_FOLLOWUP_CHARS = 2200
+DOC_BUNDLE_MICRO_FOLLOWUP_LIMIT = 1
+DOC_BUNDLE_MICRO_FOLLOWUP_CHARS = 1200
+CLI_HISTORY_MAX_ATTEMPTS = 3
+CLI_HISTORY_STDIO_TAIL_CHARS = 1200
+FREE_SHELL_MICRO_FILE_LIMIT = 10
+FREE_SHELL_MICRO_SCRIPT_LIMIT = 2
+FREE_SHELL_MICRO_SCRIPT_CHARS = 320
+FREE_SHELL_MAX_TOKENS = 3200
+FREE_SHELL_MICRO_MAX_TOKENS = 2200
+FREE_SHELL_REPAIR_OUTPUT_SNIPPET_CHARS = 12000
+FREE_SHELL_LARGE_ACTIONABLE_DOC_CHARS = 14000
+FREE_SHELL_LARGE_ACTIONABLE_FILE_COUNT = 24
+MARKDOWN_RELATIVE_LINK_PATTERN = re.compile(r"\[[^\]]+\]\((?P<target>[^)]+)\)")
+INLINE_DOC_REFERENCE_PATTERN = re.compile(
+    r"(?P<path>(?:references/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.(?:md|markdown|txt|rst|adoc))",
+    re.IGNORECASE,
+)
+TRAILING_COMMA_PATTERN = re.compile(r",(\s*[}\]])")
+SMART_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+    }
+)
+TECHNICAL_MANUAL_FAILURE_REASONS = {
+    "environment_not_prepared",
+    "llm_not_available_for_free_shell",
+    "llm_planning_failed",
+    "python_not_supported",
+    "prompt_parse_failed",
+    "internal_planner_error",
+}
+USER_ACTIONABLE_MANUAL_FAILURE_REASONS = {
+    "missing_credential",
+    "ambiguous_target_file",
+    "missing_input_path",
+    "missing_required_args",
+    "manual_command_required",
+}
 DATE_TOKEN_PATTERN = re.compile(
     r"\b(?P<year>20\d{2})(?:[-/.]?(?P<month>0[1-9]|1[0-2]))(?:[-/.]?(?P<day>0[1-9]|[12]\d|3[01]))\b"
 )
@@ -187,66 +291,21 @@ CREATION_REQUEST_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
-PPTX_HISTORY_REQUEST_PATTERN = re.compile(
+ACTIONABLE_SKILL_PATTERN = re.compile(
     r"("
-    r"起源|发展|演进|历史|里程碑|时间线|"
-    r"origin|history|evolution|timeline|milestone"
+    r"file|files|document|documents|pdf|ppt|pptx|slides?|deck|presentation|"
+    r"xlsx|xlsm|xls|csv|tsv|excel|spreadsheet|workbook|worksheet|"
+    r"report|reports|table|tables|chart|charts|data|dataset|datasets|"
+    r"extract|merge|split|convert|transform|render|rendering|ocr|fill|"
+    r"watermark|query|fetch|analy[sz]e|analysis|clean|repair|recalc|"
+    r"backtest|quote|stock|price|trend|volatility|"
+    r"\u6587\u4ef6|\u6587\u6863|\u8868\u683c|\u5de5\u4f5c\u7c3f|\u7535\u5b50\u8868\u683c|"
+    r"\u62a5\u8868|\u62a5\u544a|\u5e7b\u706f\u7247|\u6f14\u793a|\u7b80\u62a5|"
+    r"\u63d0\u53d6|\u5408\u5e76|\u62c6\u5206|\u8f6c\u6362|\u6e32\u67d3|\u8865\u5168|"
+    r"\u6570\u636e|\u5206\u6790|\u6e05\u6d17|\u56de\u6d4b|\u80a1\u4ef7|\u884c\u60c5|\u8d8b\u52bf|\u6ce2\u52a8"
     r")",
     re.IGNORECASE,
 )
-PPTX_GENERATIVE_AI_PATTERN = re.compile(
-    r"("
-    r"生成式人工智能|生成式ai|生成式 AI|生成式模型|大模型|"
-    r"generative\s+ai|foundation\s+model|large\s+language\s+model|llm"
-    r")",
-    re.IGNORECASE,
-)
-PPTX_DEFAULT_TEMPLATE_B64_PATH = Path(__file__).with_name("pptx_default_template.b64")
-PPTX_DEFAULT_SLIDE_COUNT = 10
-PPTX_MIN_SLIDE_COUNT = 4
-PPTX_MAX_SLIDE_COUNT = 14
-PPTX_THEME_PALETTES = {
-    "charcoal_minimal": {
-        "name": "charcoal_minimal",
-        "dark": "36454F",
-        "light": "F7F7F5",
-        "accent": "212121",
-        "accent_soft": "D7DADD",
-        "text_dark": "1F2933",
-        "text_light": "FFFFFF",
-        "muted": "667085",
-    },
-    "midnight_executive": {
-        "name": "midnight_executive",
-        "dark": "1E2761",
-        "light": "F5F8FF",
-        "accent": "5B8DEF",
-        "accent_soft": "D8E4FF",
-        "text_dark": "1D2433",
-        "text_light": "FFFFFF",
-        "muted": "5B6475",
-    },
-    "forest_moss": {
-        "name": "forest_moss",
-        "dark": "2C5F2D",
-        "light": "F6FAF2",
-        "accent": "97BC62",
-        "accent_soft": "E1EFD0",
-        "text_dark": "23331F",
-        "text_light": "FFFFFF",
-        "muted": "60715A",
-    },
-    "coral_energy": {
-        "name": "coral_energy",
-        "dark": "2F3C7E",
-        "light": "FFF8F2",
-        "accent": "F96167",
-        "accent_soft": "FDE0D9",
-        "text_dark": "2B2F38",
-        "text_light": "FFFFFF",
-        "muted": "6B7280",
-    },
-}
 FINANCIAL_PIPELINE_REQUEST_PATTERN = re.compile(
     r"("
     r"backtest|"
@@ -355,6 +414,122 @@ class SkillPlannerLLMClient(Protocol):
         max_tokens: int = 1200,
     ) -> dict[str, Any]:
         ...
+
+
+def _extract_json_object_text(payload: str) -> str:
+    normalized = str(payload or "").strip()
+    if not normalized:
+        raise ValueError("LLM did not return a JSON object.")
+    fence_match = CODE_FENCE_PATTERN.search(normalized)
+    if fence_match:
+        normalized = str(fence_match.group("code") or "").strip()
+    start = normalized.find("{")
+    end = normalized.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError(f"LLM did not return a JSON object: {payload}")
+    return normalized[start : end + 1]
+
+
+def _normalize_json_like_text(payload: str) -> str:
+    normalized = str(payload or "").translate(SMART_QUOTE_TRANSLATION)
+    return TRAILING_COMMA_PATTERN.sub(r"\1", normalized)
+
+
+def _parse_json_like_object(payload: str) -> dict[str, Any]:
+    object_text = _extract_json_object_text(payload)
+    candidates: list[str] = []
+    for item in (object_text, _normalize_json_like_text(object_text)):
+        if item and item not in candidates:
+            candidates.append(item)
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+            if isinstance(value, dict):
+                return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+        except Exception as exc:
+            last_error = exc
+        try:
+            value = ast.literal_eval(candidate)
+            if isinstance(value, dict):
+                return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ValueError(f"LLM did not return a JSON object: {payload}")
+
+
+async def _complete_json_via_text_first(
+    llm_client: SkillPlannerLLMClient,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_tokens: int,
+) -> dict[str, Any]:
+    complete_text = getattr(llm_client, "complete_text", None)
+    if complete_text is None:
+        raise RuntimeError("LLM client does not support text-first planning fallback.")
+
+    raw_text = await complete_text(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    try:
+        return _parse_json_like_object(raw_text)
+    except Exception as parse_exc:
+        repair_system_prompt = (
+            "You repair malformed or oversized JSON skill plans returned by another model. "
+            "Return exactly one valid JSON object and nothing else. "
+            "Preserve the original plan intent, but you may rewrite the plan into a more compact equivalent form "
+            "when the original output was truncated, oversized, or invalid. "
+            "If generated_files appear in the malformed output, keep them minimal: prefer one small executable "
+            "entrypoint file, do not inline assets/base64/large article text/templates, and keep each generated file "
+            "well under a large-script threshold. "
+            "If a Node-only package appears, do not import it from Python; use bootstrap_commands or a Node entrypoint instead. "
+            "If you cannot safely reconstruct a runnable plan, return a valid manual_required JSON object."
+        )
+        repair_user_prompt = (
+            "The following model output should have been a compact JSON object but failed to parse.\n\n"
+            "Return the same planner schema as a compact valid JSON object:\n"
+            "{"
+            '"mode": "free_shell" | "generated_script" | "manual_required", '
+            '"command": str | null, '
+            '"entrypoint": str | null, '
+            '"cli_args": [str], '
+            '"generated_files": [{"path": str, "content": str, "description": str}], '
+            '"bootstrap_commands": [str], '
+            '"bootstrap_reason": str | null, '
+            '"rationale": str, '
+            '"missing_fields": [str], '
+            '"failure_reason": str | null, '
+            '"required_tools": [str], '
+            '"warnings": [str]'
+            "}\n\n"
+            f"Parse error:\n{parse_exc}\n\n"
+            "Repair guidance:\n"
+            "- If the malformed output was truncated inside generated_files.content, replace that content with a much shorter executable equivalent.\n"
+            "- Prefer shipped entrypoints, bootstrap_commands, and concise generated_files over long embedded scripts.\n"
+            "- Never return markdown fences.\n\n"
+            f"Original planner system prompt:\n{system_prompt}\n\n"
+            f"Malformed output:\n{_truncate_text(raw_text, max_chars=FREE_SHELL_REPAIR_OUTPUT_SNIPPET_CHARS)}\n"
+        )
+        repaired_text = await complete_text(
+            system_prompt=repair_system_prompt,
+            user_prompt=repair_user_prompt,
+            temperature=0.0,
+            max_tokens=max(800, min(max_tokens, 2400)),
+        )
+        try:
+            return _parse_json_like_object(repaired_text)
+        except Exception as repair_exc:
+            raise ValueError(
+                f"Text-first JSON parsing failed. Initial error: {parse_exc}. "
+                f"Repair error: {repair_exc}."
+            ) from repair_exc
 
 
 @dataclass(frozen=True)
@@ -948,17 +1123,386 @@ def extract_documented_script_paths(markdown: str) -> list[str]:
     return documented
 
 
-def iter_runnable_scripts(loaded_skill: LoadedSkill) -> list[str]:
+def extract_documented_entrypoint_paths(markdown: str) -> list[str]:
+    documented: list[str] = []
+    seen: set[str] = set()
+    for path in extract_documented_script_paths(markdown):
+        if path in seen:
+            continue
+        documented.append(path)
+        seen.add(path)
+    for command in extract_shell_examples(markdown):
+        for match in re.finditer(r"(?P<path>scripts/[A-Za-z0-9_./-]+\.(?:py|sh|bash|ps1))", command):
+            path = str(match.group("path") or "").replace("\\", "/").strip()
+            if not path or path in seen:
+                continue
+            documented.append(path)
+            seen.add(path)
+    return documented
+
+
+def _is_candidate_entry_script(
+    relative_path: str,
+    *,
+    documented_entrypoints: set[str] | None = None,
+) -> bool:
+    normalized = str(relative_path or "").replace("\\", "/").strip()
+    if not normalized:
+        return False
+    pure_path = PurePosixPath(normalized)
+    suffix = pure_path.suffix.lower()
+    if suffix not in ENTRYPOINT_SCRIPT_SUFFIXES:
+        return False
+    if pure_path.name.startswith("__init__."):
+        return False
+    normalized_documented = documented_entrypoints or set()
+    lower_parts = [part.lower() for part in pure_path.parts]
+    if any(part in NON_ENTRY_SCRIPT_DIR_NAMES for part in lower_parts):
+        return normalized in normalized_documented
+    return True
+
+
+def iter_runnable_scripts(
+    loaded_skill: LoadedSkill,
+    *,
+    documented_entrypoints: set[str] | None = None,
+) -> list[str]:
     runnable: list[str] = []
     for item in loaded_skill.file_inventory:
         if item.kind != "script":
             continue
         relative_path = item.path.replace("\\", "/")
-        suffix = Path(relative_path).suffix.lower()
-        absolute_path = (loaded_skill.skill.path / relative_path).resolve()
-        if suffix in {".py", ".sh", ".bash", ".ps1"} or os.access(absolute_path, os.X_OK):
+        if _is_candidate_entry_script(
+            relative_path,
+            documented_entrypoints=documented_entrypoints,
+        ):
             runnable.append(relative_path)
     return runnable
+
+
+def _read_skill_text_file(
+    loaded_skill: LoadedSkill,
+    relative_path: str,
+) -> str | None:
+    normalized = str(relative_path or "").replace("\\", "/").strip()
+    if not normalized:
+        return None
+    absolute_path = (loaded_skill.skill.path / normalized).resolve()
+    try:
+        skill_root = loaded_skill.skill.path.resolve()
+    except OSError:
+        return None
+    if absolute_path != skill_root and skill_root not in absolute_path.parents:
+        return None
+    if not absolute_path.is_file():
+        return None
+    try:
+        return absolute_path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
+def _resolve_relative_skill_doc_reference(
+    *,
+    loaded_skill: LoadedSkill,
+    source_path: str,
+    target: str,
+) -> str | None:
+    normalized_target = str(target or "").strip()
+    if not normalized_target:
+        return None
+    normalized_target = normalized_target.split("#", 1)[0].split("?", 1)[0].strip()
+    if not normalized_target or "://" in normalized_target or normalized_target.startswith(("mailto:", "#")):
+        return None
+    source_relative = str(source_path or "SKILL.md").replace("\\", "/").strip() or "SKILL.md"
+    source_absolute = (loaded_skill.skill.path / source_relative).resolve()
+    candidate = (source_absolute.parent / normalized_target).resolve()
+    skill_root = loaded_skill.skill.path.resolve()
+    if candidate != skill_root and skill_root not in candidate.parents:
+        return None
+    if not candidate.is_file():
+        return None
+    suffix = candidate.suffix.lower()
+    if suffix not in TEXT_DOCUMENT_SUFFIXES:
+        return None
+    return str(candidate.relative_to(skill_root)).replace("\\", "/")
+
+
+def _iter_skill_doc_reference_candidates(
+    *,
+    loaded_skill: LoadedSkill,
+    source_path: str,
+    content: str,
+) -> list[dict[str, Any]]:
+    references: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for match in MARKDOWN_RELATIVE_LINK_PATTERN.finditer(content):
+        relative_path = _resolve_relative_skill_doc_reference(
+            loaded_skill=loaded_skill,
+            source_path=source_path,
+            target=str(match.group("target") or ""),
+        )
+        if not relative_path or relative_path in seen:
+            continue
+        context = content[max(0, match.start() - 120) : min(len(content), match.end() + 120)]
+        references.append(
+            {
+                "path": relative_path,
+                "source_path": source_path,
+                "context": context,
+            }
+        )
+        seen.add(relative_path)
+    for match in INLINE_DOC_REFERENCE_PATTERN.finditer(content):
+        relative_path = _resolve_relative_skill_doc_reference(
+            loaded_skill=loaded_skill,
+            source_path=source_path,
+            target=str(match.group("path") or ""),
+        )
+        if not relative_path or relative_path in seen:
+            continue
+        context = content[max(0, match.start() - 120) : min(len(content), match.end() + 120)]
+        references.append(
+            {
+                "path": relative_path,
+                "source_path": source_path,
+                "context": context,
+            }
+        )
+        seen.add(relative_path)
+    return references
+
+
+def _is_edit_or_template_request(
+    *,
+    loaded_skill: LoadedSkill,
+    request: SkillExecutionRequest,
+) -> bool:
+    constraints = dict(request.constraints or {})
+    if extract_input_paths(constraints):
+        return True
+    if str(constraints.get("template", "") or "").strip():
+        return True
+    if loaded_skill.skill.name.strip().lower() != "pptx":
+        return False
+    request_text = _join_request_context_text(
+        request.goal,
+        request.user_query,
+        request.constraints,
+    ).lower()
+    return bool(
+        re.search(
+            r"(edit|update|modify|template|revise|refine|套用模板|模板|编辑|修改|更新)",
+            request_text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _score_skill_doc_candidate(
+    *,
+    loaded_skill: LoadedSkill,
+    request: SkillExecutionRequest,
+    relative_path: str,
+    content: str,
+    context: str,
+) -> int:
+    request_text = _join_request_context_text(
+        request.goal,
+        request.user_query,
+        request.constraints,
+    )
+    corpus = "\n".join([relative_path, context, content[:4000]])
+    score = _score_relevance(corpus, request_text)
+    normalized_path = relative_path.lower()
+    if loaded_skill.skill.name.strip().lower() == "pptx":
+        if _is_creation_or_generation_request(loaded_skill=loaded_skill, request=request):
+            if normalized_path.endswith("pptxgenjs.md"):
+                score += 16
+            if normalized_path.endswith("editing.md"):
+                score += 2
+        if _is_edit_or_template_request(loaded_skill=loaded_skill, request=request):
+            if normalized_path.endswith("editing.md"):
+                score += 16
+            if normalized_path.endswith("pptxgenjs.md"):
+                score += 1
+    return score
+
+
+def build_skill_doc_bundle(
+    loaded_skill: LoadedSkill,
+    request: SkillExecutionRequest,
+    *,
+    max_hops: int = DOC_BUNDLE_MAX_HOPS,
+    max_followups: int = DOC_BUNDLE_MAX_FOLLOWUPS,
+) -> list[dict[str, Any]]:
+    root_entry = {
+        "path": "SKILL.md",
+        "hop": 0,
+        "source_path": None,
+        "score": 10_000,
+        "content": loaded_skill.skill_md,
+        "reason": "root_skill_doc",
+    }
+    if max_hops <= 0 or max_followups <= 0:
+        return [root_entry]
+
+    bundle: list[dict[str, Any]] = [root_entry]
+    visited: set[str] = {"SKILL.md"}
+    frontier: list[tuple[str, str, int]] = [("SKILL.md", loaded_skill.skill_md, 0)]
+    while frontier and len(bundle) - 1 < max_followups:
+        discovered: list[dict[str, Any]] = []
+        for source_path, content, hop in frontier:
+            if hop >= max_hops:
+                continue
+            for candidate in _iter_skill_doc_reference_candidates(
+                loaded_skill=loaded_skill,
+                source_path=source_path,
+                content=content,
+            ):
+                relative_path = str(candidate.get("path", "")).strip()
+                if not relative_path or relative_path in visited:
+                    continue
+                candidate_content = _read_skill_text_file(loaded_skill, relative_path)
+                if not candidate_content:
+                    continue
+                discovered.append(
+                    {
+                        "path": relative_path,
+                        "hop": hop + 1,
+                        "source_path": source_path,
+                        "score": _score_skill_doc_candidate(
+                            loaded_skill=loaded_skill,
+                            request=request,
+                            relative_path=relative_path,
+                            content=candidate_content,
+                            context=str(candidate.get("context", "")),
+                        ),
+                        "content": candidate_content,
+                        "reason": "progressive_followup",
+                    }
+                )
+        if not discovered:
+            break
+        discovered.sort(
+            key=lambda item: (
+                int(item.get("score", 0)),
+                -int(item.get("hop", 0)),
+                -len(str(item.get("content", ""))),
+                str(item.get("path", "")),
+            ),
+            reverse=True,
+        )
+        next_frontier: list[tuple[str, str, int]] = []
+        for candidate in discovered:
+            relative_path = str(candidate.get("path", "")).strip()
+            if not relative_path or relative_path in visited:
+                continue
+            visited.add(relative_path)
+            bundle.append(candidate)
+            next_frontier.append(
+                (
+                    relative_path,
+                    str(candidate.get("content", "")),
+                    int(candidate.get("hop", 0)),
+                )
+            )
+            if len(bundle) - 1 >= max_followups:
+                break
+        frontier = next_frontier
+    return bundle
+
+
+def compact_skill_doc_bundle(
+    doc_bundle: list[dict[str, Any]],
+    *,
+    followup_limit: int = DOC_BUNDLE_COMPACT_FOLLOWUP_LIMIT,
+    followup_chars: int = DOC_BUNDLE_COMPACT_FOLLOWUP_CHARS,
+) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    followup_count = 0
+    for item in doc_bundle:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "")).strip()
+        if not path:
+            continue
+        compacted_item = dict(item)
+        if path != "SKILL.md":
+            if followup_count >= max(0, followup_limit):
+                continue
+            compacted_item["content"] = _truncate_text(
+                str(item.get("content", "")),
+                max_chars=followup_chars,
+            )
+            followup_count += 1
+        compacted.append(compacted_item)
+    return compacted
+
+
+def summarize_cli_history(
+    history: list[dict[str, Any]] | None,
+    *,
+    limit: int = CLI_HISTORY_MAX_ATTEMPTS,
+) -> list[dict[str, Any]]:
+    summarized: list[dict[str, Any]] = []
+    tail = history[-max(1, limit) :] if history else []
+    for item in tail:
+        if not isinstance(item, dict):
+            continue
+        summarized.append(
+            {
+                "attempt_index": item.get("attempt_index"),
+                "stage": item.get("stage"),
+                "command": item.get("command"),
+                "plan_mode": item.get("plan_mode"),
+                "entrypoint": item.get("entrypoint"),
+                "failure_reason": item.get("failure_reason"),
+                "preflight_failure_reason": item.get("preflight_failure_reason"),
+                "exit_code": item.get("exit_code"),
+                "stdout_tail": _truncate_text(
+                    str(item.get("stdout_tail", "")),
+                    max_chars=CLI_HISTORY_STDIO_TAIL_CHARS,
+                ),
+                "stderr_tail": _truncate_text(
+                    str(item.get("stderr_tail", "")),
+                    max_chars=CLI_HISTORY_STDIO_TAIL_CHARS,
+                ),
+            }
+        )
+    return summarized
+
+
+def classify_manual_required_kind(failure_reason: str | None) -> str:
+    normalized = str(failure_reason or "").strip().lower()
+    if normalized in TECHNICAL_MANUAL_FAILURE_REASONS:
+        return "technical_blocked"
+    if normalized in USER_ACTIONABLE_MANUAL_FAILURE_REASONS:
+        return "user_actionable"
+    return "user_actionable"
+
+
+def summarize_planner_error(
+    *messages: str | None,
+    max_chars: int = 220,
+) -> str | None:
+    parts: list[str] = []
+    seen: set[str] = set()
+    for message in messages:
+        normalized = str(message or "").strip()
+        if not normalized:
+            continue
+        normalized = re.sub(r"\s+", " ", normalized)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        parts.append(normalized)
+    if not parts:
+        return None
+    summary = "; ".join(parts)
+    if len(summary) <= max_chars:
+        return summary
+    return summary[: max_chars - 1].rstrip() + "…"
 
 
 def build_portable_script_command(
@@ -975,6 +1519,8 @@ def build_portable_script_command(
     argv: list[str]
     if suffix == ".py":
         argv = ["python", normalized_entrypoint]
+    elif suffix in NODE_RUNTIME_SUFFIXES:
+        argv = ["node", normalized_entrypoint]
     elif suffix in {".sh", ".bash"}:
         argv = ["bash" if suffix == ".bash" else "/bin/sh", normalized_entrypoint]
     elif suffix == ".ps1":
@@ -1046,8 +1592,16 @@ def normalize_generated_command(
 
 def build_shell_hints(loaded_skill: LoadedSkill) -> dict[str, Any]:
     example_commands = extract_shell_examples(loaded_skill.skill_md)
-    runnable_scripts = iter_runnable_scripts(loaded_skill)
-    documented_scripts = extract_documented_script_paths(loaded_skill.skill_md)
+    documented_scripts = extract_documented_entrypoint_paths(loaded_skill.skill_md)
+    documented_entrypoints = {
+        item.replace("\\", "/").strip()
+        for item in documented_scripts
+        if str(item).strip()
+    }
+    runnable_scripts = iter_runnable_scripts(
+        loaded_skill,
+        documented_entrypoints=documented_entrypoints,
+    )
     auto_generated_commands = [
         build_portable_script_command(relative_path) for relative_path in runnable_scripts[:3]
     ]
@@ -1055,12 +1609,20 @@ def build_shell_hints(loaded_skill: LoadedSkill) -> dict[str, Any]:
         markdown=loaded_skill.skill_md,
         example_commands=example_commands,
     )
+    runnable_script_summaries = [
+        {
+            "path": relative_path,
+            "documented": relative_path in documented_entrypoints,
+        }
+        for relative_path in runnable_scripts[:8]
+    ]
     return {
         "execution_mode": "shell",
         "example_commands": example_commands[:5],
         "auto_generated_commands": auto_generated_commands,
         "runnable_scripts": runnable_scripts,
         "documented_scripts": documented_scripts,
+        "runnable_script_summaries": runnable_script_summaries,
         "python_example_count": len(extract_python_examples(loaded_skill.skill_md)),
         "required_credentials": required_credentials,
         "notes": (
@@ -1246,7 +1808,7 @@ def extract_required_credentials(
         seen.add(normalized)
     if required:
         return required
-    if CREDENTIAL_KEYWORD_PATTERN.search(markdown):
+    if EXPLICIT_CREDENTIAL_REQUIREMENT_PATTERN.search(markdown):
         return ["CREDENTIAL"]
     return []
 
@@ -1662,6 +2224,226 @@ def normalize_generated_entrypoint(
     return normalized_entrypoint
 
 
+def _command_uses_python_runtime(command: str | None) -> bool:
+    normalized = str(command or "").strip().lower()
+    return bool(
+        normalized.startswith("python ")
+        or normalized.startswith("python3 ")
+        or normalized.startswith("py ")
+    )
+
+
+def _split_shell_argv(command: str) -> list[str] | None:
+    normalized = str(command or "").strip()
+    if not normalized:
+        return None
+    for posix_mode in (True, False):
+        try:
+            argv = shlex.split(normalized, posix=posix_mode)
+        except ValueError:
+            continue
+        if argv:
+            return [str(item) for item in argv]
+    return None
+
+
+def _normalize_bootstrap_package_name(token: str) -> str:
+    normalized = str(token or "").strip().lower()
+    if not normalized:
+        return ""
+    normalized = normalized.lstrip()
+    for delimiter in ("[", "<", ">", "=", "!", "~"):
+        if delimiter in normalized:
+            normalized = normalized.split(delimiter, 1)[0].strip()
+    return normalized
+
+
+def _extract_known_node_packages_from_pip_command(
+    command: str,
+) -> tuple[list[str], list[str], bool] | None:
+    argv = _split_shell_argv(command)
+    if not argv:
+        return None
+
+    install_index: int | None = None
+    command_name = Path(argv[0]).name.lower()
+    if (
+        len(argv) >= 4
+        and _is_python_command_name(argv[0])
+        and argv[1:4] == ["-m", "pip", "install"]
+    ):
+        install_index = 3
+    elif command_name in {"pip", "pip3", "pip.exe", "pip3.exe"} and len(argv) >= 2 and argv[1] == "install":
+        install_index = 1
+    if install_index is None:
+        return None
+
+    rebuilt_tokens = argv[: install_index + 1]
+    node_packages: list[str] = []
+    retained_python_packages = False
+    index = install_index + 1
+    while index < len(argv):
+        token = str(argv[index])
+        if token in PIP_INSTALL_OPTION_NAMES_WITH_VALUE:
+            rebuilt_tokens.append(token)
+            if index + 1 < len(argv):
+                rebuilt_tokens.append(str(argv[index + 1]))
+            index += 2
+            continue
+        if token.startswith("-"):
+            rebuilt_tokens.append(token)
+            index += 1
+            continue
+        normalized_package = _normalize_bootstrap_package_name(token)
+        if normalized_package in KNOWN_NODE_PACKAGE_NAMES:
+            node_packages.append(token)
+        else:
+            rebuilt_tokens.append(token)
+            retained_python_packages = True
+        index += 1
+
+    if not node_packages:
+        return None
+    return rebuilt_tokens, node_packages, retained_python_packages
+
+
+def _rewrite_known_node_package_bootstrap_commands(
+    bootstrap_commands: list[str],
+) -> tuple[list[str], list[str]]:
+    rewritten_commands: list[str] = []
+    rewritten_packages: list[str] = []
+    for command in bootstrap_commands:
+        extracted = _extract_known_node_packages_from_pip_command(command)
+        if extracted is None:
+            rewritten_commands.append(command)
+            continue
+        rebuilt_tokens, node_packages, retained_python_packages = extracted
+        if retained_python_packages:
+            rewritten_commands.append(shlex.join(rebuilt_tokens))
+        rewritten_commands.append(
+            "npm install -g " + " ".join(shlex.quote(str(item)) for item in node_packages)
+        )
+        rewritten_packages.extend(
+            _normalize_bootstrap_package_name(item) for item in node_packages
+        )
+    return rewritten_commands, [item for item in rewritten_packages if item]
+
+
+def _plan_requires_node_runtime(
+    *,
+    command: str | None,
+    entrypoint: str | None,
+    generated_files: list[SkillGeneratedFile],
+) -> bool:
+    normalized_entrypoint = str(entrypoint or "").strip().lower()
+    if any(normalized_entrypoint.endswith(suffix) for suffix in NODE_RUNTIME_SUFFIXES):
+        return True
+    if NODE_BOOTSTRAP_PATTERN.search(str(command or "")):
+        return True
+    for item in generated_files:
+        content = str(item.content or "").lower()
+        if any(marker in content for marker in NODE_CONTENT_MARKERS):
+            return True
+    return False
+
+
+def normalize_free_shell_runtime_requirements(
+    *,
+    runtime_target: SkillRuntimeTarget,
+    command: str | None,
+    entrypoint: str | None,
+    generated_files: list[SkillGeneratedFile],
+    bootstrap_commands: list[str],
+    required_tools: list[str],
+    warnings: list[str],
+    bootstrap_reason: str,
+) -> tuple[list[str], list[str], list[str], str]:
+    normalized_bootstrap_commands = list(bootstrap_commands)
+    normalized_warnings = list(warnings)
+    normalized_bootstrap_reason = str(bootstrap_reason or "").strip()
+
+    rewritten_bootstrap_commands, rewritten_node_packages = (
+        _rewrite_known_node_package_bootstrap_commands(normalized_bootstrap_commands)
+    )
+    if rewritten_node_packages:
+        normalized_bootstrap_commands = rewritten_bootstrap_commands
+        normalized_warnings.append(
+            "Rewrote known Node package bootstrap from pip to npm for: "
+            + ", ".join(sorted(set(rewritten_node_packages)))
+            + "."
+        )
+
+    normalized_required_tools: list[str] = []
+    seen_tools: set[str] = set()
+    inferred_required_tools = list(required_tools)
+
+    normalized_entrypoint = str(entrypoint or "").strip().lower()
+    uses_python_runtime = (
+        _command_uses_python_runtime(command)
+        or normalized_entrypoint.endswith(".py")
+        or any(item.path.lower().endswith(".py") for item in generated_files)
+    )
+    if uses_python_runtime:
+        inferred_required_tools.append("python")
+    if any(re.search(r"\b(?:pip|python\s+-m\s+pip)\b", item, re.IGNORECASE) for item in normalized_bootstrap_commands):
+        inferred_required_tools.extend(["python", "pip"])
+    if any(NODE_BOOTSTRAP_PATTERN.search(item) for item in normalized_bootstrap_commands):
+        inferred_required_tools.extend(["node", "npm"])
+    if _plan_requires_node_runtime(
+        command=command,
+        entrypoint=entrypoint,
+        generated_files=generated_files,
+    ):
+        inferred_required_tools.extend(["node"])
+        if any(NODE_BOOTSTRAP_PATTERN.search(item) for item in normalized_bootstrap_commands):
+            inferred_required_tools.extend(["npm"])
+
+    for raw_tool in inferred_required_tools:
+        normalized = str(raw_tool or "").strip().lower()
+        if not normalized or normalized in seen_tools:
+            continue
+        seen_tools.add(normalized)
+        normalized_required_tools.append(normalized)
+
+    if (
+        runtime_target.supports_python
+        and uses_python_runtime
+        and not _plan_requires_node_runtime(
+            command=command,
+            entrypoint=entrypoint,
+            generated_files=generated_files,
+        )
+    ):
+        filtered_bootstrap_commands = [
+            item
+            for item in normalized_bootstrap_commands
+            if not NODE_BOOTSTRAP_PATTERN.search(item)
+        ]
+        filtered_required_tools = [
+            item
+            for item in normalized_required_tools
+            if item not in NODE_TOOL_NAMES
+        ]
+        if (
+            len(filtered_bootstrap_commands) != len(normalized_bootstrap_commands)
+            or len(filtered_required_tools) != len(normalized_required_tools)
+        ):
+            normalized_warnings.append(
+                "Dropped Node/npm bootstrap steps from a Python-based generated plan because the plan did not actually depend on a Node runtime."
+            )
+            normalized_bootstrap_commands = filtered_bootstrap_commands
+            normalized_required_tools = filtered_required_tools
+            if not normalized_bootstrap_commands:
+                normalized_bootstrap_reason = ""
+
+    return (
+        normalized_bootstrap_commands,
+        normalized_required_tools,
+        normalized_warnings,
+        normalized_bootstrap_reason,
+    )
+
+
 def maybe_promote_inline_python_to_generated_script(
     *,
     command: str | None,
@@ -1725,9 +2507,19 @@ def load_script_previews(
     *,
     query_text: str,
     limit: int = 4,
+    candidate_paths: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     previews: list[dict[str, Any]] = []
-    for relative_path in iter_runnable_scripts(loaded_skill):
+    documented_entrypoints = {
+        item.replace("\\", "/").strip()
+        for item in extract_documented_entrypoint_paths(loaded_skill.skill_md)
+        if str(item).strip()
+    }
+    selected_paths = candidate_paths or iter_runnable_scripts(
+        loaded_skill,
+        documented_entrypoints=documented_entrypoints,
+    )
+    for relative_path in selected_paths:
         absolute_path = (loaded_skill.skill.path / relative_path).resolve()
         try:
             content = absolute_path.read_text(encoding="utf-8")
@@ -1769,6 +2561,55 @@ def _compact_file_inventory_for_free_shell(
     return prioritized[: max(1, limit)]
 
 
+def _filter_file_inventory_for_free_shell(
+    file_inventory: list[dict[str, Any]],
+    *,
+    doc_bundle: list[dict[str, Any]],
+    candidate_script_paths: list[str],
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    doc_paths = {
+        str(item.get("path", "")).replace("\\", "/").strip()
+        for item in doc_bundle
+        if isinstance(item, dict) and str(item.get("path", "")).strip()
+    }
+    candidate_paths = {
+        str(item).replace("\\", "/").strip()
+        for item in candidate_script_paths
+        if str(item).strip()
+    }
+    filtered: list[dict[str, Any]] = []
+    for item in file_inventory:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "")).replace("\\", "/").strip()
+        kind = str(item.get("kind", "")).strip().lower()
+        if not path:
+            continue
+        if path in doc_paths:
+            filtered.append(dict(item))
+            continue
+        if kind == "script" and path in candidate_paths:
+            filtered.append(dict(item))
+            continue
+        if kind in {"skill_doc", "markdown", "reference"}:
+            filtered.append(dict(item))
+    prioritized = sorted(
+        filtered,
+        key=lambda item: (
+            0 if str(item.get("path", "")).replace("\\", "/") == "SKILL.md" else 1,
+            0
+            if str(item.get("path", "")).replace("\\", "/") in doc_paths
+            else 1,
+            0
+            if str(item.get("path", "")).replace("\\", "/") in candidate_paths
+            else 1,
+            str(item.get("path", "")),
+        ),
+    )
+    return prioritized[: max(1, limit)]
+
+
 def _compact_script_previews_for_free_shell(
     script_previews: list[dict[str, Any]],
     *,
@@ -1790,6 +2631,111 @@ def _compact_script_previews_for_free_shell(
             }
         )
     return compacted
+
+
+def _micro_file_inventory_for_free_shell(
+    file_inventory: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return _compact_file_inventory_for_free_shell(
+        file_inventory,
+        limit=FREE_SHELL_MICRO_FILE_LIMIT,
+    )
+
+
+def _micro_script_previews_for_free_shell(
+    script_previews: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return _compact_script_previews_for_free_shell(
+        script_previews,
+        limit=FREE_SHELL_MICRO_SCRIPT_LIMIT,
+        preview_chars=FREE_SHELL_MICRO_SCRIPT_CHARS,
+    )
+
+
+def _micro_doc_bundle_for_free_shell(
+    doc_bundle: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return compact_skill_doc_bundle(
+        doc_bundle,
+        followup_limit=DOC_BUNDLE_MICRO_FOLLOWUP_LIMIT,
+        followup_chars=DOC_BUNDLE_MICRO_FOLLOWUP_CHARS,
+    )
+
+
+def _should_compact_initial_free_shell_context(
+    *,
+    loaded_skill: LoadedSkill,
+    request: SkillExecutionRequest,
+    shell_hints: dict[str, Any],
+    file_inventory: list[dict[str, Any]],
+    doc_bundle: list[dict[str, Any]],
+) -> bool:
+    candidate_text = " ".join(
+        [
+            str(loaded_skill.skill.name or ""),
+            str(loaded_skill.skill.description or ""),
+            str(request.goal or ""),
+            str(request.user_query or ""),
+            " ".join(str(item) for item in request.constraints.values()),
+        ]
+    )
+    is_actionable = bool(ACTIONABLE_SKILL_PATTERN.search(candidate_text)) or bool(
+        shell_hints.get("runnable_scripts") or shell_hints.get("documented_scripts")
+    )
+    if not is_actionable:
+        return False
+    doc_chars = sum(
+        len(str(item.get("content", "")))
+        for item in doc_bundle
+        if isinstance(item, dict)
+    )
+    return (
+        doc_chars >= FREE_SHELL_LARGE_ACTIONABLE_DOC_CHARS
+        or len(file_inventory) >= FREE_SHELL_LARGE_ACTIONABLE_FILE_COUNT
+    )
+
+
+def _summarize_shell_hints_for_free_shell(
+    shell_hints: dict[str, Any],
+    *,
+    runnable_limit: int = 8,
+    example_limit: int = 4,
+) -> dict[str, Any]:
+    runnable_scripts = [
+        str(item)
+        for item in shell_hints.get("runnable_scripts", [])
+        if isinstance(item, str) and str(item).strip()
+    ][: max(1, runnable_limit)]
+    documented_scripts = [
+        str(item)
+        for item in shell_hints.get("documented_scripts", [])
+        if isinstance(item, str) and str(item).strip()
+    ][: max(1, runnable_limit)]
+    runnable_script_summaries = [
+        dict(item)
+        for item in shell_hints.get("runnable_script_summaries", [])
+        if isinstance(item, dict)
+    ][: max(1, runnable_limit)]
+    required_credentials = [
+        str(item)
+        for item in shell_hints.get("required_credentials", [])
+        if isinstance(item, (str, int, float))
+    ]
+    example_commands = [
+        str(item)
+        for item in shell_hints.get("example_commands", [])
+        if isinstance(item, (str, int, float))
+    ][: max(1, example_limit)]
+    return {
+        "execution_mode": shell_hints.get("execution_mode", "shell"),
+        "runnable_scripts": runnable_scripts,
+        "documented_scripts": documented_scripts,
+        "runnable_script_summaries": runnable_script_summaries,
+        "example_commands": example_commands,
+        "required_credentials": required_credentials,
+        "python_example_count": shell_hints.get("python_example_count", 0),
+        "notes": shell_hints.get("notes", ""),
+    }
 
 
 def _clone_plan_with_shell_mode(
@@ -1844,6 +2790,58 @@ def _clone_plan_with_hints(
     )
 
 
+def _is_actionable_skill_request(
+    *,
+    loaded_skill: LoadedSkill,
+    request: SkillExecutionRequest,
+) -> bool:
+    constraints = dict(request.constraints or {})
+    runtime_requirements = loaded_skill.skill.metadata.get("runtime_requirements")
+    has_runtime_requirements = isinstance(runtime_requirements, str) and bool(
+        runtime_requirements.strip()
+    )
+    has_script_inventory = any(item.kind == "script" for item in loaded_skill.file_inventory)
+    has_documented_entrypoints = bool(extract_documented_entrypoint_paths(loaded_skill.skill_md))
+    if not any([has_runtime_requirements, has_script_inventory, has_documented_entrypoints]):
+        return False
+
+    if any(
+        key in constraints
+        for key in (
+            "input_path",
+            "input_paths",
+            "output_path",
+            "output_format",
+            "format",
+            "topic",
+            "title",
+            "template",
+            "code",
+            "codes",
+            "ticker",
+            "target",
+        )
+    ):
+        return True
+
+    request_text = _join_request_context_text(
+        request.goal,
+        request.user_query,
+        request.constraints,
+    )
+    if ACTIONABLE_SKILL_PATTERN.search(request_text):
+        return True
+
+    skill_text = "\n".join(
+        [
+            loaded_skill.skill.name,
+            loaded_skill.skill.description,
+            loaded_skill.skill_md[:6000],
+        ]
+    )
+    return bool(ACTIONABLE_SKILL_PATTERN.search(skill_text))
+
+
 def _should_attempt_auto_free_shell_plan(
     plan: SkillCommandPlan,
     *,
@@ -1851,6 +2849,8 @@ def _should_attempt_auto_free_shell_plan(
     request: SkillExecutionRequest,
 ) -> bool:
     if not plan.is_manual_required:
+        return False
+    if not _is_actionable_skill_request(loaded_skill=loaded_skill, request=request):
         return False
     failure_reason = str(plan.failure_reason or "").strip().lower()
     if failure_reason in NON_ESCALATABLE_MANUAL_FAILURE_REASONS:
@@ -1912,6 +2912,15 @@ def _finalize_plan_metadata(
         hints["auto_inferred_constraints"] = inferred_constraints
     if blockers:
         hints["planning_blockers"] = blockers
+    if plan.is_manual_required:
+        hints["manual_required_kind"] = hints.get("manual_required_kind") or classify_manual_required_kind(
+            plan.failure_reason
+        )
+        hints["planner_error_summary"] = hints.get("planner_error_summary") or summarize_planner_error(
+            str(plan.failure_reason or "").strip(),
+            str(plan.rationale or "").strip(),
+            *(str(item) for item in hints.get("warnings", []) if isinstance(item, str)),
+        )
     return _clone_plan_with_hints(plan, hints=hints)
 
 
@@ -1965,9 +2974,19 @@ def _build_preferred_shipped_script_plan(
         for item in shell_hints.get("documented_scripts", [])
         if isinstance(item, str) and item.strip()
     }
+    candidate_runnable_scripts = [
+        item.replace("\\", "/").strip()
+        for item in shell_hints.get("runnable_scripts", [])
+        if isinstance(item, str) and item.strip()
+    ]
     previews_by_path = {
         str(item.get("path")): int(item.get("score", 0))
-        for item in load_script_previews(loaded_skill, query_text=query_text, limit=8)
+        for item in load_script_previews(
+            loaded_skill,
+            query_text=query_text,
+            limit=8,
+            candidate_paths=candidate_runnable_scripts,
+        )
         if isinstance(item, dict) and item.get("path")
     }
     financial_request_kind = (
@@ -1980,7 +2999,7 @@ def _build_preferred_shipped_script_plan(
         else None
     )
     candidates: list[dict[str, Any]] = []
-    for index, relative_path in enumerate(iter_runnable_scripts(loaded_skill)):
+    for index, relative_path in enumerate(candidate_runnable_scripts):
         if documented_scripts and relative_path not in documented_scripts:
             continue
         skip_candidate = False
@@ -2071,91 +3090,6 @@ def _build_preferred_shipped_script_plan(
             "preferred_shipped_inferred_flag_count": best["inferred_flag_count"],
         },
     )
-
-
-@lru_cache(maxsize=1)
-def _load_pptx_default_template_b64() -> str | None:
-    try:
-        payload = PPTX_DEFAULT_TEMPLATE_B64_PATH.read_text(encoding="ascii").strip()
-    except OSError:
-        return None
-    return payload or None
-
-
-def _is_pptx_creation_request(
-    *,
-    loaded_skill: LoadedSkill,
-    request: SkillExecutionRequest,
-) -> bool:
-    if loaded_skill.skill.name.strip().lower() != "pptx":
-        return False
-    if not _is_creation_or_generation_request(loaded_skill=loaded_skill, request=request):
-        return False
-    constraints = dict(request.constraints or {})
-    if extract_input_paths(constraints):
-        return False
-    template = str(constraints.get("template", "") or "").strip()
-    if template:
-        return False
-    output_format = str(constraints.get("output_format", "pptx") or "").strip().lower()
-    return output_format in {"", "ppt", "pptx", "slides", "presentation", "deck"}
-
-
-def _looks_like_chinese(text: str) -> bool:
-    return bool(re.search(r"[\u4e00-\u9fff]", text))
-
-
-def _normalize_slide_count(value: Any, *, default: int = PPTX_DEFAULT_SLIDE_COUNT) -> int:
-    try:
-        candidate = int(str(value).strip())
-    except (TypeError, ValueError):
-        candidate = default
-    return max(PPTX_MIN_SLIDE_COUNT, min(PPTX_MAX_SLIDE_COUNT, candidate))
-
-
-def _normalize_presentation_title(value: Any, *, fallback: str) -> str:
-    title = str(value or "").strip()
-    if title:
-        return title
-    return fallback.strip() or "Presentation"
-
-
-def _sanitize_output_filename(title: str) -> str:
-    normalized = re.sub(r"\s+", "_", str(title or "").strip())
-    normalized = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", normalized, flags=re.UNICODE)
-    normalized = normalized.strip("._")
-    if not normalized:
-        normalized = "presentation"
-    if not normalized.lower().endswith(".pptx"):
-        normalized = f"{normalized}.pptx"
-    return normalized[:120]
-
-
-def _resolve_pptx_output_path(constraints: dict[str, Any], *, title: str) -> str:
-    raw_output = str(constraints.get("output_path", "") or "").strip()
-    if raw_output:
-        candidate = raw_output.replace("\\", "/")
-        if ":" in candidate[:3] or candidate.startswith("/"):
-            candidate = candidate.split("/")[-1]
-        if not candidate.lower().endswith(".pptx"):
-            candidate = f"{candidate}.pptx"
-        return candidate or f"output/{_sanitize_output_filename(title)}"
-    return f"output/{_sanitize_output_filename(title)}"
-
-
-def _select_pptx_palette(theme: str, style: str) -> dict[str, str]:
-    normalized_theme = str(theme or "").strip().lower().replace("-", "_")
-    if normalized_theme in PPTX_THEME_PALETTES:
-        return dict(PPTX_THEME_PALETTES[normalized_theme])
-    normalized_style = str(style or "").strip().lower()
-    if normalized_style in {"academic", "professional", "business"}:
-        return dict(PPTX_THEME_PALETTES["charcoal_minimal"])
-    if normalized_style in {"executive", "board"}:
-        return dict(PPTX_THEME_PALETTES["midnight_executive"])
-    if normalized_style in {"creative", "bold"}:
-        return dict(PPTX_THEME_PALETTES["coral_energy"])
-    return dict(PPTX_THEME_PALETTES["charcoal_minimal"])
-
 
 def _build_generational_ai_outline(
     *,
@@ -2963,133 +3897,6 @@ def _build_pptx_fallback_script(
     return script + "\n"
 
 
-def _build_deterministic_pptx_fallback_plan(
-    *,
-    loaded_skill: LoadedSkill,
-    request: SkillExecutionRequest,
-    shell_hints: dict[str, Any],
-    failure_reason: str | None,
-) -> SkillCommandPlan | None:
-    fallback_flag = request.constraints.get("allow_deterministic_fallback")
-    env_flag = os.environ.get("KG_AGENT_ENABLE_DETERMINISTIC_SKILL_FALLBACK", "")
-    fallback_enabled = False
-    if isinstance(fallback_flag, bool):
-        fallback_enabled = fallback_flag
-    elif isinstance(fallback_flag, str):
-        fallback_enabled = fallback_flag.strip().lower() in {"1", "true", "yes", "on"}
-    elif env_flag.strip():
-        fallback_enabled = env_flag.strip().lower() in {"1", "true", "yes", "on"}
-    if not fallback_enabled:
-        return None
-    if not _is_pptx_creation_request(loaded_skill=loaded_skill, request=request):
-        return None
-    template_b64 = _load_pptx_default_template_b64()
-    if not template_b64:
-        return None
-
-    constraints = dict(request.constraints or {})
-    topic = _normalize_presentation_title(
-        constraints.get("topic") or constraints.get("title") or request.goal or request.user_query,
-        fallback="Presentation",
-    )
-    title = _normalize_presentation_title(
-        constraints.get("title"),
-        fallback=topic,
-    )
-    request_text = "\n".join(
-        [request.goal, request.user_query, json.dumps(constraints, ensure_ascii=False)]
-    )
-    language = str(constraints.get("language", "") or "").strip().lower()
-    if language not in {"zh", "zh-cn", "en", "en-us"}:
-        language = "zh" if _looks_like_chinese(request_text) else "en"
-    style = str(constraints.get("style", "") or "").strip() or (
-        "professional" if language.startswith("zh") else "professional"
-    )
-    theme = str(constraints.get("theme", "") or "").strip() or "charcoal_minimal"
-    slide_count = _normalize_slide_count(constraints.get("slide_count"))
-    output_path = _resolve_pptx_output_path(constraints, title=title)
-    outline_path = output_path.rsplit(".", 1)[0] + ".md"
-    palette = _select_pptx_palette(theme, style)
-    slides = _build_pptx_outline(
-        title=title,
-        topic=topic,
-        language=("zh" if language.startswith("zh") else "en"),
-        slide_count=slide_count,
-        request_text=request_text,
-    )
-    script_config = {
-        "title": title,
-        "topic": topic,
-        "language": "zh" if language.startswith("zh") else "en",
-        "style": style,
-        "theme": theme,
-        "palette": palette,
-        "output_path": output_path,
-        "outline_path": outline_path,
-        "description": f"Auto-generated PPTX deck for {topic}",
-    }
-    enriched_constraints = {
-        **constraints,
-        "title": title,
-        "topic": topic,
-        "language": script_config["language"],
-        "style": style,
-        "theme": theme,
-        "slide_count": str(slide_count),
-        "output_path": output_path,
-        "output_format": "pptx",
-    }
-    generated_files = [
-        SkillGeneratedFile(
-            path=".skill_generated/main.py",
-            content=_build_pptx_fallback_script(
-                config=script_config,
-                slides=slides,
-            ),
-            description="Deterministic PPTX builder that creates a slide deck from a bundled template.",
-        ),
-        SkillGeneratedFile(
-            path=".skill_generated/template.b64",
-            content=template_b64,
-            description="Bundled default PPTX template encoded as base64.",
-        ),
-    ]
-    command = build_portable_script_command(
-        ".skill_generated/main.py",
-        [],
-        runtime_target=request.runtime_target,
-    )
-    return SkillCommandPlan(
-        skill_name=request.skill_name,
-        goal=request.goal,
-        user_query=request.user_query,
-        runtime_target=request.runtime_target,
-        constraints=enriched_constraints,
-        command=command,
-        mode="generated_script",
-        shell_mode="free_shell",
-        rationale=(
-            "Fell back to a deterministic local PPTX generator because free-shell planning "
-            "could not produce a runnable command plan."
-        ),
-        entrypoint=".skill_generated/main.py",
-        cli_args=[],
-        generated_files=generated_files,
-        bootstrap_commands=[],
-        bootstrap_reason="",
-        missing_fields=[],
-        failure_reason=None,
-        hints={
-            **shell_hints,
-            "planner": "deterministic_pptx_fallback",
-            "required_tools": ["python"],
-            "deterministic_fallback": True,
-            "deterministic_fallback_reason": str(failure_reason or "").strip() or None,
-            "deterministic_output_path": output_path,
-        },
-    )
-
-
 class SkillCommandPlanner:
     def __init__(
         self,
@@ -3280,21 +4087,6 @@ class SkillCommandPlanner:
                     escalation_reason=str(conservative_plan.failure_reason or "").strip()
                     or "auto_free_shell_fallback",
                 )
-            deterministic_fallback_plan = _build_deterministic_pptx_fallback_plan(
-                loaded_skill=loaded_skill,
-                request=free_shell_request,
-                shell_hints=shell_hints,
-                failure_reason=free_shell_plan.failure_reason or conservative_plan.failure_reason,
-            )
-            if deterministic_fallback_plan is not None:
-                return _finalize_plan_metadata(
-                    deterministic_fallback_plan,
-                    requested_shell_mode=requested_shell_mode,
-                    constraint_inference_metadata=constraint_inference_metadata,
-                    planning_blockers=planning_blockers,
-                    escalation_reason=str(conservative_plan.failure_reason or "").strip()
-                    or "auto_free_shell_fallback",
-                )
             return _finalize_plan_metadata(
                 free_shell_plan,
                 requested_shell_mode=requested_shell_mode,
@@ -3327,27 +4119,24 @@ class SkillCommandPlanner:
                 requested_shell_mode=requested_shell_mode,
                 constraint_inference_metadata=constraint_inference_metadata,
             )
-        deterministic_fallback_plan = _build_deterministic_pptx_fallback_plan(
-            loaded_skill=loaded_skill,
-            request=normalized_request,
-            shell_hints=shell_hints,
-            failure_reason=free_shell_plan.failure_reason,
-        )
-        if deterministic_fallback_plan is not None:
-            return _finalize_plan_metadata(
-                deterministic_fallback_plan,
-                requested_shell_mode=requested_shell_mode,
-                constraint_inference_metadata=constraint_inference_metadata,
-            )
         if (
             not conservative_plan.is_manual_required
             and free_shell_plan.failure_reason
             in {"llm_not_available_for_free_shell", "llm_planning_failed"}
         ):
+            free_shell_fallback_hints = dict(free_shell_plan.hints)
+            free_shell_fallback_hints.setdefault("planner", "free_shell")
             return _finalize_plan_metadata(
-                _clone_plan_with_shell_mode(
-                    conservative_plan,
-                    shell_mode="free_shell",
+                _clone_plan_with_hints(
+                    _clone_plan_with_shell_mode(
+                        conservative_plan,
+                        shell_mode="free_shell",
+                    ),
+                    hints={
+                        **free_shell_fallback_hints,
+                        **dict(conservative_plan.hints),
+                        "planner": free_shell_fallback_hints.get("planner", "free_shell"),
+                    },
                 ),
                 requested_shell_mode=requested_shell_mode,
                 constraint_inference_metadata=constraint_inference_metadata,
@@ -3539,6 +4328,8 @@ class SkillCommandPlanner:
                     "Free-shell planning requires an available utility LLM because the skill "
                     "cannot be reduced to the conservative single-entrypoint planner."
                 ),
+                planner_error_summary="No utility LLM is available for free-shell planning.",
+                manual_required_kind="technical_blocked",
             )
 
         query_text = "\n".join(
@@ -3548,6 +4339,7 @@ class SkillCommandPlanner:
                 " ".join(str(item) for item in request.constraints.values()),
             ]
         )
+        effective_constraints = dict(request.constraints)
         python_examples = select_relevant_examples(
             extract_python_examples(loaded_skill.skill_md),
             query_text=query_text,
@@ -3555,29 +4347,97 @@ class SkillCommandPlanner:
             max_chars=MAX_FREE_SHELL_EXAMPLE_CHARS,
             max_total_chars=MAX_FREE_SHELL_TOTAL_EXAMPLE_CHARS,
         )
+        candidate_runnable_scripts = [
+            item.replace("\\", "/").strip()
+            for item in shell_hints.get("runnable_scripts", [])
+            if isinstance(item, str) and item.strip()
+        ]
         script_previews = load_script_previews(
             loaded_skill,
             query_text=query_text,
             limit=4,
+            candidate_paths=candidate_runnable_scripts,
         )
-        skill_md_excerpt = loaded_skill.skill_md
-        file_inventory = [item.to_dict() for item in loaded_skill.file_inventory]
+        doc_bundle = build_skill_doc_bundle(loaded_skill, request)
+        file_inventory = _filter_file_inventory_for_free_shell(
+            [item.to_dict() for item in loaded_skill.file_inventory],
+            doc_bundle=doc_bundle,
+            candidate_script_paths=candidate_runnable_scripts,
+        )
+        cli_history: list[dict[str, Any]] = []
+        shell_hint_summary = _summarize_shell_hints_for_free_shell(shell_hints)
+        compact_initial_context = _should_compact_initial_free_shell_context(
+            loaded_skill=loaded_skill,
+            request=request,
+            shell_hints=shell_hints,
+            file_inventory=file_inventory,
+            doc_bundle=doc_bundle,
+        )
+        initial_file_inventory = (
+            _compact_file_inventory_for_free_shell(file_inventory)
+            if compact_initial_context
+            else file_inventory
+        )
+        initial_doc_bundle = (
+            compact_skill_doc_bundle(doc_bundle)
+            if compact_initial_context
+            else doc_bundle
+        )
+        initial_script_previews = (
+            _compact_script_previews_for_free_shell(script_previews)
+            if compact_initial_context
+            else script_previews
+        )
         prompt_attempts = [
             {
                 "label": "full_context",
-                "file_inventory": file_inventory,
-                "script_previews": script_previews,
+                "transport": "json",
+                "max_tokens": FREE_SHELL_MAX_TOKENS,
+                "shell_hints": shell_hint_summary,
+                "file_inventory": initial_file_inventory,
+                "doc_bundle": initial_doc_bundle,
+                "script_previews": initial_script_previews,
+                "cli_history": cli_history,
                 "python_examples": python_examples,
             },
             {
                 "label": "compact_context",
+                "transport": "json",
+                "max_tokens": FREE_SHELL_MAX_TOKENS,
+                "shell_hints": shell_hint_summary,
                 "file_inventory": _compact_file_inventory_for_free_shell(file_inventory),
+                "doc_bundle": compact_skill_doc_bundle(doc_bundle),
                 "script_previews": _compact_script_previews_for_free_shell(script_previews),
+                "cli_history": cli_history,
+                "python_examples": [],
+            },
+            {
+                "label": "micro_context",
+                "transport": "json",
+                "max_tokens": FREE_SHELL_MICRO_MAX_TOKENS,
+                "shell_hints": shell_hint_summary,
+                "file_inventory": _micro_file_inventory_for_free_shell(file_inventory),
+                "doc_bundle": _micro_doc_bundle_for_free_shell(doc_bundle),
+                "script_previews": _micro_script_previews_for_free_shell(script_previews),
+                "cli_history": cli_history,
+                "python_examples": [],
+            },
+            {
+                "label": "micro_context",
+                "transport": "text_first",
+                "max_tokens": FREE_SHELL_MICRO_MAX_TOKENS,
+                "shell_hints": shell_hint_summary,
+                "file_inventory": _micro_file_inventory_for_free_shell(file_inventory),
+                "doc_bundle": _micro_doc_bundle_for_free_shell(doc_bundle),
+                "script_previews": _micro_script_previews_for_free_shell(script_previews),
+                "cli_history": cli_history,
                 "python_examples": [],
             },
         ]
         payload: dict[str, Any] | None = None
         planning_errors: list[str] = []
+        planner_attempts: list[dict[str, Any]] = []
+        selected_attempt: dict[str, Any] | None = None
         for attempt in prompt_attempts:
             system_prompt, user_prompt = build_skill_free_shell_planner_prompt(
                 skill_name=request.skill_name,
@@ -3585,41 +4445,87 @@ class SkillCommandPlanner:
                 user_query=request.user_query,
                 runtime_target=request.runtime_target.to_dict(),
                 constraints=request.constraints,
-                shell_hints=shell_hints,
+                effective_constraints=effective_constraints,
+                shell_hints=attempt["shell_hints"],
                 file_inventory=attempt["file_inventory"],
-                skill_md_excerpt=skill_md_excerpt,
+                doc_bundle=attempt["doc_bundle"],
+                cli_history=attempt["cli_history"],
                 script_previews=attempt["script_previews"],
                 python_examples=attempt["python_examples"],
                 conservative_plan=fallback_plan.to_dict(),
             )
             try:
-                payload = await self.llm_client.complete_json(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    temperature=0.0,
-                    max_tokens=1800,
+                if attempt["transport"] == "text_first":
+                    payload = await _complete_json_via_text_first(
+                        self.llm_client,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        temperature=0.0,
+                        max_tokens=int(attempt["max_tokens"]),
+                    )
+                else:
+                    payload = await self.llm_client.complete_json(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        temperature=0.0,
+                        max_tokens=int(attempt["max_tokens"]),
+                    )
+                selected_attempt = dict(attempt)
+                planner_attempts.append(
+                    {
+                        "attempt_index": len(planner_attempts) + 1,
+                        "label": str(attempt["label"]),
+                        "transport": str(attempt["transport"]),
+                        "max_tokens": int(attempt["max_tokens"]),
+                        "success": True,
+                        "error_summary": None,
+                    }
                 )
                 shell_hints = {
                     **shell_hints,
                     "planner_context_mode": str(attempt["label"]),
+                    "planner_transport": str(attempt["transport"]),
+                    "planner_attempts": planner_attempts,
                 }
+                if compact_initial_context:
+                    shell_hints["planner_full_context_compacted"] = True
+                    shell_hints["planner_full_context_compaction_reason"] = (
+                        "large_actionable_context"
+                    )
                 break
             except Exception as exc:
-                planning_errors.append(f"{attempt['label']}: {exc}")
+                error_summary = _truncate_text(str(exc), max_chars=1200)
+                planning_errors.append(f"{attempt['label']}/{attempt['transport']}: {exc}")
+                planner_attempts.append(
+                    {
+                        "attempt_index": len(planner_attempts) + 1,
+                        "label": str(attempt["label"]),
+                        "transport": str(attempt["transport"]),
+                        "max_tokens": int(attempt["max_tokens"]),
+                        "success": False,
+                        "error_summary": error_summary,
+                    }
+                )
         if payload is None:
+            last_attempt = prompt_attempts[-1] if prompt_attempts else {}
             return self._manual_required_plan(
                 request=request,
                 shell_hints={
                     **shell_hints,
                     "planner": "free_shell",
+                    "planner_context_mode": str(last_attempt.get("label", "")),
+                    "planner_transport": str(last_attempt.get("transport", "")),
+                    "planner_attempts": planner_attempts,
                     "warnings": [f"Free-shell planning failed: {item}" for item in planning_errors],
                 },
                 failure_reason="llm_planning_failed",
                 missing_fields=list(fallback_plan.missing_fields),
                 rationale=(
-                    "The free-shell planner could not produce a valid command plan, so the run "
-                    "still requires manual guidance."
+                    "The free-shell planner hit a technical failure before it could produce a "
+                    "runnable command plan."
                 ),
+                planner_error_summary=summarize_planner_error(*planning_errors),
+                manual_required_kind="technical_blocked",
             )
 
         generated_files = normalize_generated_files(payload.get("generated_files"))
@@ -3703,23 +4609,65 @@ class SkillCommandPlanner:
             for item in (payload.get("required_tools") if isinstance(payload.get("required_tools"), list) else [])
             if isinstance(item, (str, int, float))
         ]
+        (
+            bootstrap_commands,
+            required_tools,
+            warnings,
+            bootstrap_reason,
+        ) = normalize_free_shell_runtime_requirements(
+            runtime_target=request.runtime_target,
+            command=command,
+            entrypoint=generated_entrypoint,
+            generated_files=generated_files,
+            bootstrap_commands=bootstrap_commands,
+            required_tools=required_tools,
+            warnings=warnings,
+            bootstrap_reason=bootstrap_reason,
+        )
         hints = {
             **shell_hints,
             "planner": "free_shell",
             "required_tools": required_tools,
             "warnings": warnings,
+            "doc_bundle": doc_bundle,
             "script_previews": script_previews,
             "python_examples": python_examples,
             "promoted_inline_python_to_generated_script": promoted_inline_python,
         }
+        if selected_attempt is not None:
+            hints["planner_context_mode"] = str(selected_attempt.get("label", ""))
+            hints["planner_transport"] = str(selected_attempt.get("transport", ""))
+        if planner_attempts:
+            hints["planner_attempts"] = planner_attempts
 
-        if raw_mode == "manual_required" or command is None:
+        if raw_mode == "manual_required":
             return self._manual_required_plan(
                 request=request,
                 shell_hints=hints,
                 failure_reason=failure_reason or "manual_command_required",
                 missing_fields=missing_fields,
                 rationale=rationale,
+                planner_error_summary=summarize_planner_error(
+                    str(failure_reason or "").strip(),
+                    str(rationale or "").strip(),
+                    *warnings,
+                ),
+            )
+        if command is None:
+            return self._manual_required_plan(
+                request=request,
+                shell_hints=hints,
+                failure_reason="llm_planning_failed",
+                missing_fields=missing_fields,
+                rationale=(
+                    "The free-shell planner returned an incomplete plan without a runnable "
+                    "command or generated entrypoint."
+                ),
+                planner_error_summary=summarize_planner_error(
+                    "Planner returned no runnable command or generated entrypoint.",
+                    *warnings,
+                ),
+                manual_required_kind="technical_blocked",
             )
         if (
             not request.runtime_target.supports_python
@@ -3740,6 +4688,7 @@ class SkillCommandPlanner:
                     "The generated free-shell plan requires Python, but the runtime target "
                     "explicitly disallows Python execution."
                 ),
+                manual_required_kind="technical_blocked",
             )
 
         return SkillCommandPlan(
@@ -3837,7 +4786,17 @@ class SkillCommandPlanner:
         failure_reason: str,
         missing_fields: list[str],
         rationale: str,
+        planner_error_summary: str | None = None,
+        manual_required_kind: str | None = None,
     ) -> SkillCommandPlan:
+        resolved_manual_required_kind = manual_required_kind or classify_manual_required_kind(
+            failure_reason
+        )
+        resolved_planner_error_summary = planner_error_summary or summarize_planner_error(
+            str(failure_reason or "").strip(),
+            str(rationale or "").strip(),
+            *(str(item) for item in shell_hints.get("warnings", []) if isinstance(item, str)),
+        )
         return SkillCommandPlan(
             skill_name=request.skill_name,
             goal=request.goal,
@@ -3852,5 +4811,9 @@ class SkillCommandPlanner:
             bootstrap_reason="",
             missing_fields=list(missing_fields),
             failure_reason=failure_reason,
-            hints=dict(shell_hints),
+            hints={
+                **dict(shell_hints),
+                "manual_required_kind": resolved_manual_required_kind,
+                "planner_error_summary": resolved_planner_error_summary,
+            },
         )

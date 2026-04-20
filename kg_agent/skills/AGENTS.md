@@ -81,6 +81,7 @@ This layer is shell-oriented by design:
 - Preserve host-workspace normalization, shared-output recovery, and artifact-preview behavior in `runtime_client.py`; do not regress Docker bind-mount path recovery when reshaping runtime payloads.
 - Keep the free-shell planner on the full `SKILL.md` path. Do not reintroduce prompt-time truncation or section-only extraction that can drop late dependency/setup instructions.
 - Keep document access progressive. Do not turn the first skill-doc read back into a bulk payload of references, file inventory, and planner hints when those files can be fetched explicitly later.
+- Keep runtime/tool-result payloads compact. `SkillExecutor` and MCP runtime responses should surface goal, constraints, run status, blocker summaries, artifacts, and small previews; they should not round-trip full file inventories, shell-hint dumps, or planner doc bundles back into the agent context.
 - Keep runtime-target and shell-mode logic explicit in the models rather than inferring them from arbitrary strings at the last minute.
 - When improving shipped scripts, prefer making the script contract more inferable rather than weakening planner safety checks.
 - Treat regex/date heuristics as fallback normalization only; the preferred path for fuzzy-but-low-risk parameter inference is schema-bounded LLM output validated back into typed constraints.

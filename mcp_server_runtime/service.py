@@ -204,11 +204,18 @@ class RuntimeService:
                 payload=payload,
                 loaded_skill=loaded_skill,
             )
-            response["notes"] = (
-                "Pass constraints.shell_command (or constraints.command), or provide structured "
-                "CLI args in constraints.args / constraints.cli_args when the skill has a single "
-                "runnable entrypoint."
-            )
+            if response.get("manual_required_kind") == "technical_blocked":
+                response["notes"] = (
+                    "The skill run stopped on a technical planning blocker. Inspect "
+                    "planner_error_summary and failure_reason instead of asking the user for more "
+                    "execution detail."
+                )
+            else:
+                response["notes"] = (
+                    "Pass constraints.shell_command (or constraints.command), or provide structured "
+                    "CLI args in constraints.args / constraints.cli_args when the skill has a single "
+                    "runnable entrypoint."
+                )
             response["logs"] = {"stdout": "", "stderr": ""}
             self.deps.store_run_record(response)
             return self.deps.prepare_transport_payload(response)

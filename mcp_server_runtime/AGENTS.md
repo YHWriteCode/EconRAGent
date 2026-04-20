@@ -142,6 +142,7 @@ Also preserve these behavioral constraints:
 - If a change touches queue/execution timing, verify both:
   - immediate background return behavior
   - later polling via `get_run_status`, `get_run_logs`, and `get_run_artifacts`
+  - durable-worker repair still runs when the current in-process utility LLM client is stale or unavailable, and the worker refreshes it before deciding whether repair is possible
 - If a change touches workspace-path handling, verify both:
   - outputs requested under runtime-root absolute paths end up inside the active run workspace
   - host-side artifact fallback still works after any workspace-path remapping
@@ -163,8 +164,15 @@ Also preserve these behavioral constraints:
   - declared per-skill shared venvs keyed by dependency files such as `runtime_requirements`, `requirements.lock`, or `requirements.txt`
   - shared free-shell bootstrap roots under `ENVS_ROOT/bootstrap/...` exposed through `SKILL_BOOTSTRAP_*`, `PIP_TARGET`, and `NPM_CONFIG_PREFIX`
 - `planning.py` and repair planning consume the full `SKILL.md`, not only a truncated excerpt. Natural-language dependency/setup guidance anywhere in the document can drive free-shell bootstrap commands.
+- `planning.py` preflight now rejects generated Python helpers that import known Node-only packages such as `pptxgenjs`, `react`, or `sharp`; those plans must be repaired into a native Node entrypoint or another valid shape before execution.
 - `workspace.py` stages the execution loop as two files rather than one mixed blob:
   - `skill_invocation.json` for the durable request/execution payload
   - `skill_context.json` for the full `SKILL.md`
+- `workspace.py` now also differentiates between a full internal run record and a compact MCP transport view:
+  - internal/store payloads may retain richer planner/runtime diagnostics
+  - transport payloads should expose only execution-relevant fields plus compact summaries such as inferred constraints, blocker classification, compact planner warnings, and bounded repair/bootstrap history
+  - do not reintroduce `file_inventory`, `references`, `shell_hints`, full doc bundles, or large script/path dumps into public run-task/status payloads
 - `envs.py` and `planning.py` cooperatively rewrite runtime-root absolute command paths. General `/workspace/...` paths become run-local paths, while `/workspace/output/...` can be redirected into `MCP_OUTPUT_DIR/<run-id>/...` so user-visible artifacts persist in a shared host directory such as the repository-root `skill_output/`.
 - `workspace.py` mirrors run-local `output/` files into the configured shared output root and deduplicates public `output/...` artifact paths so callers see a stable artifact list.
+- `execution.py` normalizes bootstrap `pip install` commands with upgrade flags so repeated writes into the shared bootstrap target do not get stuck on existing-package directory collisions.
+- `execution.py` now refreshes the utility LLM client before bounded repair decisions inside durable workers. This closes the case where a worker reports `process_failed` with `repair_attempted=false` only because its inherited in-process client became stale or unavailable.

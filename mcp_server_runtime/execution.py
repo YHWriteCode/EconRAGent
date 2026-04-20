@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import platform
 import re
 import shutil
+import tarfile
 import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.request import Request, urlopen
 
 from kg_agent.skills.command_planner import is_dry_run
 from kg_agent.skills.models import (
@@ -46,6 +49,30 @@ BOOTSTRAP_NETWORK_INSTALL_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+NODE_BOOTSTRAP_COMMAND_PATTERN = re.compile(
+    r"\b(?:node|npm|npx|yarn|pnpm)\b",
+    re.IGNORECASE,
+)
+PIP_INSTALL_COMMAND_PATTERN = re.compile(
+    r"\b(?:python\s+-m\s+pip|pip(?:3)?)\s+install\b",
+    re.IGNORECASE,
+)
+UV_PIP_INSTALL_COMMAND_PATTERN = re.compile(
+    r"\buv\s+pip\s+install\b",
+    re.IGNORECASE,
+)
+DEFAULT_BOOTSTRAP_NODE_VERSION = os.environ.get(
+    "MCP_BOOTSTRAP_NODE_VERSION",
+    "20.19.5",
+).strip() or "20.19.5"
+DEFAULT_BOOTSTRAP_NODE_BASE_URL = os.environ.get(
+    "MCP_BOOTSTRAP_NODE_BASE_URL",
+    "https://nodejs.org/dist",
+).strip() or "https://nodejs.org/dist"
+DEFAULT_BOOTSTRAP_NODE_DOWNLOAD_TIMEOUT_S = max(
+    10.0,
+    float(os.environ.get("MCP_BOOTSTRAP_NODE_DOWNLOAD_TIMEOUT_S", "120.0")),
+)
 
 
 @dataclass
@@ -74,6 +101,7 @@ class RuntimeExecutionDeps:
     serialized_utility_llm_stub_cls: type[Any]
     get_llm_client: Callable[[], Any]
     set_llm_client: Callable[[Any], None]
+    refresh_llm_client: Callable[[], Any] | None
     prepare_transport_payload: Callable[[dict[str, Any]], dict[str, Any]]
     materialize_skill_workspace_view: Callable[..., list[str]]
     write_mirrored_skill_manifest: Callable[..., None]
@@ -97,6 +125,250 @@ class RuntimeExecutionDeps:
 class RuntimeExecutionManager:
     def __init__(self, deps: RuntimeExecutionDeps) -> None:
         self.deps = deps
+
+    def get_repair_llm_client(self) -> Any | None:
+        llm_client = self.deps.get_llm_client()
+        if llm_client is not None and llm_client.is_available():
+            return llm_client
+        refresh = self.deps.refresh_llm_client
+        if not callable(refresh):
+            return llm_client
+        try:
+            refreshed_client = refresh()
+        except Exception:
+            return llm_client
+        if refreshed_client is None:
+            return llm_client
+        try:
+            self.deps.set_llm_client(refreshed_client)
+        except Exception:
+            return llm_client
+        return refreshed_client
+
+    @staticmethod
+    def _normalize_bootstrap_command_for_reuse(command: str) -> str:
+        normalized = str(command or "").strip()
+        if not normalized:
+            return normalized
+        lower = normalized.lower()
+        if "--upgrade" in lower:
+            return normalized
+        if PIP_INSTALL_COMMAND_PATTERN.search(normalized):
+            return PIP_INSTALL_COMMAND_PATTERN.sub(
+                lambda match: match.group(0) + " --upgrade --upgrade-strategy only-if-needed",
+                normalized,
+                count=1,
+            )
+        if UV_PIP_INSTALL_COMMAND_PATTERN.search(normalized):
+            return UV_PIP_INSTALL_COMMAND_PATTERN.sub(
+                lambda match: match.group(0) + " --upgrade",
+                normalized,
+                count=1,
+            )
+        return normalized
+
+    @staticmethod
+    def _bootstrap_commands_need_node_runtime(commands: list[str]) -> bool:
+        return any(
+            NODE_BOOTSTRAP_COMMAND_PATTERN.search(str(command or ""))
+            for command in commands
+        )
+
+    @staticmethod
+    def _node_runtime_platform_tag() -> tuple[str, str] | None:
+        system_name = platform.system().lower()
+        machine = platform.machine().lower()
+        if system_name == "linux":
+            if machine in {"x86_64", "amd64"}:
+                return "linux", "x64"
+            if machine in {"aarch64", "arm64"}:
+                return "linux", "arm64"
+        if system_name == "darwin":
+            if machine in {"x86_64", "amd64"}:
+                return "darwin", "x64"
+            if machine in {"arm64", "aarch64"}:
+                return "darwin", "arm64"
+        if system_name == "windows":
+            if machine in {"x86_64", "amd64"}:
+                return "win", "x64"
+            if machine in {"arm64", "aarch64"}:
+                return "win", "arm64"
+        return None
+
+    @staticmethod
+    def _prepend_path_entry(env: dict[str, str], entry: Path) -> None:
+        existing = str(env.get("PATH", "") or "")
+        entry_text = str(entry)
+        parts = [item for item in existing.split(os.pathsep) if item]
+        if entry_text not in parts:
+            env["PATH"] = os.pathsep.join([entry_text, *parts]) if parts else entry_text
+
+    @staticmethod
+    def _safe_extract_tarfile(archive: tarfile.TarFile, destination: Path) -> None:
+        destination_resolved = destination.resolve()
+        for member in archive.getmembers():
+            target_path = (destination / member.name).resolve()
+            if target_path != destination_resolved and destination_resolved not in target_path.parents:
+                raise RuntimeError(f"Unsafe archive member path: {member.name}")
+        archive.extractall(destination)
+
+    def _resolve_bootstrap_node_paths(
+        self,
+        *,
+        env: dict[str, str],
+        version: str,
+    ) -> tuple[Path, Path, Path] | None:
+        root_text = str(env.get("SKILL_BOOTSTRAP_ROOT", "")).strip()
+        if not root_text:
+            return None
+        platform_tags = self._node_runtime_platform_tag()
+        if platform_tags is None:
+            return None
+        platform_tag, arch_tag = platform_tags
+        base_root = Path(root_text).resolve() / ".node-runtime"
+        install_root = base_root / f"node-v{version}-{platform_tag}-{arch_tag}"
+        bin_dir = install_root if platform_tag == "win" else install_root / "bin"
+        npm_path = (
+            bin_dir / "npm.cmd"
+            if platform_tag == "win"
+            else bin_dir / "npm"
+        )
+        return install_root, bin_dir, npm_path
+
+    async def ensure_bootstrap_node_runtime(
+        self,
+        *,
+        env: dict[str, str],
+        timeout_s: int,
+    ) -> dict[str, Any]:
+        if shutil.which("node", path=env.get("PATH")) and shutil.which("npm", path=env.get("PATH")):
+            finished_at = self.deps.utc_now()
+            return {
+                "success": True,
+                "stdout": "",
+                "stderr": "",
+                "failure_reason": None,
+                "started_at": finished_at,
+                "finished_at": finished_at,
+                "duration_s": 0.0,
+            }
+        if str(env.get("SKILL_NETWORK_ALLOWED", "false")).strip().lower() != "true":
+            started_at = self.deps.utc_now()
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": "Node/npm is required for this bootstrap step but network access is disabled.\n",
+                "failure_reason": "bootstrap_network_not_allowed",
+                "started_at": started_at,
+                "finished_at": self.deps.utc_now(),
+                "duration_s": utc_duration_seconds(started_at, self.deps.utc_now()),
+            }
+        return await asyncio.to_thread(
+            self._ensure_bootstrap_node_runtime_sync,
+            env,
+            timeout_s,
+        )
+
+    def _ensure_bootstrap_node_runtime_sync(
+        self,
+        env: dict[str, str],
+        timeout_s: int,
+    ) -> dict[str, Any]:
+        started_at = self.deps.utc_now()
+        version = DEFAULT_BOOTSTRAP_NODE_VERSION
+        resolved_paths = self._resolve_bootstrap_node_paths(env=env, version=version)
+        if resolved_paths is None:
+            finished_at = self.deps.utc_now()
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": "Automatic Node.js bootstrap is not supported for this platform.\n",
+                "failure_reason": "bootstrap_node_runtime_unsupported",
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_s": utc_duration_seconds(started_at, finished_at),
+            }
+        install_root, bin_dir, npm_path = resolved_paths
+        node_path = bin_dir / ("node.exe" if platform.system().lower() == "windows" else "node")
+        install_root.parent.mkdir(parents=True, exist_ok=True)
+
+        if node_path.exists() and npm_path.exists():
+            self._prepend_path_entry(env, bin_dir)
+            finished_at = self.deps.utc_now()
+            return {
+                "success": True,
+                "stdout": f"[bootstrap runtime] Reusing Node.js runtime at {install_root}\n",
+                "stderr": "",
+                "failure_reason": None,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_s": utc_duration_seconds(started_at, finished_at),
+            }
+
+        platform_tags = self._node_runtime_platform_tag()
+        assert platform_tags is not None
+        platform_tag, arch_tag = platform_tags
+        if platform_tag == "win":
+            archive_name = f"node-v{version}-win-{arch_tag}.zip"
+        else:
+            archive_name = f"node-v{version}-{platform_tag}-{arch_tag}.tar.xz"
+        download_url = f"{DEFAULT_BOOTSTRAP_NODE_BASE_URL}/v{version}/{archive_name}"
+        temp_dir = Path(tempfile.mkdtemp(prefix="node-bootstrap-", dir=str(install_root.parent)))
+        archive_path = temp_dir / archive_name
+        stdout_chunks = [f"[bootstrap runtime] Downloading Node.js from {download_url}\n"]
+        stderr_text = ""
+        try:
+            request = Request(
+                download_url,
+                headers={"User-Agent": "lightrag-skill-runtime/1.0"},
+            )
+            with urlopen(request, timeout=max(10.0, min(float(timeout_s), DEFAULT_BOOTSTRAP_NODE_DOWNLOAD_TIMEOUT_S))) as response:
+                archive_path.write_bytes(response.read())
+            extract_root = temp_dir / "extract"
+            extract_root.mkdir(parents=True, exist_ok=True)
+            if archive_name.endswith(".zip"):
+                import zipfile
+
+                with zipfile.ZipFile(archive_path) as archive:
+                    archive.extractall(extract_root)
+            else:
+                with tarfile.open(archive_path, "r:*") as archive:
+                    self._safe_extract_tarfile(archive, extract_root)
+            extracted_dirs = [item for item in extract_root.iterdir() if item.is_dir()]
+            if not extracted_dirs:
+                raise RuntimeError("Downloaded Node.js archive did not contain an installable directory")
+            extracted_root = extracted_dirs[0]
+            if install_root.exists():
+                shutil.rmtree(install_root, ignore_errors=True)
+            shutil.move(str(extracted_root), str(install_root))
+            if not node_path.exists() or not npm_path.exists():
+                raise RuntimeError("Downloaded Node.js runtime is missing node or npm binaries")
+            self._prepend_path_entry(env, bin_dir)
+            stdout_chunks.append(f"[bootstrap runtime] Installed Node.js runtime at {install_root}\n")
+            finished_at = self.deps.utc_now()
+            return {
+                "success": True,
+                "stdout": "".join(stdout_chunks),
+                "stderr": "",
+                "failure_reason": None,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_s": utc_duration_seconds(started_at, finished_at),
+            }
+        except Exception as exc:
+            stderr_text = f"Failed to provision Node.js runtime automatically: {exc}\n"
+            finished_at = self.deps.utc_now()
+            return {
+                "success": False,
+                "stdout": "".join(stdout_chunks),
+                "stderr": stderr_text,
+                "failure_reason": "bootstrap_node_runtime_failed",
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_s": utc_duration_seconds(started_at, finished_at),
+            }
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def store_run_record(self, record: dict[str, Any]) -> None:
         run_id = str(record.get("run_id", "")).strip()
@@ -427,11 +699,31 @@ class RuntimeExecutionManager:
             1,
             min(int(timeout_s), self.deps.default_script_timeout_s),
         )
+        if self._bootstrap_commands_need_node_runtime(commands):
+            node_bootstrap = await self.ensure_bootstrap_node_runtime(
+                env=env,
+                timeout_s=per_command_timeout,
+            )
+            stdout_chunks.append(str(node_bootstrap.get("stdout", "")))
+            stderr_chunks.append(str(node_bootstrap.get("stderr", "")))
+            if not node_bootstrap.get("success"):
+                return self.bootstrap_failure_payload(
+                    commands=commands,
+                    stdout="".join(stdout_chunks),
+                    stderr="".join(stderr_chunks),
+                    exit_code=127,
+                    failure_reason=str(
+                        node_bootstrap.get("failure_reason") or "bootstrap_node_runtime_failed"
+                    ),
+                    started_at=run_started_at,
+                    finished_at=self.deps.utc_now(),
+                )
         for index, command in enumerate(commands, start=1):
-            marker = f"[bootstrap {index}/{len(commands)}] {command}\n"
+            effective_command = self._normalize_bootstrap_command_for_reuse(command)
+            marker = f"[bootstrap {index}/{len(commands)}] {effective_command}\n"
             stdout_chunks.append(marker)
             process = await asyncio.create_subprocess_exec(
-                *build_shell_exec_argv(command),
+                *build_shell_exec_argv(effective_command),
                 cwd=str(workspace_dir),
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
@@ -452,7 +744,7 @@ class RuntimeExecutionManager:
                     commands=commands,
                     stdout="".join(stdout_chunks),
                     stderr="".join(stderr_chunks)
-                    + f"Bootstrap command timed out: {command}\n",
+                    + f"Bootstrap command timed out: {effective_command}\n",
                     exit_code=124,
                     failure_reason="bootstrap_timed_out",
                     started_at=run_started_at,
@@ -711,7 +1003,7 @@ class RuntimeExecutionManager:
             def _can_attempt_llm_repair(plan: SkillCommandPlan) -> bool:
                 if plan.mode == "explicit":
                     return False
-                llm_client = self.deps.get_llm_client()
+                llm_client = self.get_repair_llm_client()
                 return bool(
                     llm_client is not None
                     and llm_client.is_available()
@@ -851,7 +1143,7 @@ class RuntimeExecutionManager:
                             stderr=str(exc),
                             preflight=current_preflight,
                             repair_history=repair_history,
-                            llm_client=self.deps.get_llm_client(),
+                            llm_client=self.get_repair_llm_client(),
                         )
                     except Exception:
                         repaired_plan = None
@@ -1064,7 +1356,7 @@ class RuntimeExecutionManager:
                             stderr="",
                             preflight=final_preflight,
                             repair_history=repair_history,
-                            llm_client=self.deps.get_llm_client(),
+                            llm_client=self.get_repair_llm_client(),
                         )
                     except Exception:
                         repaired_plan = None
@@ -1210,7 +1502,7 @@ class RuntimeExecutionManager:
                         stderr=execution["stderr"],
                         preflight=current_preflight,
                         repair_history=repair_history,
-                        llm_client=self.deps.get_llm_client(),
+                        llm_client=self.get_repair_llm_client(),
                     )
                 except Exception:
                     repaired_plan = None
@@ -1813,6 +2105,14 @@ class RuntimeExecutionManager:
             raise SkillServerError(f"Unknown run_id: {run_id}")
         if str(current_record.get("run_status", "")).strip() != "running":
             return 0
+        self.deps.update_run_metadata(
+            run_id=run_id,
+            queue_state="worker_starting",
+            worker_pid=os.getpid(),
+            active_process_pid=None,
+            cancel_requested=bool(current_record.get("cancel_requested", False)),
+            heartbeat=True,
+        )
 
         skill_name = str(job_context.get("skill_name", "")).strip()
         goal = str(job_context.get("goal", "")).strip()

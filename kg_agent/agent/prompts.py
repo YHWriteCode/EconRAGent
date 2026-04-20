@@ -336,16 +336,18 @@ def build_skill_free_shell_planner_prompt(
     user_query: str,
     runtime_target: dict[str, Any],
     constraints: dict[str, Any],
+    effective_constraints: dict[str, Any],
     shell_hints: dict[str, Any],
     file_inventory: list[dict[str, Any]],
-    skill_md_excerpt: str,
+    doc_bundle: list[dict[str, Any]],
+    cli_history: list[dict[str, Any]],
     script_previews: list[dict[str, Any]],
     python_examples: list[dict[str, Any]],
     conservative_plan: dict[str, Any],
 ) -> tuple[str, str]:
     system_prompt = (
         "You are the free-shell planning module for local skills. "
-        "Plan one runnable shell task from the skill docs, file inventory, and user intent. "
+        "Plan one runnable shell task from the skill docs, candidate entrypoints, bounded CLI history, and user intent. "
         "This is the pure free-shell path: you may return a direct shell command, or you may generate one or more files first and then execute them. "
         "Only use relative paths for generated files. Never rely on heredocs. "
         "If the task is still ambiguous or unsafe, return manual_required."
@@ -373,20 +375,24 @@ def build_skill_free_shell_planner_prompt(
         f"{goal}\n\n"
         "User query:\n"
         f"{user_query}\n\n"
-        "Structured constraints:\n"
+        "Original structured constraints:\n"
         f"{json.dumps(constraints, ensure_ascii=False, indent=2)}\n\n"
-        "Skill shell hints:\n"
+        "Effective structured constraints after auto-fill:\n"
+        f"{json.dumps(effective_constraints, ensure_ascii=False, indent=2)}\n\n"
+        "Candidate shipped entrypoints:\n"
         f"{json.dumps(shell_hints, ensure_ascii=False, indent=2)}\n\n"
         "Skill file inventory:\n"
         f"{json.dumps(file_inventory, ensure_ascii=False, indent=2)}\n\n"
+        "Progressive skill document bundle:\n"
+        f"{json.dumps(doc_bundle, ensure_ascii=False, indent=2)}\n\n"
+        "Bounded CLI history:\n"
+        f"{json.dumps(cli_history, ensure_ascii=False, indent=2)}\n\n"
         "Relevant script previews:\n"
         f"{json.dumps(script_previews, ensure_ascii=False, indent=2)}\n\n"
         "Relevant Python examples:\n"
         f"{json.dumps(python_examples, ensure_ascii=False, indent=2)}\n\n"
         "Conservative fallback plan:\n"
         f"{json.dumps(conservative_plan, ensure_ascii=False, indent=2)}\n\n"
-        "Full SKILL.md content:\n"
-        f"{skill_md_excerpt}\n\n"
         "Rules:\n"
         "1. If the skill already ships runnable scripts and one of them clearly matches the task, return that shipped entrypoint plus cli_args instead of generating new files.\n"
         "2. Only return generated_files when the shipped scripts clearly do not cover the requested target, data source, or workflow.\n"
@@ -402,11 +408,21 @@ def build_skill_free_shell_planner_prompt(
         "12. If the task needs dependency setup before the main command can run, return bootstrap_commands for that setup and explain the need in bootstrap_reason.\n"
         "13. For isolated dependency bootstrap, prefer the provided bootstrap env variables instead of global installs. For Python packages, prefer commands such as python -m pip install --target \"$SKILL_BOOTSTRAP_SITE_PACKAGES\" <packages> on POSIX or python -m pip install --target $env:SKILL_BOOTSTRAP_SITE_PACKAGES <packages> on PowerShell. Plain python -m pip install <packages> is also acceptable because PIP_TARGET is preconfigured.\n"
         "14. For Node/global CLI bootstrap, prefer the provided bootstrap root via NPM_CONFIG_PREFIX instead of system-global npm installs.\n"
-        "15. When the Python logic is longer than a short one-liner, prefer generated_files plus an entrypoint over python -c.\n"
-        "16. Do not claim success; only return the plan.\n"
-        "17. If the task is a direct artifact-creation request and the topic plus output type are clear, prefer sensible defaults over manual_required.\n"
-        "18. Treat the original goal, user query, structured constraints, and full SKILL.md as durable context for the whole execution loop. If the request is slightly underspecified but the missing values are low-risk execution defaults, infer them and continue.\n"
-        "19. If required credentials, truly user-owned inputs, or environment details are missing, return manual_required.\n"
+        "14a. Do not use pip to install Node-only packages. For example, use npm install -g pptxgenjs, not python -m pip install pptxgenjs.\n"
+        "15. If the runtime target only guarantees Python, prefer Python-based generated scripts and pip-installable dependencies over Node/npm workflows. Only choose Node/npm when the command or generated entrypoint actually depends on a Node runtime.\n"
+        "16. Keep the runtime consistent: if you return a Python entrypoint, required_tools and bootstrap_commands should normally be Python-oriented rather than npm/node-oriented.\n"
+        "17. When the Python logic is longer than a short one-liner, prefer generated_files plus an entrypoint over python -c.\n"
+        "18. Do not claim success; only return the plan.\n"
+        "19. If the task is a direct artifact-creation request and the topic plus output type are clear, prefer sensible defaults over manual_required.\n"
+        "20. Treat the original goal, user query, effective constraints, the progressive document bundle, and the bounded CLI history as durable context for the whole execution loop. If the request is slightly underspecified but the missing values are low-risk execution defaults, infer them and continue.\n"
+        "21. The root SKILL.md is always present in the document bundle. Follow-up docs were loaded progressively because SKILL.md referenced them. Use them when they are relevant, but do not ignore the root SKILL.md.\n"
+        "22. If required credentials, truly user-owned inputs, or environment details are missing, return manual_required.\n"
+        "23. Keep the returned JSON compact. Do not inline large scripts, base64 blobs, long article text, or template payloads inside generated_files.\n"
+        "24. If generated_files are necessary, prefer one small executable entrypoint file and keep each generated file concise, typically far below 120 lines and well below 12 KB.\n"
+        "25. For artifact-creation tasks, generate the artifact by code, not by embedding the final artifact content or large topic notes directly into generated_files.\n"
+        "26. Do not import Node-only packages from Python. If a package is Node-only, use bootstrap_commands plus a Node entrypoint instead of Python imports.\n"
+        "27. When the docs include concrete code examples or API names, follow those documented APIs exactly instead of inventing alternative enums, namespaces, or object paths.\n"
+        "28. When a workflow depends primarily on a Node/npm library, prefer a Node generated entrypoint over a Python wrapper that shells out to Node.\n"
         "Keep JSON valid and do not include markdown fences."
     )
     return system_prompt, user_prompt
@@ -543,7 +559,10 @@ def build_final_answer_prompt(
         "Use the provided capability and skill catalogs directly when the user asks what the agent can do. "
         "Be explicit about uncertainty when tools failed or evidence is incomplete. "
         "Only state concrete numeric facts that are explicitly present in tool results, logs, or artifact previews. "
-        "Do not invent prices, counts, dates, or file contents that are not shown in the evidence."
+        "Do not invent prices, counts, dates, or file contents that are not shown in the evidence. "
+        "If a skill result has manual_required_kind='technical_blocked', describe the system-side technical blocker and any auto-inferred assumptions, but do not ask the user for more PPT structure, style, or page-count details. "
+        "In that technical-blocked case, do not add generic retry advice, alternative workflows, or offers to produce substitute content unless the user explicitly asks for alternatives. "
+        "Only ask the user for more input when a skill result clearly says manual_required_kind='user_actionable'."
     )
     user_prompt = (
         "User query:\n"

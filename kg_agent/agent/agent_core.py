@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -978,6 +979,18 @@ class AgentCore:
         available_capability_catalog: list[dict[str, Any]],
         available_skills: list[dict[str, Any]],
     ) -> str:
+        running_skill_answer = self._build_running_skill_answer(
+            query=query,
+            tool_calls=tool_calls,
+        )
+        if running_skill_answer is not None:
+            return running_skill_answer
+        technical_blocked_answer = self._build_technical_blocked_skill_answer(
+            query=query,
+            tool_calls=tool_calls,
+        )
+        if technical_blocked_answer is not None:
+            return technical_blocked_answer
         if self.llm_client.is_available():
             system_prompt, user_prompt = build_final_answer_prompt(
                 query=query,
@@ -1019,6 +1032,20 @@ class AgentCore:
         available_capability_catalog: list[dict[str, Any]],
         available_skills: list[dict[str, Any]],
     ) -> AsyncIterator[str]:
+        running_skill_answer = self._build_running_skill_answer(
+            query=query,
+            tool_calls=tool_calls,
+        )
+        if running_skill_answer is not None:
+            yield running_skill_answer
+            return
+        technical_blocked_answer = self._build_technical_blocked_skill_answer(
+            query=query,
+            tool_calls=tool_calls,
+        )
+        if technical_blocked_answer is not None:
+            yield technical_blocked_answer
+            return
         system_prompt, user_prompt = build_final_answer_prompt(
             query=query,
             route=asdict(route),
@@ -1682,6 +1709,165 @@ class AgentCore:
         }
 
     @staticmethod
+    def _build_technical_blocked_skill_answer(
+        *,
+        query: str,
+        tool_calls: list[dict[str, Any]],
+    ) -> str | None:
+        def _clean_text(value: Any) -> str:
+            if value is None:
+                return ""
+            text = str(value).strip()
+            return "" if text.lower() == "none" else text
+
+        technical_failure_reasons = {
+            "bootstrap_failed",
+            "missing_required_tools",
+            "skill_env_unavailable",
+            "command_materialization_failed",
+            "llm_planning_failed",
+            "llm_not_available_for_free_shell",
+            "python_not_supported",
+            "prompt_parse_failed",
+            "internal_planner_error",
+        }
+        for item in tool_calls:
+            data = item.get("data")
+            if not isinstance(data, dict) or not item.get("tool", "").startswith("skill:"):
+                continue
+            run_status = str(data.get("run_status", "")).strip().lower()
+            failure_reason = str(data.get("failure_reason", "")).strip()
+            is_manual_technical_blocked = (
+                run_status == "manual_required"
+                and data.get("manual_required_kind") == "technical_blocked"
+            )
+            is_failed_technical_blocked = (
+                run_status == "failed" and failure_reason in technical_failure_reasons
+            )
+            if not (is_manual_technical_blocked or is_failed_technical_blocked):
+                continue
+            inferred = data.get("auto_inferred_constraints")
+            filtered_inferred = (
+                {
+                    str(key): value
+                    for key, value in inferred.items()
+                    if str(key).strip()
+                    and str(key).strip() not in {"dry_run", "plan_only"}
+                    and value is not None
+                    and value != ""
+                    and value != []
+                    and value != {}
+                }
+                if isinstance(inferred, dict)
+                else {}
+            )
+            inferred_json = (
+                json.dumps(filtered_inferred, ensure_ascii=False, indent=2)
+                if filtered_inferred
+                else ""
+            )
+            logs_preview = data.get("logs_preview")
+            stdout_preview = ""
+            stderr_preview = ""
+            if isinstance(logs_preview, dict):
+                stdout_preview = _clean_text(logs_preview.get("stdout", ""))
+                stderr_preview = _clean_text(logs_preview.get("stderr", ""))
+            blocker = (
+                _clean_text(data.get("planner_error_summary", ""))
+                or failure_reason
+                or _clean_text(item.get("summary", ""))
+            )
+            if is_failed_technical_blocked:
+                failure_details: list[str] = []
+                if blocker:
+                    failure_details.append(blocker)
+                if stderr_preview:
+                    failure_details.append(stderr_preview)
+                elif stdout_preview:
+                    failure_details.append(stdout_preview)
+                blocker = " | ".join(
+                    detail
+                    for detail in failure_details
+                    if detail
+                )
+            if re.search(r"[\u4e00-\u9fff]", query):
+                message = [
+                    (
+                        "当前无法完成该请求，因为技能规划阶段出现了系统侧技术性阻塞。"
+                        if is_manual_technical_blocked
+                        else "当前无法完成该请求，因为技能执行阶段出现了系统侧技术性阻塞。"
+                    ),
+                ]
+                if blocker:
+                    message.append(f"技术阻塞：{blocker}")
+                if inferred_json:
+                    message.append(f"系统已自动推断的参数：\n{inferred_json}")
+                return "\n\n".join(message)
+            message = [
+                (
+                    "The request could not be completed because skill planning hit a system-side technical failure."
+                    if is_manual_technical_blocked
+                    else "The request could not be completed because skill execution hit a system-side technical failure."
+                )
+            ]
+            if blocker:
+                message.append(f"Technical blocker: {blocker}")
+            if inferred_json:
+                message.append(f"Auto-inferred parameters:\n{inferred_json}")
+            return "\n\n".join(message)
+        return None
+
+    @staticmethod
+    def _build_running_skill_answer(
+        *,
+        query: str,
+        tool_calls: list[dict[str, Any]],
+    ) -> str | None:
+        for item in tool_calls:
+            data = item.get("data")
+            if not isinstance(data, dict) or not item.get("tool", "").startswith("skill:"):
+                continue
+            run_status = str(data.get("run_status", "")).strip().lower()
+            if run_status != "running":
+                continue
+            skill_name = str(data.get("skill_name", "")).strip() or str(
+                item.get("metadata", {}).get("skill_name", "")
+            ).strip()
+            summary = str(data.get("summary", "")).strip()
+            shell_mode = str(data.get("shell_mode_effective") or data.get("shell_mode") or "").strip()
+            run_id = str(data.get("run_id", "")).strip()
+            if re.search(r"[\u4e00-\u9fff]", query):
+                message = [
+                    "该技能任务仍在运行中，当前还没有最终结果。"
+                ]
+                details: list[str] = []
+                if skill_name:
+                    details.append(f"技能：{skill_name}")
+                if shell_mode:
+                    details.append(f"执行模式：{shell_mode}")
+                if summary:
+                    details.append(f"当前状态：{summary}")
+                if run_id:
+                    details.append(f"运行 ID：{run_id}")
+                if details:
+                    message.append("\n".join(details))
+                return "\n\n".join(message)
+            message = ["The skill run is still in progress, so there is no final result yet."]
+            details = []
+            if skill_name:
+                details.append(f"Skill: {skill_name}")
+            if shell_mode:
+                details.append(f"Execution mode: {shell_mode}")
+            if summary:
+                details.append(f"Current status: {summary}")
+            if run_id:
+                details.append(f"Run ID: {run_id}")
+            if details:
+                message.append("\n".join(details))
+            return "\n\n".join(message)
+        return None
+
+    @staticmethod
     def _fallback_answer(
         query: str,
         route: RouteDecision,
@@ -1706,6 +1892,18 @@ class AgentCore:
             lines.append("Available skills:")
             lines.extend(skill_lines or ["- None"])
             return "\n".join(lines)
+        running_skill_answer = AgentCore._build_running_skill_answer(
+            query=query,
+            tool_calls=tool_calls,
+        )
+        if running_skill_answer is not None:
+            return running_skill_answer
+        technical_blocked_answer = AgentCore._build_technical_blocked_skill_answer(
+            query=query,
+            tool_calls=tool_calls,
+        )
+        if technical_blocked_answer is not None:
+            return technical_blocked_answer
         lines = [
             f"Question: {query}",
             f"Route strategy: {route.strategy}",
@@ -1751,6 +1949,8 @@ class AgentCore:
                 "failure_reason",
                 "auto_inferred_constraints",
                 "planning_blockers",
+                "manual_required_kind",
+                "planner_error_summary",
             ):
                 if key in data:
                     summary[key] = data[key]

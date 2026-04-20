@@ -33,6 +33,45 @@ class _StubLLMClient:
         yield self.text
 
 
+class _StubOpenAIResponseMessage:
+    def __init__(self, content: str):
+        self.content = content
+
+
+class _StubOpenAIChoice:
+    def __init__(self, content: str):
+        self.message = _StubOpenAIResponseMessage(content)
+
+
+class _StubOpenAIResponse:
+    def __init__(self, content: str):
+        self.choices = [_StubOpenAIChoice(content)]
+
+
+class _StubChatCompletions:
+    def __init__(self, responses: list[str], *, fail_json_mode: bool = False):
+        self.responses = list(responses)
+        self.fail_json_mode = fail_json_mode
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        if kwargs.get("response_format") and self.fail_json_mode:
+            raise RuntimeError("json mode unsupported")
+        if not self.responses:
+            raise RuntimeError("No stub response remaining")
+        return _StubOpenAIResponse(self.responses.pop(0))
+
+
+class _StubOpenAIClient:
+    def __init__(self, responses: list[str], *, fail_json_mode: bool = False):
+        self.chat = type(
+            "_ChatNamespace",
+            (),
+            {"completions": _StubChatCompletions(responses, fail_json_mode=fail_json_mode)},
+        )()
+
+
 def test_kg_agent_config_reads_utility_model_from_env(monkeypatch):
     monkeypatch.setenv("KG_AGENT_UTILITY_MODEL_NAME", "utility-mini")
     monkeypatch.setenv("KG_AGENT_UTILITY_MODEL_BASE_URL", "http://utility.local/v1")
@@ -97,3 +136,100 @@ async def test_fallback_llm_client_warns_once_and_uses_fallback(caplog):
     assert second["result"] == "fallback"
     assert fallback.calls == ["complete_json", "complete_json"]
     assert caplog.text.lower().count("falling back to the main agent model") == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_llm_client_complete_json_accepts_python_literal_style_objects(monkeypatch):
+    client = AgentLLMClient(
+        AgentModelConfig(
+            provider="openai_compatible",
+            model_name="stub-model",
+            base_url="http://stub.local/v1",
+            api_key="stub-key",
+        )
+    )
+
+    async def _fake_chat_completion_text(**kwargs):
+        return "{'mode': 'manual_required', 'flag': True, 'value': None}"
+
+    monkeypatch.setattr(client, "_chat_completion_text", _fake_chat_completion_text)
+
+    payload = await client.complete_json(system_prompt="s", user_prompt="u")
+
+    assert payload == {"mode": "manual_required", "flag": True, "value": None}
+
+
+@pytest.mark.asyncio
+async def test_agent_llm_client_complete_json_repairs_malformed_json_with_second_call(monkeypatch):
+    client = AgentLLMClient(
+        AgentModelConfig(
+            provider="openai_compatible",
+            model_name="stub-model",
+            base_url="http://stub.local/v1",
+            api_key="stub-key",
+        )
+    )
+    calls: list[dict] = []
+    responses = iter(
+        [
+            '{"mode": "manual_required", "rationale": "bad "quote" here"}',
+            '{"mode": "manual_required", "rationale": "bad \\"quote\\" here"}',
+        ]
+    )
+
+    async def _fake_chat_completion_text(**kwargs):
+        calls.append(dict(kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(client, "_chat_completion_text", _fake_chat_completion_text)
+
+    payload = await client.complete_json(system_prompt="s", user_prompt="u")
+
+    assert payload == {
+        "mode": "manual_required",
+        "rationale": 'bad "quote" here',
+    }
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    assert calls[1]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_agent_llm_client_complete_json_prefers_json_mode_when_available(monkeypatch):
+    client = AgentLLMClient(
+        AgentModelConfig(
+            provider="openai_compatible",
+            model_name="stub-model",
+            base_url="http://stub.local/v1",
+            api_key="stub-key",
+        )
+    )
+    stub_client = _StubOpenAIClient(['{"mode":"free_shell","command":"python run.py"}'])
+    monkeypatch.setattr(client, "_ensure_client", lambda: stub_client)
+
+    payload = await client.complete_json(system_prompt="s", user_prompt="u")
+
+    assert payload == {"mode": "free_shell", "command": "python run.py"}
+    assert stub_client.chat.completions.calls[0]["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
+async def test_agent_llm_client_complete_json_falls_back_when_json_mode_is_unsupported(monkeypatch):
+    client = AgentLLMClient(
+        AgentModelConfig(
+            provider="openai_compatible",
+            model_name="stub-model",
+            base_url="http://stub.local/v1",
+            api_key="stub-key",
+        )
+    )
+    stub_client = _StubOpenAIClient(
+        ['{"mode":"manual_required","failure_reason":"llm_planning_failed"}'],
+        fail_json_mode=True,
+    )
+    monkeypatch.setattr(client, "_ensure_client", lambda: stub_client)
+
+    payload = await client.complete_json(system_prompt="s", user_prompt="u")
+
+    assert payload == {"mode": "manual_required", "failure_reason": "llm_planning_failed"}
+    assert len(stub_client.chat.completions.calls) == 2
+    assert "response_format" not in stub_client.chat.completions.calls[1]

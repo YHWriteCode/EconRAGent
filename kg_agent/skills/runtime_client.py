@@ -224,6 +224,20 @@ class MCPBasedSkillRuntimeClient:
                     for item in hints["planning_blockers"]
                     if isinstance(item, dict)
                 ]
+            if "manual_required_kind" not in normalized and isinstance(
+                hints.get("manual_required_kind"),
+                str,
+            ):
+                normalized["manual_required_kind"] = str(
+                    hints.get("manual_required_kind", "")
+                ).strip() or None
+            if "planner_error_summary" not in normalized and isinstance(
+                hints.get("planner_error_summary"),
+                str,
+            ):
+                normalized["planner_error_summary"] = str(
+                    hints.get("planner_error_summary", "")
+                ).strip() or None
             if "runtime_target" not in normalized and isinstance(
                 command_plan.get("runtime_target"),
                 dict,

@@ -459,6 +459,8 @@ class SkillRunRecord:
             ]
             if isinstance(hints.get("planning_blockers"), list)
             else [],
+            "manual_required_kind": str(hints.get("manual_required_kind", "")).strip() or None,
+            "planner_error_summary": str(hints.get("planner_error_summary", "")).strip() or None,
             "runtime_target": self.command_plan.runtime_target.to_dict(),
             "workspace": self.workspace,
             "started_at": self.started_at,

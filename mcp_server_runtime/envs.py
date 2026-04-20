@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from kg_agent.skills.models import LoadedSkill, SkillCommandPlan, SkillRuntimeTarget
+from kg_agent.skills.command_planner import NODE_RUNTIME_SUFFIXES
 
 from .config import (
     ENVS_ROOT,
@@ -584,6 +585,34 @@ def _shared_bootstrap_paths(loaded_skill: LoadedSkill) -> dict[str, Path]:
     }
 
 
+def _detect_bootstrap_node_runtime_bin(bootstrap_root: Path) -> Path | None:
+    runtime_root = (bootstrap_root / ".node-runtime").resolve()
+    if not runtime_root.is_dir():
+        return None
+    install_roots = sorted(
+        (item for item in runtime_root.iterdir() if item.is_dir()),
+        key=lambda item: item.name,
+        reverse=True,
+    )
+    for install_root in install_roots:
+        for candidate in ((install_root / "bin").resolve(), install_root.resolve()):
+            node_candidates = [candidate / "node", candidate / "node.exe"]
+            npm_candidates = [candidate / "npm", candidate / "npm.cmd", candidate / "npm.exe"]
+            if any(path.is_file() for path in node_candidates) and any(
+                path.is_file() for path in npm_candidates
+            ):
+                return candidate
+    return None
+
+
+def _bootstrap_node_module_paths(bootstrap_root: Path) -> list[Path]:
+    candidates = [
+        (bootstrap_root / "lib" / "node_modules").resolve(),
+        (bootstrap_root / "node_modules").resolve(),
+    ]
+    return [path for path in candidates if path.is_dir()]
+
+
 def _resolve_bootstrap_paths(
     *,
     workspace_dir: Path,
@@ -611,6 +640,8 @@ def _build_script_shell_command(
     argv: list[str]
     if suffix == ".py":
         argv = ["python", str(script_path)]
+    elif suffix in NODE_RUNTIME_SUFFIXES:
+        argv = ["node", str(script_path)]
     elif suffix in {".sh", ".bash"}:
         shell_bin = "sh.exe" if os.name == "nt" else "/bin/sh"
         argv = [shell_bin, str(script_path)]
@@ -721,6 +752,8 @@ def _build_workspace_script_shell_command(
     argv: list[str]
     if suffix == ".py":
         argv = ["python", str(script_path)]
+    elif suffix in NODE_RUNTIME_SUFFIXES:
+        argv = ["node", str(script_path)]
     elif suffix in {".sh", ".bash"}:
         shell_bin = "sh.exe" if os.name == "nt" else "/bin/sh"
         argv = [shell_bin, str(script_path)]
@@ -811,6 +844,7 @@ def _build_run_env(
                 allow_network=bool(runtime_target.network_allowed),
             )
 
+    bootstrap_node_bin = _detect_bootstrap_node_runtime_bin(bootstrap_paths["root"])
     python_bin_dir = str(Path(sys.executable).resolve().parent)
     active_python_bin_dir = (
         str(skill_env_spec["bin_dir"])
@@ -820,6 +854,7 @@ def _build_run_env(
     existing_path = env.get("PATH", "")
     path_entries = [
         active_python_bin_dir,
+        str(bootstrap_node_bin) if bootstrap_node_bin is not None else "",
         str(bootstrap_paths["bin"]),
         str(bootstrap_paths["scripts"]),
         python_bin_dir,
@@ -836,11 +871,27 @@ def _build_run_env(
     env["PYTHONPATH"] = os.pathsep.join(
         entry for entry in pythonpath_entries if isinstance(entry, str) and entry
     )
+    existing_node_path = env.get("NODE_PATH", "")
+    node_path_entries = [
+        str(path) for path in _bootstrap_node_module_paths(bootstrap_paths["root"])
+    ]
+    if existing_node_path:
+        node_path_entries.append(existing_node_path)
+    if node_path_entries:
+        env["NODE_PATH"] = os.pathsep.join(
+            entry for entry in node_path_entries if isinstance(entry, str) and entry
+        )
     env["PIP_CACHE_DIR"] = str(PIP_CACHE_ROOT)
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     env["PIP_FIND_LINKS"] = str(WHEELHOUSE_ROOT)
     env["NPM_CONFIG_PREFIX"] = str(bootstrap_paths["root"])
     env["npm_config_prefix"] = str(bootstrap_paths["root"])
+    npm_cache_dir = (bootstrap_paths["root"] / ".npm-cache").resolve()
+    npm_cache_dir.mkdir(parents=True, exist_ok=True)
+    env["NPM_CONFIG_CACHE"] = str(npm_cache_dir)
+    env["npm_config_cache"] = str(npm_cache_dir)
+    env["NPM_CONFIG_UPDATE_NOTIFIER"] = "false"
+    env["npm_config_update_notifier"] = "false"
     if skill_env_spec is not None and bool(skill_env_spec.get("ready")):
         env["VIRTUAL_ENV"] = str(skill_env_spec["env_path"])
         env["SKILL_VENV_BIN"] = str(skill_env_spec["bin_dir"])

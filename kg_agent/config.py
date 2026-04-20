@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from typing import AsyncIterator
@@ -11,6 +13,19 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=".env", override=False)
 logger = logging.getLogger(__name__)
+JSON_FENCE_PATTERN = re.compile(
+    r"```(?:json)?\s*(?P<body>.*?)```",
+    re.IGNORECASE | re.DOTALL,
+)
+TRAILING_COMMA_PATTERN = re.compile(r",(\s*[}\]])")
+SMART_QUOTE_TRANSLATION = str.maketrans(
+    {
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+    }
+)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -88,6 +103,58 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
         return ["*"]
     parts = [item.strip() for item in normalized.split(",") if item.strip()]
     return parts or list(default)
+
+
+def _strip_json_fences(payload: str) -> str:
+    normalized = str(payload or "").strip()
+    match = JSON_FENCE_PATTERN.search(normalized)
+    if match:
+        return str(match.group("body") or "").strip()
+    if normalized.startswith("```"):
+        return normalized.strip("`").strip()
+    return normalized
+
+
+def _extract_json_object_text(payload: str) -> str:
+    normalized = _strip_json_fences(payload)
+    start = normalized.find("{")
+    end = normalized.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError(f"LLM did not return a JSON object: {payload}")
+    return normalized[start : end + 1]
+
+
+def _normalize_json_like_text(payload: str) -> str:
+    normalized = str(payload or "").translate(SMART_QUOTE_TRANSLATION)
+    normalized = TRAILING_COMMA_PATTERN.sub(r"\1", normalized)
+    return normalized
+
+
+def _coerce_mapping_to_plain_dict(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError(f"Expected a JSON object, received: {type(value).__name__}")
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _parse_json_like_object(payload: str) -> dict[str, Any]:
+    object_text = _extract_json_object_text(payload)
+    candidates: list[str] = []
+    for item in (object_text, _normalize_json_like_text(object_text)):
+        if item and item not in candidates:
+            candidates.append(item)
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return _coerce_mapping_to_plain_dict(json.loads(candidate))
+        except Exception as exc:
+            last_error = exc
+        try:
+            return _coerce_mapping_to_plain_dict(ast.literal_eval(candidate))
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ValueError(f"LLM did not return a JSON object: {payload}")
 
 
 def _default_skill_runtime_target():
@@ -832,6 +899,31 @@ class AgentLLMClient:
         )
         return self._client
 
+    async def _chat_completion_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float,
+        max_tokens: int,
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
+        client = self._ensure_client()
+        request_kwargs: dict[str, Any] = {
+            "model": self.config.model_name,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        if response_format is not None:
+            request_kwargs["response_format"] = response_format
+        response = await client.chat.completions.create(**request_kwargs)
+        message = response.choices[0].message
+        return message.content or ""
+
     async def complete_text(
         self,
         *,
@@ -840,18 +932,12 @@ class AgentLLMClient:
         temperature: float = 0.2,
         max_tokens: int = 1200,
     ) -> str:
-        client = self._ensure_client()
-        response = await client.chat.completions.create(
-            model=self.config.model_name,
+        return await self._chat_completion_text(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
         )
-        message = response.choices[0].message
-        return message.content or ""
 
     async def stream_text(
         self,
@@ -888,22 +974,65 @@ class AgentLLMClient:
         temperature: float = 0.0,
         max_tokens: int = 800,
     ) -> dict[str, Any]:
-        raw_text = await self.complete_text(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        payload = raw_text.strip()
-        if payload.startswith("```"):
-            payload = payload.strip("`")
-            if payload.lower().startswith("json"):
-                payload = payload[4:].strip()
-        start = payload.find("{")
-        end = payload.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError(f"LLM did not return a JSON object: {raw_text}")
-        return json.loads(payload[start : end + 1])
+        raw_text = ""
+        json_mode_error: Exception | None = None
+        try:
+            raw_text = await self._chat_completion_text(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+        except Exception as exc:
+            json_mode_error = exc
+            raw_text = await self.complete_text(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        try:
+            return _parse_json_like_object(raw_text)
+        except Exception as parse_exc:
+            repair_system_prompt = (
+                "You repair malformed JSON objects returned by another model. "
+                "Return exactly one valid JSON object and nothing else. "
+                "Preserve the original field names and values as much as possible."
+            )
+            repair_user_prompt = (
+                "The following model output should have been a JSON object but failed to parse.\n\n"
+                f"Parse error:\n{parse_exc}\n\n"
+                f"Malformed output:\n{raw_text}\n"
+            )
+            repair_max_tokens = max(800, min(max_tokens, 2400))
+            repair_json_mode_error: Exception | None = None
+            try:
+                repaired_text = await self._chat_completion_text(
+                    system_prompt=repair_system_prompt,
+                    user_prompt=repair_user_prompt,
+                    temperature=0.0,
+                    max_tokens=repair_max_tokens,
+                    response_format={"type": "json_object"},
+                )
+            except Exception as exc:
+                repair_json_mode_error = exc
+                repaired_text = await self.complete_text(
+                    system_prompt=repair_system_prompt,
+                    user_prompt=repair_user_prompt,
+                    temperature=0.0,
+                    max_tokens=repair_max_tokens,
+                )
+            try:
+                return _parse_json_like_object(repaired_text)
+            except Exception as repair_exc:
+                raise ValueError(
+                    f"LLM JSON parsing failed. "
+                    f"{f'JSON mode error: {json_mode_error}. ' if json_mode_error is not None else ''}"
+                    f"{f'Repair JSON mode error: {repair_json_mode_error}. ' if repair_json_mode_error is not None else ''}"
+                    f"Initial error: {parse_exc}. "
+                    f"Repair error: {repair_exc}."
+                ) from repair_exc
 
 
 class FallbackLLMClient:

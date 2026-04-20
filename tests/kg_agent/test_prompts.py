@@ -116,6 +116,8 @@ def test_build_final_answer_prompt_includes_capability_and_skill_catalogs():
     assert "kg_hybrid_search" in user_prompt
     assert "Available skills:" in user_prompt
     assert "financial-researching" in user_prompt
+    assert "manual_required_kind='technical_blocked'" in system_prompt
+    assert "do not add generic retry advice" in system_prompt
 
 
 def test_build_skill_constraint_inference_prompt_includes_reference_date_and_allowed_keys():
@@ -145,17 +147,38 @@ def test_build_skill_free_shell_prompt_uses_full_skill_md_and_natural_language_d
         user_query="做一个PPT",
         runtime_target={"platform": "linux", "shell": "/bin/sh"},
         constraints={"shell_mode": "free_shell"},
-        shell_hints={"required_credentials": []},
+        effective_constraints={"shell_mode": "free_shell", "topic": "生成式人工智能"},
+        shell_hints={"required_credentials": [], "runnable_scripts": ["scripts/build.py"]},
         file_inventory=[{"path": "SKILL.md", "kind": "skill_doc", "size_bytes": 1024}],
-        skill_md_excerpt="Line 1\nLine 2\nInstall with pip install example-package",
+        doc_bundle=[
+            {
+                "path": "SKILL.md",
+                "hop": 0,
+                "source_path": None,
+                "score": 100,
+                "content": "Line 1\nLine 2\nInstall with pip install example-package",
+            },
+            {
+                "path": "pptxgenjs.md",
+                "hop": 1,
+                "source_path": "SKILL.md",
+                "score": 90,
+                "content": "Use pptxgenjs for create-from-scratch workflows.",
+            },
+        ],
+        cli_history=[],
         script_previews=[],
         python_examples=[],
         conservative_plan={"mode": "manual_required"},
     )
 
     assert "free-shell planning module" in system_prompt.lower()
-    assert "Full SKILL.md content:" in user_prompt
+    assert "Progressive skill document bundle:" in user_prompt
+    assert "Effective structured constraints after auto-fill:" in user_prompt
     assert "natural-language dependency guidance anywhere in SKILL.md" in user_prompt
     assert "SKILL_BOOTSTRAP_SITE_PACKAGES" in user_prompt
     assert "NPM_CONFIG_PREFIX" in user_prompt
+    assert "If the runtime target only guarantees Python, prefer Python-based generated scripts" in user_prompt
+    assert "use npm install -g pptxgenjs" in user_prompt
     assert "pip install example-package" in user_prompt
+    assert "pptxgenjs.md" in user_prompt

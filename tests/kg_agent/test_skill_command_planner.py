@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 
@@ -41,6 +42,9 @@ class _FailingLLM:
     async def complete_json(self, **kwargs):
         raise RuntimeError("planner crashed")
 
+    async def complete_text(self, **kwargs):
+        raise RuntimeError("planner crashed")
+
 
 class _RetryOnceLLM:
     def __init__(self, success_payload: dict):
@@ -65,6 +69,88 @@ class _RetryOnceLLM:
         return dict(self.success_payload)
 
 
+class _JsonFailThenTextSuccessLLM:
+    def __init__(self, success_payload: dict):
+        self.success_payload = dict(success_payload)
+        self.calls: list[dict] = []
+        self.text_calls: list[dict] = []
+
+    def is_available(self) -> bool:
+        return True
+
+    async def complete_json(self, **kwargs):
+        self.calls.append(kwargs)
+        if int(kwargs.get("max_tokens", 0) or 0) < 1800:
+            return {
+                "constraints": {},
+                "reason": "No extra structured constraints were required.",
+                "confidence": "medium",
+            }
+        raise RuntimeError("json transport timed out")
+
+    async def complete_text(self, **kwargs):
+        self.text_calls.append(kwargs)
+        return json.dumps(self.success_payload, ensure_ascii=False)
+
+
+class _JsonAndTextFailLLM:
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.text_calls: list[dict] = []
+
+    def is_available(self) -> bool:
+        return True
+
+    async def complete_json(self, **kwargs):
+        self.calls.append(kwargs)
+        if int(kwargs.get("max_tokens", 0) or 0) < 1800:
+            return {
+                "constraints": {},
+                "reason": "No extra structured constraints were required.",
+                "confidence": "medium",
+            }
+        raise RuntimeError("json transport timed out")
+
+    async def complete_text(self, **kwargs):
+        self.text_calls.append(kwargs)
+        raise RuntimeError("text transport timed out")
+
+
+class _MalformedTextThenCompactRepairLLM:
+    def __init__(self, success_payload: dict):
+        self.success_payload = dict(success_payload)
+        self.calls: list[dict] = []
+        self.text_calls: list[dict] = []
+        self._repair_sent = False
+
+    def is_available(self) -> bool:
+        return True
+
+    async def complete_json(self, **kwargs):
+        self.calls.append(kwargs)
+        if int(kwargs.get("max_tokens", 0) or 0) < 1800:
+            return {
+                "constraints": {},
+                "reason": "No extra structured constraints were required.",
+                "confidence": "medium",
+            }
+        raise RuntimeError("json transport timed out")
+
+    async def complete_text(self, **kwargs):
+        self.text_calls.append(kwargs)
+        if not self._repair_sent:
+            self._repair_sent = True
+            return (
+                '{'
+                '"mode":"generated_script",'
+                '"entrypoint":".skill_generated/create_presentation.py",'
+                '"cli_args":[],'
+                '"generated_files":[{"path":".skill_generated/create_presentation.py",'
+                '"content":"#!/usr/bin/env python3\\nprint(\\"hello'
+            )
+        return json.dumps(self.success_payload, ensure_ascii=False)
+
+
 def _load_repo_skill(skill_name: str):
     registry = SkillRegistry(Path("skills"))
     loader = SkillLoader(registry)
@@ -77,6 +163,17 @@ class _FixedDate:
         from datetime import date
 
         return date(2026, 4, 15)
+
+
+def test_build_portable_script_command_uses_node_for_js_entrypoint():
+    command = command_planner_module.build_portable_script_command(
+        ".skill_generated/create_ppt.js",
+        ["--topic", "科幻小说起源发展"],
+    )
+
+    assert command.startswith("node ")
+    assert ".skill_generated/create_ppt.js" in command
+    assert "--topic" in command
 
 
 @pytest.mark.asyncio
@@ -920,6 +1017,63 @@ async def test_skill_command_planner_free_shell_prompt_includes_full_skill_md_so
     assert "alpha-lib beta-lib" in llm.calls[0]["user_prompt"]
 
 
+def test_iter_runnable_scripts_filters_non_entrypoint_noise_for_pptx():
+    loaded_skill = _load_repo_skill("pptx")
+    documented_entrypoints = {
+        item
+        for item in command_planner_module.extract_documented_entrypoint_paths(
+            loaded_skill.skill_md
+        )
+    }
+
+    runnable = command_planner_module.iter_runnable_scripts(
+        loaded_skill,
+        documented_entrypoints=documented_entrypoints,
+    )
+
+    assert "scripts/thumbnail.py" in runnable
+    assert "scripts/office/unpack.py" in runnable
+    assert "scripts/office/soffice.py" in runnable
+    assert "scripts/__init__.py" not in runnable
+    assert not any(path.endswith(".xsd") for path in runnable)
+    assert not any("/helpers/" in path for path in runnable)
+    assert not any("/validators/" in path for path in runnable)
+
+
+def test_build_skill_doc_bundle_progressively_loads_pptx_create_followups():
+    loaded_skill = _load_repo_skill("pptx")
+    request = SkillExecutionRequest(
+        skill_name="pptx",
+        goal="帮我做一个从零开始的PPT",
+        user_query="做一个关于科幻小说起源发展的PPT",
+        constraints={"output_format": "pptx", "topic": "科幻小说起源发展"},
+    )
+
+    bundle = command_planner_module.build_skill_doc_bundle(loaded_skill, request)
+    paths = [item["path"] for item in bundle]
+
+    assert paths[0] == "SKILL.md"
+    assert "pptxgenjs.md" in paths
+    assert "editing.md" in paths
+    assert paths.index("pptxgenjs.md") < paths.index("editing.md")
+
+
+def test_build_skill_doc_bundle_prefers_editing_doc_for_template_requests():
+    loaded_skill = _load_repo_skill("pptx")
+    request = SkillExecutionRequest(
+        skill_name="pptx",
+        goal="Edit a branded deck from a template",
+        user_query="用模板修改这个PPT",
+        constraints={"output_format": "pptx", "template": "brand-template.pptx"},
+    )
+
+    bundle = command_planner_module.build_skill_doc_bundle(loaded_skill, request)
+    paths = [item["path"] for item in bundle]
+
+    assert paths[0] == "SKILL.md"
+    assert paths[1] == "editing.md"
+
+
 @pytest.mark.asyncio
 async def test_skill_command_planner_free_shell_retries_with_compact_context_before_failing():
     loaded_skill = _load_repo_skill("pptx")
@@ -959,7 +1113,12 @@ async def test_skill_command_planner_free_shell_retries_with_compact_context_bef
     assert plan.mode == "generated_script"
     assert plan.hints["planner"] == "free_shell"
     assert plan.hints["planner_context_mode"] == "compact_context"
-    assert len(llm.calls[2]["user_prompt"]) < len(llm.calls[1]["user_prompt"])
+    assert plan.hints["planner_full_context_compacted"] is True
+    assert int(llm.calls[1]["max_tokens"]) >= 3200
+    assert int(llm.calls[2]["max_tokens"]) >= 3200
+    assert len(llm.calls[2]["user_prompt"]) <= len(llm.calls[1]["user_prompt"])
+    assert "pptxgenjs.md" in llm.calls[1]["user_prompt"]
+    assert ".xsd" not in llm.calls[1]["user_prompt"]
 
 
 @pytest.mark.asyncio
@@ -1010,6 +1169,53 @@ async def test_skill_command_planner_auto_upgrades_manual_required_conservative_
     assert plan.mode == "generated_script"
     assert plan.entrypoint == ".skill_generated/main.py"
     assert plan.hints["planner"] == "free_shell"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_compacts_initial_full_context_for_large_actionable_skill():
+    loaded_skill = _load_repo_skill("pptx")
+    llm = _StubPlannerLLM(
+        [
+            {
+                "constraints": {},
+                "reason": "No extra structured constraints were required.",
+                "confidence": "medium",
+            },
+            {
+                "mode": "generated_script",
+                "command": None,
+                "entrypoint": ".skill_generated/main.py",
+                "cli_args": [],
+                "generated_files": [
+                    {
+                        "path": ".skill_generated/main.py",
+                        "content": "print('build pptx deck')\n",
+                        "description": "Generated PPTX workflow entrypoint.",
+                    }
+                ],
+                "rationale": "Use the PPTX skill docs to assemble a generated workflow.",
+                "missing_fields": [],
+                "failure_reason": None,
+                "required_tools": ["python"],
+                "warnings": [],
+            },
+        ]
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="pptx",
+            goal="创建一个关于生成式人工智能起源发展的演示文稿",
+            user_query="请生成一个关于生成式人工智能起源发展的PPT",
+            constraints={"topic": "生成式人工智能起源发展", "output_format": "pptx"},
+        ),
+    )
+
+    assert plan.hints["planner"] == "free_shell"
+    assert plan.hints["planner_full_context_compacted"] is True
+    assert plan.hints["planner_full_context_compaction_reason"] == "large_actionable_context"
 
 
 @pytest.mark.asyncio
@@ -1093,34 +1299,10 @@ async def test_skill_command_planner_reports_llm_unavailable_for_pptx_by_default
     assert plan.hints["shell_mode_escalated"] is True
     assert plan.hints["planning_blockers"][0]["failure_reason"] == "manual_command_required"
     assert plan.hints["planner"] == "free_shell"
+    assert plan.hints["manual_required_kind"] == "technical_blocked"
+    assert "free-shell planning" in str(plan.hints["planner_error_summary"]).lower()
     assert plan.command is None
     assert plan.generated_files == []
-
-
-@pytest.mark.asyncio
-async def test_skill_command_planner_can_still_use_deterministic_pptx_fallback_when_explicitly_enabled():
-    loaded_skill = _load_repo_skill("pptx")
-    planner = SkillCommandPlanner()
-
-    plan = await planner.plan(
-        loaded_skill=loaded_skill,
-        request=SkillExecutionRequest(
-            skill_name="pptx",
-            goal="创建一个关于生成式人工智能起源发展的演示文稿",
-            user_query="请生成一个关于生成式人工智能起源发展的PPT",
-            constraints={
-                "topic": "生成式人工智能起源发展",
-                "output_format": "pptx",
-                "allow_deterministic_fallback": True,
-            },
-        ),
-    )
-
-    assert plan.mode == "generated_script"
-    assert plan.failure_reason is None
-    assert plan.hints["planner"] == "deterministic_pptx_fallback"
-    assert plan.entrypoint == ".skill_generated/main.py"
-    assert plan.generated_files[0].path == ".skill_generated/main.py"
 
 
 @pytest.mark.asyncio
@@ -1163,12 +1345,34 @@ async def test_skill_command_planner_reports_free_shell_planning_failure_for_ppt
     assert plan.failure_reason == "llm_planning_failed"
     assert plan.shell_mode == "free_shell"
     assert plan.hints["planner"] == "free_shell"
+    assert plan.hints["manual_required_kind"] == "technical_blocked"
+    assert "planner crashed" in str(plan.hints["planner_error_summary"]).lower()
 
 
 @pytest.mark.asyncio
-async def test_skill_command_planner_can_opt_into_deterministic_pptx_fallback_when_free_shell_llm_fails():
+async def test_skill_command_planner_succeeds_with_micro_context_text_first_for_pptx():
     loaded_skill = _load_repo_skill("pptx")
-    planner = SkillCommandPlanner(llm_client=_FailingLLM())
+    llm = _JsonFailThenTextSuccessLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/main.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": "print('build pptx deck')\n",
+                    "description": "Generated PPTX workflow entrypoint.",
+                }
+            ],
+            "rationale": "Recovered with micro-context text planning.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python"],
+            "warnings": [],
+        }
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
 
     plan = await planner.plan(
         loaded_skill=loaded_skill,
@@ -1176,19 +1380,173 @@ async def test_skill_command_planner_can_opt_into_deterministic_pptx_fallback_wh
             skill_name="pptx",
             goal="创建一个关于生成式人工智能起源发展的演示文稿",
             user_query="请生成一个关于生成式人工智能起源发展的PPT",
-            constraints={
-                "topic": "生成式人工智能起源发展",
-                "output_format": "pptx",
-                "allow_deterministic_fallback": True,
-            },
+            constraints={"topic": "生成式人工智能起源发展", "output_format": "pptx"},
         ),
     )
 
     assert plan.mode == "generated_script"
     assert plan.failure_reason is None
-    assert plan.shell_mode == "free_shell"
-    assert plan.hints["planner"] == "deterministic_pptx_fallback"
-    assert plan.hints["deterministic_fallback_reason"] == "llm_planning_failed"
+    assert plan.hints["planner"] == "free_shell"
+    assert plan.hints["planner_context_mode"] == "micro_context"
+    assert plan.hints["planner_transport"] == "text_first"
+    assert len(plan.hints["planner_attempts"]) == 4
+    assert plan.hints["planner_attempts"][-1]["success"] is True
+    assert len(llm.calls) == 4
+    assert len(llm.text_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_succeeds_with_micro_context_text_first_for_pdf():
+    loaded_skill = _load_repo_skill("pdf")
+    llm = _JsonFailThenTextSuccessLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/main.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": "print('extract pdf tables')\n",
+                    "description": "Generated PDF workflow entrypoint.",
+                }
+            ],
+            "rationale": "Recovered with micro-context text planning.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python"],
+            "warnings": [],
+        }
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="pdf",
+            goal="创建一个季度总结 PDF 报告",
+            user_query="请生成一个季度总结 PDF 报告",
+            constraints={"output_format": "pdf", "topic": "季度总结"},
+        ),
+    )
+
+    assert plan.mode == "generated_script"
+    assert plan.failure_reason is None
+    assert plan.hints["planner"] == "free_shell"
+    assert plan.hints["planner_context_mode"] == "micro_context"
+    assert plan.hints["planner_transport"] == "text_first"
+    assert len(plan.hints["planner_attempts"]) == 4
+    assert len(llm.text_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_can_compact_repair_truncated_text_first_plan():
+    loaded_skill = _load_repo_skill("pptx")
+    llm = _MalformedTextThenCompactRepairLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/main.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": "print('compact repair')\n",
+                    "description": "Compact repaired PPTX workflow entrypoint.",
+                }
+            ],
+            "rationale": "Recovered by compacting a truncated generated-script plan.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python"],
+            "warnings": [],
+        }
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="pptx",
+            goal="创建一个关于科幻小说起源发展的演示文稿",
+            user_query="请生成一个关于科幻小说起源发展的PPT",
+            constraints={"topic": "科幻小说起源发展", "output_format": "pptx"},
+        ),
+    )
+
+    assert plan.mode == "generated_script"
+    assert plan.failure_reason is None
+    assert plan.hints["planner"] == "free_shell"
+    assert plan.hints["planner_context_mode"] == "micro_context"
+    assert plan.hints["planner_transport"] == "text_first"
+    assert len(plan.hints["planner_attempts"]) == 4
+    assert len(llm.text_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_does_not_auto_escalate_non_actionable_doc_skill():
+    loaded_skill = _load_repo_skill("company-values")
+    llm = _StubPlannerLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/main.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/main.py",
+                    "content": "print('should not run')\n",
+                    "description": "Unexpected helper.",
+                }
+            ],
+            "rationale": "Should never be used.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python"],
+            "warnings": [],
+        }
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="company-values",
+            goal="梳理公司价值观",
+            user_query="帮我总结 5 条公司价值观",
+            constraints={},
+        ),
+    )
+
+    assert plan.mode == "manual_required"
+    assert "planner_attempts" not in plan.hints
+    assert plan.hints.get("planner") != "free_shell"
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_reports_all_stage_failures_only_after_exhausting_planning_ladder():
+    loaded_skill = _load_repo_skill("pptx")
+    planner = SkillCommandPlanner(llm_client=_JsonAndTextFailLLM())
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="pptx",
+            goal="创建一个关于生成式人工智能起源发展的演示文稿",
+            user_query="请生成一个关于生成式人工智能起源发展的PPT",
+            constraints={"topic": "生成式人工智能起源发展", "output_format": "pptx"},
+        ),
+    )
+
+    assert plan.mode == "manual_required"
+    assert plan.failure_reason == "llm_planning_failed"
+    assert plan.hints["planner"] == "free_shell"
+    assert plan.hints["manual_required_kind"] == "technical_blocked"
+    assert plan.hints["planner_context_mode"] == "micro_context"
+    assert plan.hints["planner_transport"] == "text_first"
+    assert len(plan.hints["planner_attempts"]) == 4
+    assert all(item["success"] is False for item in plan.hints["planner_attempts"])
+    assert "text transport timed out" in str(plan.hints["planner_error_summary"]).lower()
 
 
 @pytest.mark.asyncio
@@ -1209,6 +1567,7 @@ async def test_skill_command_planner_keeps_missing_input_path_manual_for_edit_re
     assert plan.mode == "manual_required"
     assert plan.failure_reason == "missing_input_path"
     assert plan.hints["shell_mode_escalated"] is False
+    assert plan.hints["manual_required_kind"] == "user_actionable"
 
 
 @pytest.mark.asyncio
@@ -1307,6 +1666,109 @@ async def test_skill_command_planner_free_shell_allows_generated_script_when_shi
 
 
 @pytest.mark.asyncio
+async def test_skill_command_planner_strips_node_bootstrap_from_python_generated_plan():
+    loaded_skill = _load_repo_skill("pptx")
+    llm = _StubPlannerLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/create_presentation.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/create_presentation.py",
+                    "content": (
+                        "from pathlib import Path\n"
+                        "Path('output').mkdir(exist_ok=True)\n"
+                        "Path('output/presentation.pptx').write_bytes(b'pptx')\n"
+                    ),
+                    "description": "Pure Python presentation generator.",
+                }
+            ],
+            "bootstrap_commands": ["npm install -g pptxgenjs"],
+            "bootstrap_reason": "Install pptxgenjs first.",
+            "rationale": "Generate the presentation with a Python entrypoint.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["node", "npm"],
+            "warnings": [],
+        }
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="pptx",
+            goal="生成一个关于科幻小说起源发展的PPT",
+            user_query="生成一个关于科幻小说起源发展的PPT",
+            constraints={"shell_mode": "free_shell"},
+        ),
+    )
+
+    assert plan.mode == "generated_script"
+    assert plan.command == "python ./.skill_generated/create_presentation.py"
+    assert plan.bootstrap_commands == []
+    assert plan.bootstrap_reason == ""
+    assert plan.hints["required_tools"] == ["python"]
+    assert any("Dropped Node/npm bootstrap steps" in item for item in plan.hints["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_skill_command_planner_rewrites_known_node_package_from_pip_to_npm():
+    loaded_skill = _load_repo_skill("pptx")
+    llm = _StubPlannerLLM(
+        {
+            "mode": "generated_script",
+            "command": None,
+            "entrypoint": ".skill_generated/create_pptx.py",
+            "cli_args": [],
+            "generated_files": [
+                {
+                    "path": ".skill_generated/create_pptx.py",
+                    "content": (
+                        "from pathlib import Path\n"
+                        "import subprocess\n"
+                        "subprocess.run(['node', 'build_deck.js'], check=True)\n"
+                        "Path('output').mkdir(exist_ok=True)\n"
+                    ),
+                    "description": "Python wrapper that shells out to Node/PptxGenJS.",
+                }
+            ],
+            "bootstrap_commands": [
+                "python -m pip install pptxgenjs",
+                "python -m pip install --target \"$SKILL_BOOTSTRAP_SITE_PACKAGES\" markitdown[pptx] Pillow",
+            ],
+            "bootstrap_reason": "Install pptxgenjs and QA dependencies first.",
+            "rationale": "Generate the presentation with a Python wrapper plus Node runtime.",
+            "missing_fields": [],
+            "failure_reason": None,
+            "required_tools": ["python", "pip"],
+            "warnings": [],
+        }
+    )
+    planner = SkillCommandPlanner(llm_client=llm)
+
+    plan = await planner.plan(
+        loaded_skill=loaded_skill,
+        request=SkillExecutionRequest(
+            skill_name="pptx",
+            goal="生成一个关于科幻小说起源发展的PPT",
+            user_query="生成一个关于科幻小说起源发展的PPT",
+            constraints={"shell_mode": "free_shell"},
+        ),
+    )
+
+    assert plan.mode == "generated_script"
+    assert plan.bootstrap_commands[0] == "npm install -g pptxgenjs"
+    assert plan.bootstrap_commands[1].startswith("python -m pip install")
+    assert "markitdown[pptx]" in plan.bootstrap_commands[1]
+    assert "Pillow" in plan.bootstrap_commands[1]
+    assert plan.hints["required_tools"] == ["python", "pip", "node", "npm"]
+    assert any("Rewrote known Node package bootstrap from pip to npm" in item for item in plan.hints["warnings"])
+
+
+@pytest.mark.asyncio
 async def test_skill_executor_runs_through_command_planner_without_runtime():
     registry = SkillRegistry(Path("skills"))
     executor = SkillExecutor(registry=registry, loader=SkillLoader(registry))
@@ -1322,6 +1784,8 @@ async def test_skill_executor_runs_through_command_planner_without_runtime():
     assert result.data["run_status"] == "planned"
     assert result.data["status"] == "planned"
     assert result.data["command_plan"]["mode"] == "inferred"
+    assert "shell_hints" not in result.data
+    assert "file_inventory" not in result.data
 
 
 @pytest.mark.asyncio
@@ -1340,3 +1804,5 @@ async def test_skill_executor_returns_manual_required_without_runtime():
     assert result.data["run_status"] == "manual_required"
     assert result.data["status"] == "needs_shell_command"
     assert result.data["command_plan"]["mode"] == "manual_required"
+    assert "shell_hints" not in result.data
+    assert "file_inventory" not in result.data

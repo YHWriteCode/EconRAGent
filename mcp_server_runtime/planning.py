@@ -1,26 +1,31 @@
 from __future__ import annotations
 
+import ast
 import json
 import py_compile
+import re
 import shutil
 from pathlib import Path
 from typing import Any
 
 from kg_agent.skills.command_planner import (
+    _complete_json_via_text_first,
     SkillCommandPlanner,
+    build_skill_doc_bundle,
     build_portable_script_command,
-    build_shell_hints as build_skill_shell_hints,
     default_generated_file_command,
     default_generated_file_entrypoint,
     extract_python_examples,
     is_dry_run,
     maybe_promote_inline_python_to_generated_script,
+    normalize_free_shell_runtime_requirements,
     normalize_cli_args,
     normalize_generated_command,
     normalize_generated_entrypoint,
     normalize_generated_files,
     normalize_shell_command,
     normalize_shell_commands,
+    summarize_cli_history,
 )
 from kg_agent.skills.models import (
     LoadedSkill,
@@ -37,6 +42,16 @@ from .envs import (
 )
 from .skills import _build_loaded_skill, _load_skill_payload
 from .errors import SkillServerError
+
+GENERATED_FILE_REPAIR_PREVIEW_LIMIT = 2
+GENERATED_FILE_REPAIR_PREVIEW_CHARS = 2400
+KNOWN_NODE_ONLY_IMPORT_MODULES = {
+    "pptxgenjs",
+    "react",
+    "react_dom",
+    "react_icons",
+    "sharp",
+}
 
 
 def _build_skill_runtime_context(
@@ -114,6 +129,9 @@ def _build_free_shell_repair_prompt(
     preflight: dict[str, Any],
     repair_history: list[dict[str, Any]],
 ) -> tuple[str, str]:
+    doc_bundle = build_skill_doc_bundle(loaded_skill, request)
+    cli_history = summarize_cli_history(repair_history)
+    generated_file_previews = _compact_generated_file_previews(command_plan)
     system_prompt = (
         "You repair failed skill execution plans. "
         "When a conservative plan is stuck, you may upgrade it into a free-shell or generated-script plan. "
@@ -139,22 +157,24 @@ def _build_free_shell_repair_prompt(
         "Repair target runtime:\n"
         f"{json.dumps(command_plan.runtime_target.to_dict(), ensure_ascii=False, indent=2)}\n\n"
         "Original request:\n"
-        f"{json.dumps({'skill_name': request.skill_name, 'goal': request.goal, 'user_query': request.user_query, 'constraints': request.constraints}, ensure_ascii=False, indent=2)}\n\n"
+        f"{json.dumps({'skill_name': request.skill_name, 'goal': request.goal, 'user_query': request.user_query, 'constraints': request.constraints, 'effective_constraints': command_plan.constraints}, ensure_ascii=False, indent=2)}\n\n"
         "Previous command plan:\n"
         f"{json.dumps(command_plan.to_dict(), ensure_ascii=False, indent=2)}\n\n"
+        "Generated file previews from the failed plan:\n"
+        f"{json.dumps(generated_file_previews, ensure_ascii=False, indent=2)}\n\n"
+        "Progressive skill document bundle:\n"
+        f"{json.dumps(doc_bundle, ensure_ascii=False, indent=2)}\n\n"
         f"Current failure stage:\n{failure_stage}\n\n"
         f"Executed command:\n{command}\n\n"
         f"Exit code:\n{exit_code}\n\n"
         "Preflight result:\n"
         f"{json.dumps(preflight, ensure_ascii=False, indent=2)}\n\n"
-        "Prior repair history:\n"
-        f"{json.dumps(repair_history[-4:], ensure_ascii=False, indent=2)}\n\n"
+        "Bounded CLI history:\n"
+        f"{json.dumps(cli_history, ensure_ascii=False, indent=2)}\n\n"
         "stdout:\n"
         f"{stdout[-5000:]}\n\n"
         "stderr:\n"
         f"{stderr[-5000:]}\n\n"
-        "Full SKILL.md content:\n"
-        f"{loaded_skill.skill_md}\n\n"
         "Rules:\n"
         "1. Prefer the minimal repair that fixes the observed failure.\n"
         "2. Preserve the declared runtime target.\n"
@@ -166,13 +186,60 @@ def _build_free_shell_repair_prompt(
         "8. Treat natural-language dependency guidance anywhere in SKILL.md as valid repair input, even when there is no explicit Dependencies section.\n"
         "9. For isolated dependency bootstrap, prefer the provided bootstrap env variables instead of global installs. For Python packages, prefer commands such as python -m pip install --target \"$SKILL_BOOTSTRAP_SITE_PACKAGES\" <packages> on POSIX or python -m pip install --target $env:SKILL_BOOTSTRAP_SITE_PACKAGES <packages> on PowerShell. Plain python -m pip install <packages> is also acceptable because PIP_TARGET is preconfigured.\n"
         "10. For Node/global CLI bootstrap, prefer the provided bootstrap root via NPM_CONFIG_PREFIX instead of system-global npm installs.\n"
+        "10a. Do not use pip to install Node-only packages. For example, use npm install -g pptxgenjs, not python -m pip install pptxgenjs.\n"
         "11. If the current failure is in preflight, fix the plan itself instead of restating the same invalid command.\n"
-        "12. Treat the original goal, user query, structured constraints, and full SKILL.md as durable context. Prior repair history represents CLI execution history; use it to iteratively refine the next command instead of restarting from scratch.\n"
+        "12. Treat the original goal, user query, effective constraints, the progressive document bundle, and the bounded CLI history as durable context. Use the CLI history to iteratively refine the next command instead of restarting from scratch.\n"
         "13. If the original request is vague but recoverable with low-risk defaults, fill them and continue instead of returning manual_required.\n"
         "14. If the failure cannot be repaired safely within the remaining repair budget, return manual_required.\n"
+        "15. If the failed plan included generated_files, prefer the smallest edit that makes them runnable instead of regenerating an oversized helper.\n"
+        "16. Do not import Node-only packages from Python. Use a Node entrypoint for Node/npm libraries.\n"
+        "17. When the docs include concrete code examples or API names, follow those documented APIs exactly instead of inventing alternatives.\n"
         "Keep JSON valid and do not include markdown fences."
     )
     return system_prompt, user_prompt
+
+
+def _compact_generated_file_previews(command_plan: SkillCommandPlan) -> list[dict[str, Any]]:
+    previews: list[dict[str, Any]] = []
+    for generated_file in command_plan.generated_files[:GENERATED_FILE_REPAIR_PREVIEW_LIMIT]:
+        previews.append(
+            {
+                "path": generated_file.path,
+                "description": generated_file.description,
+                "content_preview": str(generated_file.content)[:GENERATED_FILE_REPAIR_PREVIEW_CHARS],
+            }
+        )
+    return previews
+
+
+def _extract_python_import_roots(source: str) -> list[str]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = str(alias.name or "").split(".", 1)[0].strip()
+                if root:
+                    imports.append(root)
+        elif isinstance(node, ast.ImportFrom):
+            module = str(node.module or "").split(".", 1)[0].strip()
+            if module:
+                imports.append(module)
+    return imports
+
+
+def _detect_node_only_python_imports(source: str) -> list[str]:
+    imports = _extract_python_import_roots(source)
+    return sorted(
+        {
+            item
+            for item in imports
+            if item.lower() in KNOWN_NODE_ONLY_IMPORT_MODULES
+        }
+    )
 
 
 def _preflight_required_tools(
@@ -197,6 +264,36 @@ def _preflight_required_tools(
             }
         )
     return tools
+
+
+def _preflight_bootstrap_can_provision_tools(
+    command_plan: SkillCommandPlan,
+) -> bool:
+    return (
+        command_plan.shell_mode == "free_shell"
+        and isinstance(command_plan.bootstrap_commands, list)
+        and any(str(command or "").strip() for command in command_plan.bootstrap_commands)
+    )
+
+
+def _missing_tool_is_bootstrap_pending(
+    *,
+    tool_name: str,
+    command_plan: SkillCommandPlan,
+) -> bool:
+    if not _preflight_bootstrap_can_provision_tools(command_plan):
+        return False
+    normalized_tool = str(tool_name or "").strip().lower()
+    if not normalized_tool or normalized_tool in {"python", "pip"}:
+        return False
+    if normalized_tool in {"node", "npm", "npx", "yarn", "pnpm"}:
+        return True
+    bootstrap_commands = [
+        str(command or "").strip().lower()
+        for command in command_plan.bootstrap_commands
+        if str(command or "").strip()
+    ]
+    return any(normalized_tool in command for command in bootstrap_commands)
 
 
 def _validate_generated_file_specs(command_plan: SkillCommandPlan) -> list[dict[str, Any]]:
@@ -246,7 +343,19 @@ def _run_preflight(
             break
 
     if failure_reason is None:
-        missing_tools = [item["name"] for item in required_tools if not item["available"]]
+        missing_tools: list[str] = []
+        for item in required_tools:
+            available = bool(item.get("available"))
+            bootstrap_pending = bool(
+                not available
+                and _missing_tool_is_bootstrap_pending(
+                    tool_name=str(item.get("name", "")).strip(),
+                    command_plan=command_plan,
+                )
+            )
+            item["bootstrap_pending"] = bootstrap_pending
+            if not available and not bootstrap_pending:
+                missing_tools.append(str(item.get("name", "")).strip())
         if missing_tools:
             failure_reason = "missing_required_tools"
             status = "manual_required"
@@ -296,6 +405,14 @@ def _run_preflight(
                 failure_reason = "generated_python_syntax_error"
                 status = "manual_required"
                 break
+            node_only_imports = _detect_node_only_python_imports(
+                target.read_text(encoding="utf-8")
+            )
+            item["python_imports"] = node_only_imports
+            if node_only_imports:
+                failure_reason = "generated_python_node_only_import"
+                status = "manual_required"
+                break
 
     preflight = {
         "status": status,
@@ -335,12 +452,21 @@ async def _attempt_repair_plan(
         preflight=preflight,
         repair_history=repair_history,
     )
-    payload = await llm_client.complete_json(
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        temperature=0.0,
-        max_tokens=1800,
-    )
+    try:
+        payload = await llm_client.complete_json(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=0.0,
+            max_tokens=3200,
+        )
+    except Exception:
+        payload = await _complete_json_via_text_first(
+            llm_client,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=0.0,
+            max_tokens=3200,
+        )
     generated_files = normalize_generated_files(payload.get("generated_files"))
     cli_args = normalize_cli_args(payload.get("cli_args")) or []
     bootstrap_commands = normalize_shell_commands(payload.get("bootstrap_commands"))
@@ -413,6 +539,21 @@ async def _attempt_repair_plan(
         )
         if isinstance(item, (str, int, float))
     ]
+    (
+        bootstrap_commands,
+        required_tools,
+        warnings,
+        bootstrap_reason,
+    ) = normalize_free_shell_runtime_requirements(
+        runtime_target=command_plan.runtime_target,
+        command=base_plan.command,
+        entrypoint=base_plan.entrypoint,
+        generated_files=list(base_plan.generated_files),
+        bootstrap_commands=list(base_plan.bootstrap_commands),
+        required_tools=required_tools,
+        warnings=warnings,
+        bootstrap_reason=base_plan.bootstrap_reason,
+    )
     repaired_plan = SkillCommandPlan(
         skill_name=base_plan.skill_name,
         goal=base_plan.goal,
@@ -426,8 +567,8 @@ async def _attempt_repair_plan(
         entrypoint=base_plan.entrypoint,
         cli_args=list(base_plan.cli_args),
         generated_files=list(base_plan.generated_files),
-        bootstrap_commands=list(base_plan.bootstrap_commands),
-        bootstrap_reason=base_plan.bootstrap_reason,
+        bootstrap_commands=list(bootstrap_commands),
+        bootstrap_reason=bootstrap_reason,
         missing_fields=list(base_plan.missing_fields),
         failure_reason=base_plan.failure_reason,
         hints={
@@ -571,13 +712,8 @@ def _build_run_record_payload(
             "constraints": constraints,
             "skill": {
                 "name": payload["name"],
-                "description": payload["description"],
-                "tags": payload["tags"],
                 "path": payload["path"],
             },
-            "file_inventory": payload["file_inventory"],
-            "references": payload["references"],
-            "shell_hints": build_skill_shell_hints(loaded_skill),
         }
     )
     return data

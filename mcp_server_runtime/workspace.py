@@ -19,6 +19,10 @@ INTERNAL_RUNTIME_DIRNAME = ".skill_runtime"
 TERMINAL_SNAPSHOT_FILENAME = "terminal_run_record.json"
 SKILL_INVOCATION_FILENAME = "skill_invocation.json"
 SKILL_CONTEXT_FILENAME = "skill_context.json"
+TRANSPORT_WARNING_LIMIT = 3
+TRANSPORT_WARNING_CHARS = 240
+TRANSPORT_HISTORY_LIMIT = 3
+TRANSPORT_HISTORY_TAIL_CHARS = 400
 
 
 def _skill_invocation_path(workspace_dir: Path) -> Path:
@@ -330,7 +334,24 @@ def _compact_generated_files_for_transport(
 
 
 def _compact_command_plan_for_transport(command_plan: dict[str, Any]) -> dict[str, Any]:
-    compacted = dict(command_plan)
+    compacted: dict[str, Any] = {}
+    for key in (
+        "constraints",
+        "command",
+        "mode",
+        "shell_mode",
+        "rationale",
+        "entrypoint",
+        "cli_args",
+        "generated_files",
+        "bootstrap_commands",
+        "bootstrap_reason",
+        "missing_fields",
+        "failure_reason",
+        "hints",
+    ):
+        if key in command_plan:
+            compacted[key] = command_plan[key]
     generated_files = compacted.get("generated_files")
     if isinstance(generated_files, list):
         compacted_generated_files, any_truncated = _compact_generated_files_for_transport(
@@ -345,15 +366,227 @@ def _compact_command_plan_for_transport(command_plan: dict[str, Any]) -> dict[st
             )
             hints["generated_files_transport_compacted"] = True
             compacted["hints"] = hints
+    hints = compacted.get("hints")
+    if isinstance(hints, dict):
+        compacted["hints"] = _compact_command_plan_hints_for_transport(hints)
     return compacted
+
+
+def _truncate_transport_text(value: Any, *, max_chars: int) -> str:
+    preview, _ = truncate_utf8_text(str(value or ""), max_bytes=max_chars * 4)
+    return preview
+
+
+def _compact_warning_list(warnings: Any) -> list[str]:
+    compacted: list[str] = []
+    if not isinstance(warnings, list):
+        return compacted
+    for item in warnings[:TRANSPORT_WARNING_LIMIT]:
+        compacted.append(
+            _truncate_transport_text(item, max_chars=TRANSPORT_WARNING_CHARS)
+        )
+    return compacted
+
+
+def _compact_constraint_inference_for_transport(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    compacted: dict[str, Any] = {}
+    for key in ("planner", "status", "confidence"):
+        if key in value:
+            compacted[key] = value[key]
+    applied = value.get("applied")
+    if isinstance(applied, dict) and applied:
+        compacted["applied"] = dict(applied)
+    return compacted or None
+
+
+def _compact_planner_attempts_for_transport(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    compacted: list[dict[str, Any]] = []
+    for item in value[-6:]:
+        if not isinstance(item, dict):
+            continue
+        compacted.append(
+            {
+                "attempt_index": item.get("attempt_index"),
+                "label": item.get("label"),
+                "transport": item.get("transport"),
+                "max_tokens": item.get("max_tokens"),
+                "success": item.get("success"),
+                "error_summary": _truncate_transport_text(
+                    item.get("error_summary", ""),
+                    max_chars=TRANSPORT_WARNING_CHARS,
+                ),
+            }
+        )
+    return compacted or None
+
+
+def _compact_blockers_for_transport(value: Any) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    if not isinstance(value, list):
+        return compacted
+    for item in value[:TRANSPORT_HISTORY_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        compacted.append(
+            {
+                "failure_reason": item.get("failure_reason"),
+                "missing_fields": list(item.get("missing_fields", []))
+                if isinstance(item.get("missing_fields"), list)
+                else [],
+                "rationale": _truncate_transport_text(
+                    item.get("rationale", ""),
+                    max_chars=TRANSPORT_WARNING_CHARS,
+                )
+                or None,
+            }
+        )
+    return compacted
+
+
+def _compact_command_plan_hints_for_transport(hints: dict[str, Any]) -> dict[str, Any]:
+    compacted: dict[str, Any] = {}
+    for key in (
+        "planner",
+        "planner_context_mode",
+        "planner_transport",
+        "shell_mode_requested",
+        "shell_mode_effective",
+        "shell_mode_escalated",
+        "shell_mode_escalation_reason",
+        "auto_inferred_constraints",
+        "manual_required_kind",
+        "planner_error_summary",
+        "generated_files_transport_compacted",
+        "promoted_inline_python_to_generated_script",
+    ):
+        if key not in hints:
+            continue
+        value = hints[key]
+        if key == "planner_error_summary":
+            compacted[key] = _truncate_transport_text(value, max_chars=TRANSPORT_WARNING_CHARS)
+        elif key == "auto_inferred_constraints" and isinstance(value, dict):
+            compacted[key] = dict(value)
+        else:
+            compacted[key] = value
+    required_tools = hints.get("required_tools")
+    if isinstance(required_tools, list) and required_tools:
+        compacted["required_tools"] = [
+            str(item)
+            for item in required_tools[:8]
+            if isinstance(item, (str, int, float))
+        ]
+    warnings = _compact_warning_list(hints.get("warnings"))
+    if warnings:
+        compacted["warnings"] = warnings
+    blockers = _compact_blockers_for_transport(hints.get("planning_blockers"))
+    if blockers:
+        compacted["planning_blockers"] = blockers
+    constraint_inference = _compact_constraint_inference_for_transport(
+        hints.get("constraint_inference")
+    )
+    if constraint_inference:
+        compacted["constraint_inference"] = constraint_inference
+    planner_attempts = _compact_planner_attempts_for_transport(hints.get("planner_attempts"))
+    if planner_attempts:
+        compacted["planner_attempts"] = planner_attempts
+    return compacted
+
+
+def _compact_skill_for_transport(skill: Any) -> dict[str, Any] | None:
+    if not isinstance(skill, dict):
+        return None
+    compacted: dict[str, Any] = {}
+    for key in ("name", "path", "tags"):
+        if key in skill:
+            compacted[key] = skill[key]
+    return compacted or None
+
+
+def _compact_history_entries(history: Any) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    if not isinstance(history, list):
+        return compacted
+    for item in history[-TRANSPORT_HISTORY_LIMIT:]:
+        if not isinstance(item, dict):
+            continue
+        compacted.append(
+            {
+                "attempt_index": item.get("attempt_index"),
+                "snapshot_run_id": item.get("snapshot_run_id"),
+                "stage": item.get("stage"),
+                "command": _truncate_transport_text(
+                    item.get("command", ""),
+                    max_chars=TRANSPORT_WARNING_CHARS,
+                )
+                or None,
+                "success": item.get("success"),
+                "failure_reason": item.get("failure_reason"),
+                "exit_code": item.get("exit_code"),
+                "duration_s": item.get("duration_s"),
+                "stdout_tail": _truncate_transport_text(
+                    item.get("stdout_tail", ""),
+                    max_chars=TRANSPORT_HISTORY_TAIL_CHARS,
+                ),
+                "stderr_tail": _truncate_transport_text(
+                    item.get("stderr_tail", ""),
+                    max_chars=TRANSPORT_HISTORY_TAIL_CHARS,
+                ),
+            }
+        )
+    return compacted
+
+
+def _promote_transport_fields_from_command_plan(
+    payload: dict[str, Any],
+    command_plan: dict[str, Any],
+) -> None:
+    hints = (
+        dict(command_plan.get("hints", {}))
+        if isinstance(command_plan.get("hints"), dict)
+        else {}
+    )
+    for top_level_key, hint_key in (
+        ("planner_context_mode", "planner_context_mode"),
+        ("planner_transport", "planner_transport"),
+        ("planner_attempts", "planner_attempts"),
+        ("shell_mode_requested", "shell_mode_requested"),
+        ("shell_mode_effective", "shell_mode_effective"),
+        ("shell_mode_escalated", "shell_mode_escalated"),
+        ("shell_mode_escalation_reason", "shell_mode_escalation_reason"),
+        ("auto_inferred_constraints", "auto_inferred_constraints"),
+        ("planning_blockers", "planning_blockers"),
+        ("manual_required_kind", "manual_required_kind"),
+        ("planner_error_summary", "planner_error_summary"),
+    ):
+        if top_level_key not in payload and hint_key in hints:
+            payload[top_level_key] = hints.get(hint_key)
 
 
 def _prepare_transport_payload(payload: dict[str, Any]) -> dict[str, Any]:
     transport_payload = dict(payload)
     command_plan = transport_payload.get("command_plan")
     if isinstance(command_plan, dict):
-        transport_payload["command_plan"] = _compact_command_plan_for_transport(
-            command_plan
+        transport_payload["command_plan"] = _compact_command_plan_for_transport(command_plan)
+        _promote_transport_fields_from_command_plan(
+            transport_payload,
+            transport_payload["command_plan"],
+        )
+    skill = _compact_skill_for_transport(transport_payload.get("skill"))
+    if skill is not None:
+        transport_payload["skill"] = skill
+    for noisy_key in ("file_inventory", "references", "shell_hints"):
+        transport_payload.pop(noisy_key, None)
+    if "repair_history" in transport_payload:
+        transport_payload["repair_history"] = _compact_history_entries(
+            transport_payload.get("repair_history")
+        )
+    if "bootstrap_history" in transport_payload:
+        transport_payload["bootstrap_history"] = _compact_history_entries(
+            transport_payload.get("bootstrap_history")
         )
     return transport_payload
 

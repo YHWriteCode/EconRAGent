@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from kg_agent.skills.command_planner import SkillCommandPlanner, build_shell_hints
+from kg_agent.skills.command_planner import SkillCommandPlanner
 from kg_agent.skills.loader import SkillLoader
 from kg_agent.skills.models import (
     LoadedSkill,
@@ -88,7 +88,6 @@ class SkillExecutor:
             loaded_skill=loaded_skill,
             request=request,
         )
-        shell_hints = build_shell_hints(loaded_skill)
 
         run_record: SkillRunRecord
         if self.runtime_client is not None:
@@ -144,9 +143,11 @@ class SkillExecutor:
                 "workspace": run_record.workspace or workspace,
                 "requested_workspace": workspace,
                 "constraints": dict(constraints or {}),
-                "skill": skill.to_catalog_dict(),
-                "file_inventory": [item.to_dict() for item in loaded_skill.file_inventory],
-                "shell_hints": shell_hints,
+                "skill": {
+                    "name": skill.name,
+                    "path": str(skill.path),
+                    "tags": list(skill.tags),
+                },
             }
         )
 
