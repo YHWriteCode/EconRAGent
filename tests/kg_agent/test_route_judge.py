@@ -291,6 +291,140 @@ async def test_route_judge_answers_agent_metadata_without_kg_retrieval():
 
 
 @pytest.mark.asyncio
+async def test_route_judge_selects_pricing_skill_from_explicit_chinese_skill_request():
+    llm_client = _CapturingLLMClient(
+        {
+            "skill_name": "pricing",
+            "reason": "The request is about setting a price, which matches the pricing skill description.",
+            "confidence": "high",
+        }
+    )
+    judge = RouteJudge(llm_client=llm_client, default_max_iterations=3)
+
+    route = await judge.plan(
+        query="使用定价技能，我家从野外采摘了不少艾草，并配合糯米手工制作了不少米果，我该怎么定价好些？",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pricing",
+                "description": (
+                    "Help figure out pricing for a product or service. "
+                    "Use when someone is setting prices, considering price changes, "
+                    "or struggling with what to charge."
+                ),
+                "tags": [],
+                "path": "/skills/pricing",
+            }
+        ],
+    )
+
+    assert route.strategy == "skill_request"
+    assert route.need_tools is False
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pricing"
+    assert len(llm_client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_route_judge_selects_pricing_skill_from_problem_semantics_without_explicit_skill_phrase():
+    llm_client = _CapturingLLMClient(
+        {
+            "skill_name": "pricing",
+            "reason": "The request is asking how to price a handmade product, which directly matches the pricing skill.",
+            "confidence": "high",
+        }
+    )
+    judge = RouteJudge(llm_client=llm_client, default_max_iterations=3)
+
+    route = await judge.plan(
+        query="我家手工做了不少艾草糯米米果，应该怎么定价才更合适？",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pricing",
+                "description": (
+                    "Help figure out pricing for a product or service. "
+                    "Use when someone is setting prices, considering price changes, "
+                    "or struggling with what to charge."
+                ),
+                "tags": [],
+                "path": "/skills/pricing",
+            },
+            {
+                "name": "marketing-plan",
+                "description": "Create a marketing plan for a small business.",
+                "tags": [],
+                "path": "/skills/marketing-plan",
+            },
+        ],
+    )
+
+    assert route.strategy == "skill_request"
+    assert route.need_tools is False
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pricing"
+    assert len(llm_client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_route_judge_llm_refinement_cannot_downgrade_semantic_pricing_skill_request():
+    llm_client = _CapturingLLMClient(
+        [
+            {
+                "skill_name": "pricing",
+                "reason": "The query is a pricing problem and the pricing skill is the best direct fit.",
+                "confidence": "high",
+            },
+            {
+                "need_tools": True,
+                "need_memory": False,
+                "need_web_search": False,
+                "need_path_explanation": False,
+                "strategy": "factual_qa",
+                "tool_sequence": [{"tool": "kg_hybrid_search", "args": {}, "optional": False}],
+                "reason": "fallback to hybrid retrieval",
+                "max_iterations": 3,
+            },
+        ]
+    )
+    judge = RouteJudge(llm_client=llm_client, default_max_iterations=3)
+
+    route = await judge.plan(
+        query="我家手工做了不少艾草糯米米果，应该怎么定价才更合适？",
+        session_context={"history": []},
+        user_profile={},
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pricing",
+                "description": (
+                    "Help figure out pricing for a product or service. "
+                    "Use when someone is setting prices, considering price changes, "
+                    "or struggling with what to charge."
+                ),
+                "tags": [],
+                "path": "/skills/pricing",
+            },
+            {
+                "name": "marketing-plan",
+                "description": "Create a marketing plan for a small business.",
+                "tags": [],
+                "path": "/skills/marketing-plan",
+            },
+        ],
+    )
+
+    assert route.strategy == "skill_request"
+    assert route.skill_plan is not None
+    assert route.skill_plan.skill_name == "pricing"
+    assert len(llm_client.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_route_judge_llm_refinement_cannot_downgrade_skill_request_to_factual_qa():
     llm_client = _CapturingLLMClient(
         {
@@ -466,6 +600,10 @@ class _CapturingLLMClient:
 
     async def complete_json(self, **kwargs):
         self.calls.append(kwargs)
+        if isinstance(self.payload, list):
+            if not self.payload:
+                raise AssertionError("No queued LLM payload available for test.")
+            return self.payload.pop(0)
         return self.payload
 
 

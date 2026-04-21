@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from kg_agent.skills.command_planner import SkillCommandPlanner
+from kg_agent.skills.command_planner import (
+    SkillCommandPlanner,
+    build_skill_doc_bundle,
+    compact_skill_doc_bundle,
+    extract_documented_entrypoint_paths,
+)
 from kg_agent.skills.loader import SkillLoader
 from kg_agent.skills.models import (
     LoadedSkill,
@@ -84,6 +89,16 @@ class SkillExecutor:
             ),
             constraints=constraints or {},
         )
+        if self._is_doc_advisory_skill(loaded_skill):
+            return self._build_doc_advisory_result(
+                skill_name=skill_name,
+                goal=goal,
+                user_query=user_query,
+                workspace=workspace,
+                constraints=constraints or {},
+                loaded_skill=loaded_skill,
+                request=request,
+            )
         command_plan = await self.command_planner.plan(
             loaded_skill=loaded_skill,
             request=request,
@@ -157,6 +172,66 @@ class SkillExecutor:
             data=data,
             metadata={"executor": "skill", "skill_name": skill_name},
             error=None if run_record.success else run_record.summary,
+        )
+
+    @staticmethod
+    def _is_doc_advisory_skill(loaded_skill: LoadedSkill) -> bool:
+        runtime_requirements = loaded_skill.skill.metadata.get("runtime_requirements")
+        if isinstance(runtime_requirements, str) and runtime_requirements.strip():
+            return False
+        if any(item.kind == "script" for item in loaded_skill.file_inventory):
+            return False
+        if extract_documented_entrypoint_paths(loaded_skill.skill_md):
+            return False
+        return True
+
+    def _build_doc_advisory_result(
+        self,
+        *,
+        skill_name: str,
+        goal: str,
+        user_query: str,
+        workspace: str | None,
+        constraints: dict[str, Any],
+        loaded_skill: LoadedSkill,
+        request: SkillExecutionRequest,
+    ) -> ToolResult:
+        tool_name = f"skill:{skill_name}"
+        doc_bundle = compact_skill_doc_bundle(build_skill_doc_bundle(loaded_skill, request))
+        data = {
+            "summary": (
+                f"Loaded advisory guidance from skill '{skill_name}' directly from "
+                "SKILL.md and progressively discovered follow-up docs."
+            ),
+            "status": "completed",
+            "run_status": "completed",
+            "skill_name": skill_name,
+            "goal": goal,
+            "user_query": user_query,
+            "workspace": workspace,
+            "requested_workspace": workspace,
+            "constraints": dict(constraints),
+            "execution_mode": "doc_advisory",
+            "advisory_mode": "doc_only",
+            "command_plan": {
+                "mode": "doc_advisory",
+                "entrypoint": None,
+                "missing_fields": [],
+                "failure_reason": None,
+            },
+            "doc_bundle": doc_bundle,
+            "skill": {
+                "name": loaded_skill.skill.name,
+                "description": loaded_skill.skill.description,
+                "path": str(loaded_skill.skill.path),
+                "tags": list(loaded_skill.skill.tags),
+            },
+        }
+        return ToolResult(
+            tool_name=tool_name,
+            success=True,
+            data=data,
+            metadata={"executor": "skill", "skill_name": skill_name},
         )
 
     async def get_run_status(self, *, run_id: str) -> dict[str, Any]:

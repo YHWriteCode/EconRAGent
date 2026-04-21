@@ -2,6 +2,7 @@ from kg_agent.agent.prompts import (
     DEFAULT_PATH_EXPLAINER_TEMPLATE_ID,
     build_final_answer_prompt,
     build_skill_constraint_inference_prompt,
+    build_skill_catalog_selector_prompt,
     build_skill_free_shell_planner_prompt,
     build_path_explainer_prompt,
     list_path_explainer_prompt_templates,
@@ -93,6 +94,27 @@ def test_build_route_judge_prompt_includes_skills_and_skill_plan_contract():
     assert "include structured constraints when they are explicit in the user query" in user_prompt
 
 
+def test_build_skill_catalog_selector_prompt_uses_skill_metadata_as_primary_surface():
+    system_prompt, user_prompt = build_skill_catalog_selector_prompt(
+        query="我家手工做了不少艾草糯米米果，应该怎么定价才更合适？",
+        available_skills=[
+            {
+                "name": "pricing",
+                "description": "Help figure out pricing for a product or service.",
+                "tags": ["pricing"],
+                "path": "/skills/pricing",
+            }
+        ],
+        current_plan={"strategy": "factual_qa"},
+    )
+
+    assert "semantic skill selector" in system_prompt.lower()
+    assert "Cross-lingual semantic matching is allowed." in system_prompt
+    assert "Do not require exact name overlap" in system_prompt
+    assert "Available skills:" in user_prompt
+    assert '"skill_name": str | null' in user_prompt
+
+
 def test_build_final_answer_prompt_includes_capability_and_skill_catalogs():
     system_prompt, user_prompt = build_final_answer_prompt(
         query="你有哪些工具和技能？",
@@ -118,6 +140,8 @@ def test_build_final_answer_prompt_includes_capability_and_skill_catalogs():
     assert "financial-researching" in user_prompt
     assert "manual_required_kind='technical_blocked'" in system_prompt
     assert "do not add generic retry advice" in system_prompt
+    assert "advisory_mode='doc_only'" in system_prompt
+    assert "reasoned recommendations, estimates, or suggested ranges" in system_prompt
 
 
 def test_build_skill_constraint_inference_prompt_includes_reference_date_and_allowed_keys():

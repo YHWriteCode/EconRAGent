@@ -7,6 +7,7 @@ from typing import Any
 from kg_agent.agent.prompts import (
     DEFAULT_ROUTE_JUDGE_PROMPT_VERSION,
     build_route_judge_prompt,
+    build_skill_catalog_selector_prompt,
     resolve_route_judge_prompt_version,
 )
 from kg_agent.skills import SkillPlan
@@ -387,6 +388,18 @@ SEARCH_ALIASES_BY_NAME = {
         "\u6587\u4ef6",
     ],
 }
+EXPLICIT_SKILL_REFERENCE_PATTERN = re.compile(
+    r"(?:使用|用|调用|运行|启用|请用|use|using|run|invoke)\s*(?P<target>[^,，。.!！？]{1,40}?)\s*(?:技能|skill|workflow|工作流)",
+    re.IGNORECASE,
+)
+MEMORY_ROUTE_TOOLS = {"memory_search", "cross_session_search"}
+LLM_SEMANTIC_SKILL_ROUTE_STRATEGIES = {
+    "factual_qa",
+    "memory_first_then_hybrid",
+    "simple_answer_no_tool",
+    "cross_session_memory_first",
+    "kg_hybrid_entity_fallback",
+}
 
 
 @dataclass
@@ -448,6 +461,13 @@ class RouteJudge:
             capability_catalog=capability_catalog,
             skill_catalog=skill_catalog,
         )
+        semantic_skill_decision = await self._maybe_select_skill_with_llm(
+            query=query,
+            skill_catalog=skill_catalog,
+            base_decision=base_decision,
+        )
+        if semantic_skill_decision is not None:
+            return semantic_skill_decision
         refined = await self._maybe_refine_with_llm(
             query=query,
             session_context=session_context,
@@ -458,6 +478,74 @@ class RouteJudge:
             base_decision=base_decision,
         )
         return refined or base_decision
+
+    async def _maybe_select_skill_with_llm(
+        self,
+        *,
+        query: str,
+        skill_catalog: list[dict[str, Any]],
+        base_decision: RouteDecision,
+    ) -> RouteDecision | None:
+        if (
+            self.llm_client is None
+            or not self.llm_client.is_available()
+            or not skill_catalog
+            or base_decision.skill_plan is not None
+            or base_decision.strategy not in LLM_SEMANTIC_SKILL_ROUTE_STRATEGIES
+        ):
+            return None
+        system_prompt, user_prompt = build_skill_catalog_selector_prompt(
+            query=query,
+            available_skills=skill_catalog,
+            current_plan=asdict(base_decision),
+        )
+        try:
+            payload = await self.llm_client.complete_json(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                temperature=0.0,
+                max_tokens=300,
+            )
+        except Exception:
+            return None
+
+        matched_skill = self._parse_semantic_skill_selector_payload(
+            payload,
+            available_skills=skill_catalog,
+        )
+        if matched_skill is None:
+            return None
+
+        memory_sequence = [
+            item
+            for item in base_decision.tool_sequence
+            if item.tool in MEMORY_ROUTE_TOOLS
+        ]
+        skill_constraints = self._build_skill_constraints(
+            query=query,
+            matched_skill=matched_skill,
+        )
+        reason = str(payload.get("reason", "")).strip() or (
+            f"Selected local skill '{matched_skill['name']}' from the skill catalog "
+            "using the query and skill metadata."
+        )
+        skill_plan = SkillPlan(
+            skill_name=matched_skill["name"],
+            goal=self._build_skill_goal(query, matched_skill),
+            reason=reason,
+            constraints=skill_constraints,
+        )
+        return RouteDecision(
+            need_tools=bool(memory_sequence),
+            need_memory=bool(memory_sequence),
+            need_web_search=False,
+            need_path_explanation=False,
+            strategy="memory_first_then_skill" if memory_sequence else "skill_request",
+            tool_sequence=memory_sequence,
+            reason=reason,
+            max_iterations=max(1, self.default_max_iterations),
+            skill_plan=skill_plan,
+        )
 
     def _rule_based_fallback(
         self,
@@ -1131,6 +1219,25 @@ class RouteJudge:
                     reverse=True,
                 )
                 return ranked_finance[0][1]
+        explicit_skill_reference = cls._extract_explicit_skill_reference(query)
+        if explicit_skill_reference:
+            explicit_ranked = sorted(
+                (
+                    (
+                        cls._score_search_match(
+                            query=explicit_skill_reference,
+                            item=skill,
+                        ),
+                        skill,
+                    )
+                    for skill in skill_catalog
+                ),
+                key=lambda item: (item[0], item[1]["name"]),
+                reverse=True,
+            )
+            explicit_best_score, explicit_best_skill = explicit_ranked[0]
+            if explicit_best_score >= 2:
+                return explicit_best_skill
         ranked = sorted(
             (
                 (cls._score_search_match(query=query, item=skill), skill)
@@ -1147,6 +1254,9 @@ class RouteJudge:
         if SKILL_REQUEST_PATTERN.search(query or "") and best_score >= 3:
             return best_skill
         if SPECIALIZED_EXTERNAL_CAPABILITY_PATTERN.search(query or "") and best_score >= 2:
+            return best_skill
+        second_score = ranked[1][0] if len(ranked) > 1 else -1
+        if best_score >= 3 and (second_score <= 1 or best_score >= second_score + 2):
             return best_skill
         return None
 
@@ -1232,18 +1342,26 @@ class RouteJudge:
             return len(normalized) >= 2
         return len(normalized) >= 3
 
+    @classmethod
+    def _build_search_text(cls, item: dict[str, Any]) -> str:
+        return " ".join(cls._build_search_parts(item)).replace("_", " ").replace("-", " ").strip().lower()
+
     @staticmethod
-    def _build_search_text(item: dict[str, Any]) -> str:
+    def _build_search_parts(item: dict[str, Any]) -> list[str]:
         parts = [
             str(item.get("name", "")),
             str(item.get("description", "")),
-            " ".join(RouteJudge._collect_search_tags(item)),
+            " ".join(
+                str(tag)
+                for tag in item.get("tags", [])
+                if isinstance(tag, str)
+            ),
             " ".join(str(arg) for arg in item.get("arg_names", []) if isinstance(arg, str)),
             " ".join(
                 str(arg) for arg in item.get("required_args", []) if isinstance(arg, str)
             ),
         ]
-        return " ".join(parts).replace("_", " ").replace("-", " ").strip().lower()
+        return parts
 
     @classmethod
     def _collect_search_tags(cls, item: dict[str, Any]) -> list[str]:
@@ -1266,6 +1384,14 @@ class RouteJudge:
             seen.add(normalized)
             tags.append(normalized)
         return tags
+
+    @staticmethod
+    def _extract_explicit_skill_reference(query: str) -> str | None:
+        match = EXPLICIT_SKILL_REFERENCE_PATTERN.search(query or "")
+        if not match:
+            return None
+        target = str(match.group("target") or "").strip().strip("“”\"'‘’")
+        return target or None
 
     @staticmethod
     def _extract_query_terms(query: str) -> list[str]:
@@ -1296,6 +1422,8 @@ class RouteJudge:
         skill_name = str(matched_skill.get("name", "")).strip().lower()
         if skill_name and skill_name in query_lower:
             return True
+        if RouteJudge._extract_explicit_skill_reference(query):
+            return True
         if (
             RouteJudge._is_financial_market_query(query)
             and RouteJudge._is_finance_skill(matched_skill)
@@ -1307,7 +1435,7 @@ class RouteJudge:
             or needs_specialized_external_capability
         ):
             return True
-        return RouteJudge._score_search_match(query=query, item=matched_skill) >= 6
+        return RouteJudge._score_search_match(query=query, item=matched_skill) >= 3
 
     @classmethod
     def _should_lock_rule_based_route(
@@ -1342,9 +1470,13 @@ class RouteJudge:
         )
         if matched_skill is None:
             return False
-        return cls._is_financial_market_query(query_text) and cls._is_finance_skill(
+        if cls._extract_explicit_skill_reference(query_text):
+            return True
+        if cls._is_financial_market_query(query_text) and cls._is_finance_skill(
             matched_skill
-        )
+        ):
+            return True
+        return cls._score_search_match(query=query_text, item=matched_skill) >= 3
 
     @staticmethod
     def _is_financial_market_query(query: str) -> bool:
@@ -1730,6 +1862,28 @@ class RouteJudge:
             reason=reason,
             constraints=constraints if isinstance(constraints, dict) else {},
         )
+
+    @staticmethod
+    def _parse_semantic_skill_selector_payload(
+        payload: Any,
+        *,
+        available_skills: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        confidence = str(payload.get("confidence", "")).strip().lower()
+        if confidence == "low":
+            return None
+        skill_name = str(payload.get("skill_name", "")).strip()
+        if not skill_name:
+            return None
+        for item in available_skills:
+            if (
+                isinstance(item, dict)
+                and str(item.get("name", "")).strip() == skill_name
+            ):
+                return item
+        return None
 
     @staticmethod
     def _last_turn_used_kg_tools(recent_tool_calls: Any) -> bool:

@@ -329,6 +329,38 @@ def build_route_judge_prompt(
     return system_prompt, user_prompt
 
 
+def build_skill_catalog_selector_prompt(
+    *,
+    query: str,
+    available_skills: list[dict[str, Any]] | None = None,
+    current_plan: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    system_prompt = (
+        "You are the semantic skill selector inside a route judge. "
+        "Choose at most one skill from the provided skill catalog using the user query and each skill's name, description, and tags. "
+        "Cross-lingual semantic matching is allowed. "
+        "Do not require exact name overlap between the query and the skill name. "
+        "Only select a skill when it is a direct fit for the request; otherwise return null."
+    )
+    user_prompt = (
+        "User query:\n"
+        f"{query}\n\n"
+        "Available skills:\n"
+        f"{json.dumps(available_skills or [], ensure_ascii=False, indent=2)}\n\n"
+        "Current rule-based plan:\n"
+        f"{json.dumps(current_plan or {}, ensure_ascii=False, indent=2)}\n\n"
+        "Return a JSON object with these fields:\n"
+        "{"
+        '"skill_name": str | null, '
+        '"reason": str, '
+        '"confidence": "high" | "medium" | "low"'
+        "}\n"
+        "Prefer null when no skill clearly matches. "
+        "Keep JSON valid. Do not include markdown fences."
+    )
+    return system_prompt, user_prompt
+
+
 def build_skill_free_shell_planner_prompt(
     *,
     skill_name: str,
@@ -560,6 +592,8 @@ def build_final_answer_prompt(
         "Be explicit about uncertainty when tools failed or evidence is incomplete. "
         "Only state concrete numeric facts that are explicitly present in tool results, logs, or artifact previews. "
         "Do not invent prices, counts, dates, or file contents that are not shown in the evidence. "
+        "If a skill result has advisory_mode='doc_only', treat its doc_bundle as primary skill guidance and answer directly from that guidance instead of describing a runtime failure. "
+        "For advisory skill results, you may provide reasoned recommendations, estimates, or suggested ranges as advice when they follow from the user's inputs and the skill guidance, but label them as recommendations rather than established facts. "
         "If a skill result has manual_required_kind='technical_blocked', describe the system-side technical blocker and any auto-inferred assumptions, but do not ask the user for more PPT structure, style, or page-count details. "
         "In that technical-blocked case, do not add generic retry advice, alternative workflows, or offers to produce substitute content unless the user explicitly asks for alternatives. "
         "Only ask the user for more input when a skill result clearly says manual_required_kind='user_actionable'."

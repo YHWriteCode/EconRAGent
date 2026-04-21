@@ -1806,3 +1806,56 @@ async def test_skill_executor_returns_manual_required_without_runtime():
     assert result.data["command_plan"]["mode"] == "manual_required"
     assert "shell_hints" not in result.data
     assert "file_inventory" not in result.data
+
+
+@pytest.mark.asyncio
+async def test_skill_executor_returns_completed_doc_advisory_for_doc_only_skill():
+    registry = SkillRegistry(Path("skills"))
+    executor = SkillExecutor(registry=registry, loader=SkillLoader(registry))
+
+    result = await executor.execute(
+        skill_name="pricing",
+        goal="Help price handmade mugwort rice cakes",
+        user_query="我家从野外采摘了不少艾草，并配合糯米手工制作了不少米果，我该怎么定价好些？",
+        constraints={},
+    )
+
+    assert result.success is True
+    assert result.data["run_status"] == "completed"
+    assert result.data["status"] == "completed"
+    assert result.data["execution_mode"] == "doc_advisory"
+    assert result.data["advisory_mode"] == "doc_only"
+    assert result.data["command_plan"]["mode"] == "doc_advisory"
+    assert isinstance(result.data["doc_bundle"], list)
+    assert result.data["doc_bundle"][0]["path"] == "SKILL.md"
+
+
+class _FailIfCalledRuntimeClient:
+    def __init__(self):
+        self.called = False
+
+    async def run_skill_task(self, **kwargs):
+        self.called = True
+        raise AssertionError("Doc-only advisory skills should not invoke runtime execution")
+
+
+@pytest.mark.asyncio
+async def test_doc_only_skill_bypasses_runtime_client():
+    registry = SkillRegistry(Path("skills"))
+    runtime_client = _FailIfCalledRuntimeClient()
+    executor = SkillExecutor(
+        registry=registry,
+        loader=SkillLoader(registry),
+        runtime_client=runtime_client,
+    )
+
+    result = await executor.execute(
+        skill_name="pricing",
+        goal="Help price handmade mugwort rice cakes",
+        user_query="我家从野外采摘了不少艾草，并配合糯米手工制作了不少米果，我该怎么定价好些？",
+        constraints={},
+    )
+
+    assert result.success is True
+    assert result.data["advisory_mode"] == "doc_only"
+    assert runtime_client.called is False

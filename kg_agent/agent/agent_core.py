@@ -907,7 +907,12 @@ class AgentCore:
             for item in raw_tool_calls
         ]
         answer_tool_calls = [
-            self._serialize_tool_call(item, debug=False) for item in raw_tool_calls
+            self._serialize_tool_call(
+                item,
+                debug=False,
+                include_skill_guidance=True,
+            )
+            for item in raw_tool_calls
         ]
         return PreparedAgentRun(
             context=planned.context,
@@ -1695,6 +1700,7 @@ class AgentCore:
         item: dict[str, Any],
         *,
         debug: bool,
+        include_skill_guidance: bool = False,
     ) -> dict[str, Any]:
         return {
             "tool": item["tool"],
@@ -1705,7 +1711,11 @@ class AgentCore:
             "metadata": item.get("metadata") or {},
             "data": item.get("data")
             if debug
-            else self._prune_tool_data(item.get("data"), tool_name=item["tool"]),
+            else self._prune_tool_data(
+                item.get("data"),
+                tool_name=item["tool"],
+                include_skill_guidance=include_skill_guidance,
+            ),
         }
 
     @staticmethod
@@ -1920,7 +1930,12 @@ class AgentCore:
         return "\n".join(lines)
 
     @staticmethod
-    def _prune_tool_data(data: Any, *, tool_name: str) -> Any:
+    def _prune_tool_data(
+        data: Any,
+        *,
+        tool_name: str,
+        include_skill_guidance: bool = False,
+    ) -> Any:
         if not isinstance(data, dict):
             return data
 
@@ -1947,6 +1962,8 @@ class AgentCore:
                 "started_at",
                 "finished_at",
                 "failure_reason",
+                "execution_mode",
+                "advisory_mode",
                 "auto_inferred_constraints",
                 "planning_blockers",
                 "manual_required_kind",
@@ -1996,6 +2013,21 @@ class AgentCore:
                     "stdout": str(logs_preview.get("stdout", ""))[:400],
                     "stderr": str(logs_preview.get("stderr", ""))[:400],
                 }
+            doc_bundle = data.get("doc_bundle")
+            if isinstance(doc_bundle, list):
+                summary["doc_count"] = len(doc_bundle)
+                if include_skill_guidance:
+                    summary["doc_bundle"] = [
+                        {
+                            "path": item.get("path"),
+                            "hop": item.get("hop"),
+                            "source_path": item.get("source_path"),
+                            "reason": item.get("reason"),
+                            "content": str(item.get("content", ""))[:2400],
+                        }
+                        for item in doc_bundle[:4]
+                        if isinstance(item, dict)
+                    ]
             return summary
 
         if tool_name == "web_search":

@@ -68,7 +68,8 @@ This layer is shell-oriented by design:
 - when a utility LLM is available, the planner may first infer missing structured constraints from fuzzy user language before conservative command synthesis
 - relative date phrases in user requests can be normalized into explicit CLI dates for shipped scripts when the mapping is unambiguous
 - multi-script skills may still auto-lock to one documented shipped script when the inferred CLI contract is clear enough for conservative execution
-- narrow skill-specific deterministic fallbacks may exist for high-value artifact skills, but they are exceptions rather than the general dependency/bootstrap strategy
+- large action-oriented free-shell requests may compact their initial "full_context" prompt before the first LLM attempt when the doc bundle or filtered file inventory is already too large; preserve planner-attempt metadata so callers can still see whether the plan succeeded from compact, micro, or text-first context
+- generated script entrypoints with Node suffixes such as `.js`, `.mjs`, or `.cjs` are first-class runtime entrypoints and should materialize as `node <script>` rather than relying on executable bits inside the runtime workspace
 
 ---
 
@@ -84,6 +85,8 @@ This layer is shell-oriented by design:
 - Keep runtime/tool-result payloads compact. `SkillExecutor` and MCP runtime responses should surface goal, constraints, run status, blocker summaries, artifacts, and small previews; they should not round-trip full file inventories, shell-hint dumps, or planner doc bundles back into the agent context.
 - Keep runtime-target and shell-mode logic explicit in the models rather than inferring them from arbitrary strings at the last minute.
 - When improving shipped scripts, prefer making the script contract more inferable rather than weakening planner safety checks.
+- Keep the planner's shipped-script fast path intact for skills such as `financial-researching`; if a request can be covered safely by a documented script with inferable CLI args, do not route it through the heavier free-shell planner.
+- If you change free-shell prompt sizing, preserve the current bounded degradation strategy and keep `planner_attempts`, `planner_context_mode`, and any initial-context compaction hints visible in plan metadata.
 - Treat regex/date heuristics as fallback normalization only; the preferred path for fuzzy-but-low-risk parameter inference is schema-bounded LLM output validated back into typed constraints.
 
 ---

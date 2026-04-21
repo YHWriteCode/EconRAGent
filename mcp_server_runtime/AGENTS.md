@@ -143,10 +143,14 @@ Also preserve these behavioral constraints:
   - immediate background return behavior
   - later polling via `get_run_status`, `get_run_logs`, and `get_run_artifacts`
   - durable-worker repair still runs when the current in-process utility LLM client is stale or unavailable, and the worker refreshes it before deciding whether repair is possible
+  - durable-worker state transitions are observable: a claimed run should advance into `worker_starting` before env/bootstrap work and then into `executing` once the main shell command begins
 - If a change touches workspace-path handling, verify both:
   - outputs requested under runtime-root absolute paths end up inside the active run workspace
   - host-side artifact fallback still works after any workspace-path remapping
   - shared output paths under `/workspace/output/...` still land in the configured shared output root and are visible in run artifacts
+- If a change touches generated-script execution, verify both:
+  - `.py` entrypoints still materialize through Python
+  - `.js`, `.mjs`, and `.cjs` entrypoints materialize through `node <script>` rather than relying on executable permission bits in the workspace
 - If a change touches bootstrap or dependency setup, verify both:
   - free-shell bootstrap lands in the shared env/bootstrap area rather than the image-global environment
   - runtime env vars such as `SKILL_BOOTSTRAP_*`, `PIP_TARGET`, and `NPM_CONFIG_PREFIX` still point at the intended isolated bootstrap root
@@ -173,6 +177,8 @@ Also preserve these behavioral constraints:
   - transport payloads should expose only execution-relevant fields plus compact summaries such as inferred constraints, blocker classification, compact planner warnings, and bounded repair/bootstrap history
   - do not reintroduce `file_inventory`, `references`, `shell_hints`, full doc bundles, or large script/path dumps into public run-task/status payloads
 - `envs.py` and `planning.py` cooperatively rewrite runtime-root absolute command paths. General `/workspace/...` paths become run-local paths, while `/workspace/output/...` can be redirected into `MCP_OUTPUT_DIR/<run-id>/...` so user-visible artifacts persist in a shared host directory such as the repository-root `skill_output/`.
+- `envs.py` now treats Node-flavored generated entrypoints such as `.js`, `.mjs`, and `.cjs` as explicit Node scripts, materializing them as `node <script>` inside both skill-root and workspace-root command builders instead of invoking the file directly.
 - `workspace.py` mirrors run-local `output/` files into the configured shared output root and deduplicates public `output/...` artifact paths so callers see a stable artifact list.
 - `execution.py` normalizes bootstrap `pip install` commands with upgrade flags so repeated writes into the shared bootstrap target do not get stuck on existing-package directory collisions.
 - `execution.py` now refreshes the utility LLM client before bounded repair decisions inside durable workers. This closes the case where a worker reports `process_failed` with `repair_attempted=false` only because its inherited in-process client became stale or unavailable.
+- `execution.py` now marks a claimed durable run as `worker_starting` as soon as the worker actually enters `run_durable_worker()`, so queue-state polling can distinguish "claimed but not yet entered" from "already inside worker setup".

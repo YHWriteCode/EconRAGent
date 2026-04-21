@@ -938,6 +938,58 @@ async def test_agent_core_reports_technical_skill_blockers_without_asking_for_mo
 
 
 @pytest.mark.asyncio
+async def test_agent_core_treats_doc_only_skill_as_completed_advisory_instead_of_technical_blocker():
+    route = RouteDecision(
+        need_tools=False,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="skill_request",
+        tool_sequence=[],
+        reason="pricing skill request",
+        max_iterations=1,
+        skill_plan=SkillPlan(
+            skill_name="pricing",
+            goal="Use pricing skill to advise on handmade mugwort rice cakes pricing.",
+            reason="Matched pricing skill.",
+            constraints={},
+        ),
+    )
+    skill_registry = SkillRegistry(Path("skills"))
+    skill_loader = SkillLoader(skill_registry)
+    skill_executor = SkillExecutor(
+        registry=skill_registry,
+        loader=skill_loader,
+        command_planner=SkillCommandPlanner(),
+    )
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        route_judge=_StubRouteJudge(route=route),
+        skill_executor=skill_executor,
+    )
+
+    response = await agent.chat(
+        query="使用定价技能，我家从野外采摘了不少艾草，并配合糯米手工制作了不少米果，我该怎么定价好些？",
+        session_id="pricing-doc-only-session",
+        use_memory=False,
+        debug=True,
+    )
+
+    assert response.tool_calls[0]["tool"] == "skill:pricing"
+    assert response.tool_calls[0]["success"] is True
+    assert response.tool_calls[0]["data"]["run_status"] == "completed"
+    assert response.tool_calls[0]["data"]["execution_mode"] == "doc_advisory"
+    assert response.tool_calls[0]["data"]["advisory_mode"] == "doc_only"
+    assert "技术性阻塞" not in response.answer
+    assert "environment_not_prepared" not in response.answer
+
+
+@pytest.mark.asyncio
 async def test_agent_core_reports_failed_skill_bootstrap_as_system_blocker_without_alternatives():
     agent = AgentCore(
         rag=_FakeRAG(),
