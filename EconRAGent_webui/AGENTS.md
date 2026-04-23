@@ -37,6 +37,7 @@ It is not responsible for:
 
 - Frontend calls only the unified `kg_agent` same-origin API surface.
 - Do not wire the browser directly to `lightrag_fork`.
+- Graph page workspace selection is a WebUI/API concern, not a `LightRAG` concern. The frontend may send `workspace=all` to graph endpoints, but that value is interpreted by `kg_agent/api/webui_routes.py` as a cross-workspace aggregation request rather than a real backend workspace id.
 - Keep the current stack consistent unless there is a strong reason to change it:
   - React Router for route switching
   - TanStack Query for server-state fetching
@@ -78,3 +79,4 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 - `discover` is a news/feed page and may use normal page scrolling.
 - Preserve the chat composer contract: attachment/search menu from the `+` button, retrieval mode buttons below the input, and auto-growing textarea with an internal max-height.
 - Preserve the graph page contract: Cytoscape canvas as the primary surface, with a collapsible database filter sidebar that allows the canvas to expand.
+- Graph page defaults currently start from `workspace="all"` and `maxNodes=800`; if you change these defaults, keep `src/pages/GraphPage.tsx`, the graph route tests, and the API-side limits in sync.

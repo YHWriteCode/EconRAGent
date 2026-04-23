@@ -66,6 +66,9 @@ api/
 - `POST /agent/chat` remains the primary chat endpoint for both normal and streaming flows.
 - Streaming mode is still activated by `stream=true` in the request body and returns `text/event-stream`.
 - The frontend source of truth is `EconRAGent_webui/`; files under `kg_agent/api/webui/` are generated assets that should be refreshed by the frontend build rather than hand-edited.
+- Graph routes treat `workspace=all` as a Web/API aggregation sentinel. Do not pass `all` into `LightRAG` as if it were a real workspace; resolve registered workspaces, query them individually, and merge the public payload at the API layer.
+- Graph route node budgets are intentionally aligned across layers: the current WebUI default request budget is `800`, and `/agent/graph/overview` plus `/agent/graph/subgraph` currently enforce `max_nodes <= 800`.
+- For `workspace=all` graph requests, budget allocation is two-stage: first distribute node budget across workspaces, then recycle unused capacity to still-truncated workspaces so the merged response wastes less of the allowed node count.
 - SSE output is standardized as:
   - `event: <type>`
   - `data: <json>`
@@ -85,6 +88,7 @@ api/
 - Keep transport concerns in this directory. Do not move HTTP-specific error handling or SSE formatting into `agent_core.py`.
 - Preserve compatibility for `POST /agent/chat + stream=true`; do not replace it casually with a new primary streaming route.
 - Keep the browser-facing surface unified under `kg_agent`; the WebUI should not need to call `lightrag_fork` directly.
+- If you change graph route defaults or limits, update all three layers together: `kg_agent/api/webui_routes.py`, `EconRAGent_webui/src/pages/GraphPage.tsx`, and the underlying `LightRAG` max-graph-node default wired in `app.py`.
 - Use narrow route-level exception mapping for expected business cases such as `ValueError`, `LookupError`, and `RuntimeError`; let the app-level exception handlers normalize everything else.
 - If you extend public response shapes, keep them explicit in the Pydantic models in `agent_routes.py`.
 - Keep skill-document access progressive:
