@@ -459,6 +459,27 @@ def test_create_app_enables_cors_for_configured_origin():
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 
 
+def test_create_app_serves_webui_redirect_and_index():
+    class _StubAgentCore:
+        async def chat(self, **kwargs):
+            return None
+
+        async def chat_stream(self, **kwargs):
+            if False:
+                yield None
+
+    app = create_app(agent_core=_StubAgentCore())
+
+    with TestClient(app) as client:
+        root_response = client.get("/", follow_redirects=False)
+        webui_response = client.get("/webui")
+
+    assert root_response.status_code == 307
+    assert root_response.headers["location"] == "/webui/chat"
+    assert webui_response.status_code == 200
+    assert "text/html" in webui_response.headers["content-type"]
+
+
 def test_validation_errors_use_uniform_error_envelope():
     class _StubAgentCore:
         async def chat(self, **kwargs):

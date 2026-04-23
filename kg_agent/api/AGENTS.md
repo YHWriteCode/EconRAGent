@@ -30,14 +30,21 @@ It is not responsible for:
 
 ```text
 api/
-|-- app.py           # FastAPI factory, lifecycle, config wiring, exception handlers, /health and /ready
-`-- agent_routes.py  # Pydantic request/response models, route handlers, SSE formatting, route-level error mapping
+|-- app.py             # FastAPI factory, lifecycle, config wiring, exception handlers, /health, /ready, and /webui mount
+|-- agent_routes.py    # Core chat/ingest/tool/skill HTTP models and handlers
+|-- webui_routes.py    # WebUI-facing uploads, sessions, workspaces, graph, and discover endpoints
+`-- webui/             # Built frontend assets generated from ../EconRAGent_webui/
 ```
 
 **Current HTTP surface includes:**
 
 - `POST /agent/chat`
 - `POST /agent/ingest`
+- `POST /agent/uploads`
+- session routes under `/agent/sessions`
+- workspace/import routes under `/agent/workspaces` and `/agent/imports`
+- graph routes under `/agent/graph/*`
+- discover routes under `/agent/discover/*`
 - `GET /agent/tools`
 - `GET /agent/skills`
 - `GET /agent/skills/{skill_name}`
@@ -47,6 +54,7 @@ api/
 - `POST /agent/capabilities/{capability_name}/invoke`
 - `POST /agent/route_preview`
 - scheduler and monitored-source routes
+- `/webui` static SPA mount plus `/webui/chat`, `/webui/graph`, `/webui/discover`, `/webui/spaces`
 - `GET /health`
 - `GET /ready`
 
@@ -57,6 +65,7 @@ api/
 - Browser-facing development support goes through FastAPI CORS middleware configured by `KG_AGENT_CORS_ORIGINS`.
 - `POST /agent/chat` remains the primary chat endpoint for both normal and streaming flows.
 - Streaming mode is still activated by `stream=true` in the request body and returns `text/event-stream`.
+- The frontend source of truth is `EconRAGent_webui/`; files under `kg_agent/api/webui/` are generated assets that should be refreshed by the frontend build rather than hand-edited.
 - SSE output is standardized as:
   - `event: <type>`
   - `data: <json>`
@@ -75,6 +84,7 @@ api/
 
 - Keep transport concerns in this directory. Do not move HTTP-specific error handling or SSE formatting into `agent_core.py`.
 - Preserve compatibility for `POST /agent/chat + stream=true`; do not replace it casually with a new primary streaming route.
+- Keep the browser-facing surface unified under `kg_agent`; the WebUI should not need to call `lightrag_fork` directly.
 - Use narrow route-level exception mapping for expected business cases such as `ValueError`, `LookupError`, and `RuntimeError`; let the app-level exception handlers normalize everything else.
 - If you extend public response shapes, keep them explicit in the Pydantic models in `agent_routes.py`.
 - Keep skill-document access progressive:
@@ -89,3 +99,4 @@ api/
 - Streaming is still fetch-oriented for browsers because the primary streaming contract remains `POST /agent/chat`; there is no dedicated GET/EventSource endpoint yet.
 - The API is intentionally unauthenticated in this local-test-focused stage; any move toward shared or public deployment should revisit auth before broad exposure.
 - `/ready` is a pragmatic frontend readiness signal, not a deep dependency probe of every external service.
+- Frontend packaging currently depends on checked-in generated assets under `kg_agent/api/webui/`; if frontend source changes without rebuilding, packaged backend output will drift.

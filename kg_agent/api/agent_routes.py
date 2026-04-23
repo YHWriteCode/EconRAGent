@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -108,11 +108,19 @@ class ChatRequest(BaseModel):
     use_memory: bool = True
     debug: bool = False
     stream: bool = False
+    query_mode: Literal["naive", "local", "global", "hybrid", "mix"] | None = None
+    force_web_search: bool | None = None
+    attachment_ids: list[str] = Field(default_factory=list)
 
     @field_validator("query", mode="after")
     @classmethod
     def strip_query(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("attachment_ids", mode="after")
+    @classmethod
+    def normalize_attachment_ids(cls, value: list[str]) -> list[str]:
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
 
 
 class ChatResponse(BaseModel):
@@ -597,6 +605,9 @@ def create_agent_routes(
                 max_iterations=request.max_iterations,
                 use_memory=request.use_memory,
                 debug=request.debug,
+                query_mode=request.query_mode,
+                force_web_search=request.force_web_search,
+                attachment_ids=request.attachment_ids,
             ):
                 yield _format_sse_event(event)
         except Exception as exc:
@@ -628,6 +639,9 @@ def create_agent_routes(
             use_memory=request.use_memory,
             debug=request.debug,
             stream=request.stream,
+            query_mode=request.query_mode,
+            force_web_search=request.force_web_search,
+            attachment_ids=request.attachment_ids,
         )
         return response.to_dict()
 

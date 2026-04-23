@@ -208,3 +208,8 @@ __marimo__/
 /.uv-cache/
 .skill-runtime/
 .tmp-skill-runtime-check/
+
+# Frontend workspace
+EconRAGent_webui/node_modules/
+EconRAGent_webui/.vite/
+npm-debug.log*

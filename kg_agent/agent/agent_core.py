@@ -19,7 +19,7 @@ from kg_agent.agent.capability_registry import (
 )
 from kg_agent.agent.path_explainer import PathExplainer
 from kg_agent.agent.prompts import build_final_answer_prompt
-from kg_agent.agent.route_judge import RouteDecision, RouteJudge
+from kg_agent.agent.route_judge import RouteDecision, RouteJudge, ToolCallPlan
 from kg_agent.agent.tool_registry import ToolRegistry
 from kg_agent.config import AgentLLMClient, FallbackLLMClient, KGAgentConfig
 from kg_agent.crawler.crawl_state_store import CrawlStateStore
@@ -35,6 +35,7 @@ from kg_agent.skills import (
     SkillLoader,
     SkillRegistry,
 )
+from kg_agent.uploads import UploadStore
 
 
 CORRECTION_PHRASE_PATTERN = re.compile(
@@ -68,6 +69,12 @@ class AgentRunContext:
     use_memory: bool = True
     debug: bool = False
     stream: bool = False
+    effective_query: str | None = None
+    query_mode: str | None = None
+    force_web_search: bool | None = None
+    attachment_ids: list[str] = field(default_factory=list)
+    attachments: list[dict[str, Any]] = field(default_factory=list)
+    unsupported_multimodal: bool = False
 
 
 @dataclass
@@ -173,6 +180,7 @@ class AgentCore:
         skill_registry: SkillRegistry | None = None,
         skill_loader: SkillLoader | None = None,
         skill_executor: SkillExecutor | None = None,
+        upload_store: UploadStore | None = None,
     ):
         self._rag = rag
         self._rag_provider = rag_provider
@@ -240,6 +248,7 @@ class AgentCore:
         )
         self.crawler_adapter = crawler_adapter
         self.crawl_state_store = crawl_state_store
+        self.upload_store = upload_store
 
     async def initialize_external_capabilities(self) -> list[dict[str, Any]]:
         if self.mcp_adapter is None:
@@ -303,6 +312,9 @@ class AgentCore:
         use_memory: bool = True,
         debug: bool = False,
         stream: bool = False,
+        query_mode: str | None = None,
+        force_web_search: bool | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> AgentResponse:
         await self.initialize_external_capabilities()
         prepared = await self._prepare_agent_run(
@@ -315,9 +327,12 @@ class AgentCore:
             use_memory=use_memory,
             debug=debug,
             stream=stream,
+            query_mode=query_mode,
+            force_web_search=force_web_search,
+            attachment_ids=attachment_ids,
         )
         answer = await self._build_final_answer(
-            query=prepared.context.query,
+            query=self._query_for_run(prepared.context),
             route=prepared.route,
             tool_calls=prepared.answer_tool_calls,
             path_explanation=prepared.path_explanation_dict,
@@ -459,6 +474,9 @@ class AgentCore:
         max_iterations: int | None = None,
         use_memory: bool = True,
         debug: bool = False,
+        query_mode: str | None = None,
+        force_web_search: bool | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         await self.initialize_external_capabilities()
         planned = await self._plan_agent_run(
@@ -471,6 +489,9 @@ class AgentCore:
             use_memory=use_memory,
             debug=debug,
             stream=True,
+            query_mode=query_mode,
+            force_web_search=force_web_search,
+            attachment_ids=attachment_ids,
         )
 
         metadata = self._build_response_metadata(planned.context, planned.route)
@@ -609,7 +630,7 @@ class AgentCore:
         if self.llm_client.is_available():
             try:
                 async for delta in self._build_final_answer_stream(
-                    query=prepared.context.query,
+                    query=self._query_for_run(prepared.context),
                     route=prepared.route,
                     tool_calls=prepared.answer_tool_calls,
                     path_explanation=prepared.path_explanation_dict,
@@ -627,7 +648,7 @@ class AgentCore:
 
         if not streamed:
             fallback_answer = self._fallback_answer(
-                prepared.context.query,
+                self._query_for_run(prepared.context),
                 prepared.route,
                 prepared.answer_tool_calls,
                 prepared.path_explanation_dict,
@@ -683,6 +704,9 @@ class AgentCore:
         use_memory: bool = True,
         debug: bool = False,
         stream: bool = False,
+        query_mode: str | None = None,
+        force_web_search: bool | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> PreparedAgentRun:
         planned = await self._plan_agent_run(
             query=query,
@@ -694,6 +718,9 @@ class AgentCore:
             use_memory=use_memory,
             debug=debug,
             stream=stream,
+            query_mode=query_mode,
+            force_web_search=force_web_search,
+            attachment_ids=attachment_ids,
         )
         raw_tool_calls: list[dict[str, Any]] = []
         graph_paths: list[dict[str, Any]] = []
@@ -774,7 +801,15 @@ class AgentCore:
         use_memory: bool = True,
         debug: bool = False,
         stream: bool = False,
+        query_mode: str | None = None,
+        force_web_search: bool | None = None,
+        attachment_ids: list[str] | None = None,
     ) -> PlannedAgentRun:
+        attachment_context = await self._load_attachment_context(attachment_ids or [])
+        effective_query = (query or "").strip()
+        attachment_prompt = str(attachment_context.get("prompt") or "").strip()
+        if attachment_prompt:
+            effective_query = f"{effective_query}{attachment_prompt}"
         context = AgentRunContext(
             query=query,
             session_id=session_id,
@@ -785,10 +820,26 @@ class AgentCore:
             use_memory=use_memory,
             debug=debug,
             stream=stream,
+            effective_query=effective_query,
+            query_mode=(query_mode or "").strip().lower() or None,
+            force_web_search=force_web_search,
+            attachment_ids=[
+                str(item).strip()
+                for item in (attachment_ids or [])
+                if str(item).strip()
+            ],
+            attachments=[
+                dict(item)
+                for item in attachment_context.get("attachments", [])
+                if isinstance(item, dict)
+            ],
+            unsupported_multimodal=bool(
+                attachment_context.get("unsupported_multimodal", False)
+            ),
         )
         rag = await self._resolve_rag(context.workspace)
         session_context = await self._build_session_context(
-            query=context.query,
+            query=self._query_for_run(context),
             session_id=context.session_id,
             use_memory=context.use_memory,
             user_id=context.user_id,
@@ -800,7 +851,7 @@ class AgentCore:
         )
         available_skills = self._available_skill_catalog()
         route = await self.route_judge.plan(
-            query=context.query,
+            query=self._query_for_run(context),
             session_context=session_context,
             user_profile=user_profile,
             available_capabilities=self._available_capability_names(
@@ -810,6 +861,7 @@ class AgentCore:
             available_capability_catalog=available_capability_catalog,
             available_skills=available_skills,
         )
+        route = self._apply_route_overrides(route=route, context=context)
 
         execution_limit = max(
             1,
@@ -853,6 +905,154 @@ class AgentCore:
             "cross_session_enabled": bool(user_id),
         }
 
+    @staticmethod
+    def _query_for_run(context: AgentRunContext) -> str:
+        effective = (context.effective_query or "").strip()
+        if effective:
+            return effective
+        return (context.query or "").strip()
+
+    async def _load_attachment_context(self, attachment_ids: list[str]) -> dict[str, Any]:
+        normalized_ids = [
+            str(item).strip() for item in attachment_ids if str(item).strip()
+        ]
+        if not normalized_ids or self.upload_store is None:
+            return {
+                "attachments": [],
+                "prompt": "",
+                "unsupported_multimodal": False,
+            }
+        try:
+            return await self.upload_store.build_attachment_context(normalized_ids)
+        except Exception as exc:
+            return {
+                "attachments": [
+                    {
+                        "upload_id": upload_id,
+                        "status": "error",
+                        "error": str(exc),
+                    }
+                    for upload_id in normalized_ids
+                ],
+                "prompt": "",
+                "unsupported_multimodal": False,
+            }
+
+    def _apply_route_overrides(
+        self,
+        *,
+        route: RouteDecision,
+        context: AgentRunContext,
+    ) -> RouteDecision:
+        requested_query_mode = (context.query_mode or "").strip().lower() or None
+        if requested_query_mode not in {"naive", "local", "global", "hybrid", "mix"}:
+            requested_query_mode = None
+
+        force_web_search = context.force_web_search
+        if requested_query_mode is None and force_web_search is None:
+            return route
+
+        overrideable_tools = {
+            "memory_search",
+            "cross_session_search",
+            "kg_hybrid_search",
+            "kg_naive_search",
+            "web_search",
+        }
+
+        memory_sequence = [
+            item
+            for item in route.tool_sequence
+            if item.tool in {"memory_search", "cross_session_search"}
+        ]
+        preserved_sequence = [
+            item
+            for item in route.tool_sequence
+            if item.tool
+            not in overrideable_tools
+        ]
+        existing_retrieval_sequence = [
+            item
+            for item in route.tool_sequence
+            if item.tool in {"kg_hybrid_search", "kg_naive_search"}
+        ]
+
+        web_sequence: list[ToolCallPlan]
+        if force_web_search is True:
+            web_sequence = (
+                [ToolCallPlan(tool="web_search")]
+                if self.tool_registry.has("web_search")
+                else []
+            )
+        elif force_web_search is False:
+            web_sequence = []
+        else:
+            web_sequence = [
+                item for item in route.tool_sequence if item.tool == "web_search"
+            ]
+
+        retrieval_sequence: list[ToolCallPlan] = []
+        applied_query_override = (
+            requested_query_mode is not None and bool(existing_retrieval_sequence)
+        )
+        if applied_query_override and requested_query_mode == "naive":
+            retrieval_sequence = [ToolCallPlan(tool="kg_naive_search")]
+        elif applied_query_override and requested_query_mode in {
+            "local",
+            "global",
+            "hybrid",
+            "mix",
+        }:
+            retrieval_sequence = [
+                ToolCallPlan(
+                    tool="kg_hybrid_search",
+                    args={"mode": requested_query_mode},
+                )
+            ]
+        else:
+            retrieval_sequence = existing_retrieval_sequence
+
+        reason_parts = [route.reason]
+        strategy = route.strategy
+        skill_plan = route.skill_plan
+        if applied_query_override:
+            reason_parts.append(f"query_mode override={requested_query_mode}")
+            strategy = "manual_query_mode_override"
+        if force_web_search is not None:
+            reason_parts.append(f"force_web_search={force_web_search}")
+            if strategy == route.strategy:
+                strategy = "manual_web_search_override"
+            elif strategy != "manual_query_mode_override":
+                strategy = "manual_route_override"
+        if requested_query_mode is not None and force_web_search is not None:
+            strategy = "manual_route_override"
+
+        tool_sequence = memory_sequence + web_sequence + retrieval_sequence + preserved_sequence
+        return RouteDecision(
+            need_tools=bool(tool_sequence),
+            need_memory=route.need_memory,
+            need_web_search=bool(web_sequence),
+            need_path_explanation=route.need_path_explanation,
+            strategy=strategy,
+            tool_sequence=tool_sequence,
+            reason="; ".join(part for part in reason_parts if part),
+            max_iterations=route.max_iterations,
+            skill_plan=skill_plan,
+        )
+
+    @staticmethod
+    def _resolve_effective_query_mode(route: RouteDecision) -> str | None:
+        for item in route.tool_sequence:
+            if item.tool == "kg_naive_search":
+                return "naive"
+            if item.tool == "kg_hybrid_search":
+                mode = item.args.get("mode") if isinstance(item.args, dict) else None
+                normalized = str(mode or "hybrid").strip().lower()
+                if normalized in {"local", "global", "hybrid", "mix"}:
+                    return normalized
+                return "hybrid"
+        return None
+
     async def _build_path_explanation_dict(
         self,
         *,
@@ -864,7 +1064,7 @@ class AgentCore:
         if not route.need_path_explanation:
             return None
         path_explanation = await self.path_explainer.explain(
-            query=context.query,
+            query=self._query_for_run(context),
             graph_paths=graph_paths,
             evidence_chunks=evidence_chunks,
             domain_schema=context.domain_schema
@@ -873,8 +1073,8 @@ class AgentCore:
         )
         return asdict(path_explanation)
 
-    @staticmethod
     def _build_response_metadata(
+        self,
         context: AgentRunContext,
         route: RouteDecision,
         *,
@@ -886,6 +1086,12 @@ class AgentCore:
             "workspace": context.workspace,
             "domain_schema": context.domain_schema,
             "route_strategy": route.strategy,
+            "requested_query_mode": context.query_mode,
+            "effective_query_mode": self._resolve_effective_query_mode(route),
+            "web_search_forced": context.force_web_search,
+            "attachment_ids": list(context.attachment_ids),
+            "attachments": [dict(item) for item in context.attachments],
+            "unsupported_multimodal": context.unsupported_multimodal,
             "skill_name": (
                 route.skill_plan.skill_name if getattr(route, "skill_plan", None) else None
             ),
@@ -940,7 +1146,13 @@ class AgentCore:
             context.session_id,
             "user",
             context.query,
-            metadata={"workspace": context.workspace},
+            metadata={
+                "workspace": context.workspace,
+                "attachment_ids": list(context.attachment_ids),
+                "attachments": [dict(item) for item in context.attachments],
+                "requested_query_mode": context.query_mode,
+                "force_web_search": context.force_web_search,
+            },
             user_id=context.user_id,
         )
         assistant_message = await self.conversation_memory.append_message(
@@ -961,9 +1173,13 @@ class AgentCore:
                     in {
                         "workspace",
                         "route_strategy",
+                        "requested_query_mode",
+                        "effective_query_mode",
+                        "web_search_forced",
                         "freshness_action",
                         "freshness_reason",
                         "streaming_supported",
+                        "unsupported_multimodal",
                     }
                 },
             },
@@ -1667,7 +1883,7 @@ class AgentCore:
         user_profile: dict[str, Any] | None,
     ) -> dict[str, Any]:
         base_kwargs = {
-            "query": context.query,
+            "query": self._query_for_run(context),
             "session_id": context.session_id,
             "user_id": context.user_id,
             "session_context": session_context,

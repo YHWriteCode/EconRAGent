@@ -180,6 +180,7 @@ version = {attr = "lightrag_fork.__version__"}
 
 [tool.setuptools.package-data]
 lightrag_fork = ["api/webui/**/*", "api/static/**/*"]
+kg_agent = ["api/webui/**/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -659,6 +659,9 @@ class PersistenceConfig:
     user_profile_mongo_collection: str = "kg_agent_user_profiles"
     scheduler_store_backend: str = "json"
     scheduler_store_sqlite_path: str = "kg_agent_scheduler.sqlite3"
+    workspace_registry_file: str = "kg_agent_workspaces.json"
+    workspace_registry_sqlite_path: str = "kg_agent_workspaces.sqlite3"
+    uploads_dir: str = "kg_agent_uploads"
     cross_session_backend: str = "memory"
     cross_session_mongo_collection: str = "kg_agent_cross_session_messages"
     cross_session_qdrant_collection_prefix: str = "kg_agent_cross_session"
@@ -713,6 +716,21 @@ class PersistenceConfig:
                 "kg_agent_scheduler.sqlite3",
             ).strip()
             or "kg_agent_scheduler.sqlite3",
+            workspace_registry_file=os.getenv(
+                "KG_AGENT_WORKSPACE_REGISTRY_FILE",
+                "kg_agent_workspaces.json",
+            ).strip()
+            or "kg_agent_workspaces.json",
+            workspace_registry_sqlite_path=os.getenv(
+                "KG_AGENT_WORKSPACE_REGISTRY_SQLITE_PATH",
+                "kg_agent_workspaces.sqlite3",
+            ).strip()
+            or "kg_agent_workspaces.sqlite3",
+            uploads_dir=os.getenv(
+                "KG_AGENT_UPLOADS_DIR",
+                "kg_agent_uploads",
+            ).strip()
+            or "kg_agent_uploads",
             cross_session_backend=os.getenv(
                 "KG_AGENT_CROSS_SESSION_BACKEND", "memory"
             ).strip()

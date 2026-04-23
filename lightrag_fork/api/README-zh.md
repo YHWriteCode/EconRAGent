@@ -45,9 +45,9 @@ source .venv/bin/activate  # 激活虚拟环境 (Linux/macOS)
 # pip install -e ".[api]"
 
 # 构建前端代码
-cd lightrag_webui
-bun install --frozen-lockfile
-bun run build
+cd EconRAGent_webui
+npm install
+node .\node_modules\vite\bin\vite.js build
 cd ..
 ```
 

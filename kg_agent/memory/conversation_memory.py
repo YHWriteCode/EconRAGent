@@ -205,6 +205,34 @@ class ConversationMemoryStore:
         async with self._memory_lock:
             self._messages.pop(session_id, None)
 
+    async def list_messages(self, session_id: str) -> list[dict[str, Any]]:
+        messages = await self._get_session_messages(session_id)
+        return [
+            {
+                "session_id": message.session_id,
+                "role": message.role,
+                "content": message.content,
+                "timestamp": message.timestamp,
+                "metadata": dict(message.metadata),
+                "user_id": message.user_id,
+            }
+            for message in messages
+        ]
+
+    async def list_sessions(
+        self,
+        *,
+        user_id: str | None = None,
+        workspace: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        messages = await self._get_messages_for_session_listing(user_id=user_id)
+        return self._aggregate_sessions(
+            messages,
+            workspace=workspace,
+            limit=limit,
+        )
+
     async def _get_session_messages(self, session_id: str) -> list[MemoryMessage]:
         if self.backend == "sqlite":
             async with self._memory_lock:
@@ -222,6 +250,29 @@ class ConversationMemoryStore:
             return [self._mongo_row_to_message(row) for row in rows if isinstance(row, dict)]
         async with self._memory_lock:
             return list(self._messages.get(session_id, []))
+
+    async def _get_messages_for_session_listing(
+        self,
+        *,
+        user_id: str | None,
+    ) -> list[MemoryMessage]:
+        normalized_user_id = (user_id or "").strip() or None
+        if normalized_user_id:
+            return await self._get_user_messages(normalized_user_id)
+        if self.backend == "sqlite":
+            async with self._memory_lock:
+                await self._ensure_sqlite_initialized_locked()
+                return await asyncio.to_thread(self._sqlite_fetch_all_messages)
+        if self.backend == "mongo":
+            await self._ensure_mongo_initialized()
+            cursor = self._mongo_collection.find({}).sort([("_id", 1)])
+            rows = await cursor.to_list(length=None)
+            return [self._mongo_row_to_message(row) for row in rows if isinstance(row, dict)]
+        async with self._memory_lock:
+            collected: list[MemoryMessage] = []
+            for session_messages in self._messages.values():
+                collected.extend(session_messages)
+            return collected
 
     async def _get_user_messages(
         self,
@@ -551,6 +602,17 @@ class ConversationMemoryStore:
             )
             conn.commit()
 
+    def _sqlite_fetch_all_messages(self) -> list[MemoryMessage]:
+        with self._sqlite_connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, role, content, timestamp, metadata_json, user_id
+                FROM conversation_messages
+                ORDER BY id ASC
+                """
+            ).fetchall()
+        return [self._row_to_message(*row) for row in rows]
+
     async def close(self) -> None:
         if self._mongo_client is not None:
             close_func = getattr(self._mongo_client, "close", None)
@@ -613,3 +675,68 @@ class ConversationMemoryStore:
             metadata=metadata,
             user_id=(user_id or "").strip() or None,
         )
+
+    @staticmethod
+    def _truncate_session_title(content: str, max_chars: int = 40) -> str:
+        normalized = " ".join((content or "").split())
+        if len(normalized) <= max_chars:
+            return normalized or "新建聊天"
+        return normalized[: max_chars - 1].rstrip() + "…"
+
+    @classmethod
+    def _aggregate_sessions(
+        cls,
+        messages: list[MemoryMessage],
+        *,
+        workspace: str | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        normalized_workspace = (workspace or "").strip()
+        grouped: dict[str, list[MemoryMessage]] = defaultdict(list)
+        for message in messages:
+            session_id = (message.session_id or "").strip()
+            if not session_id:
+                continue
+            grouped[session_id].append(message)
+
+        sessions: list[dict[str, Any]] = []
+        for session_id, session_messages in grouped.items():
+            ordered = sorted(session_messages, key=lambda item: item.timestamp)
+            workspace_value = None
+            for message in reversed(ordered):
+                metadata_workspace = (
+                    message.metadata.get("workspace")
+                    if isinstance(message.metadata, dict)
+                    else None
+                )
+                if isinstance(metadata_workspace, str) and metadata_workspace.strip():
+                    workspace_value = metadata_workspace.strip()
+                    break
+            if normalized_workspace and workspace_value != normalized_workspace:
+                continue
+
+            first_user_message = next(
+                (message for message in ordered if message.role == "user" and message.content.strip()),
+                ordered[0] if ordered else None,
+            )
+            last_message = ordered[-1]
+            sessions.append(
+                {
+                    "session_id": session_id,
+                    "user_id": last_message.user_id,
+                    "workspace": workspace_value,
+                    "title": cls._truncate_session_title(
+                        first_user_message.content if first_user_message is not None else ""
+                    ),
+                    "created_at": ordered[0].timestamp,
+                    "last_message_at": last_message.timestamp,
+                    "message_count": len(ordered),
+                    "last_message_preview": cls._truncate_session_title(last_message.content, 80),
+                }
+            )
+
+        sessions.sort(
+            key=lambda item: (str(item.get("last_message_at") or ""), str(item.get("session_id") or "")),
+            reverse=True,
+        )
+        return sessions[: max(1, limit)]

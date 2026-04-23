@@ -1,7 +1,7 @@
 # LLM Log
 
 - generated_at: 2026-04-05 17:16:49
-- repo_root: D:\AllForLearning\lightrag
+- repo_root: D:\\AllForLearning\\EconRAGent
 
 ## Call
 - ts: 2026-04-05 17:17:38

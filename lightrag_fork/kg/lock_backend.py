@@ -67,7 +67,7 @@ class LocalLockBackend(LockBackend):
 
     def __init__(
         self,
-        local_context_factory: Callable[[str, list[str], bool], Any],
+        local_context_factory: Callable[..., Any],
         namespace: str = "LocalLockBackend",
     ):
         self._local_context_factory = local_context_factory
@@ -83,7 +83,11 @@ class LocalLockBackend(LockBackend):
         auto_renew: bool,
     ) -> LockLease | None:
         del owner, ttl_s, retry_interval_s, auto_renew
-        ctx = self._local_context_factory(self._namespace, [key], False)
+        ctx = self._local_context_factory(
+            self._namespace,
+            [key],
+            enable_logging=False,
+        )
         try:
             if wait_timeout_s is None:
                 await ctx.__aenter__()

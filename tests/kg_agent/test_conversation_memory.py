@@ -343,6 +343,70 @@ async def test_conversation_memory_context_window_respects_token_budget():
 
 
 @pytest.mark.asyncio
+async def test_conversation_memory_lists_sessions_by_workspace_and_recent_activity():
+    store = ConversationMemoryStore()
+    await store.append_message(
+        "session-ops",
+        "user",
+        "请跟进电池供应链异常和物流延迟的修复方案",
+        metadata={"workspace": "ops"},
+        user_id="user-1",
+    )
+    await store.append_message(
+        "session-ops",
+        "assistant",
+        "已经整理供应链异常的修复路径。",
+        metadata={"workspace": "ops"},
+        user_id="user-1",
+    )
+    await store.append_message(
+        "session-research",
+        "user",
+        "研究一下宏观流动性与美元指数的关系",
+        metadata={"workspace": "research"},
+        user_id="user-1",
+    )
+    await store.append_message(
+        "session-research",
+        "assistant",
+        "先从美元指数和实际利率联动开始。",
+        metadata={"workspace": "research"},
+        user_id="user-1",
+    )
+    await store.append_message(
+        "session-research",
+        "user",
+        "再补一段最近一个月的变化",
+        metadata={"workspace": "research"},
+        user_id="user-1",
+    )
+
+    sessions = await store.list_sessions(user_id="user-1", limit=10)
+    research_sessions = await store.list_sessions(
+        user_id="user-1",
+        workspace="research",
+        limit=10,
+    )
+
+    assert [item["session_id"] for item in sessions] == [
+        "session-research",
+        "session-ops",
+    ]
+    assert research_sessions == [
+        {
+            "session_id": "session-research",
+            "user_id": "user-1",
+            "workspace": "research",
+            "title": "研究一下宏观流动性与美元指数的关系",
+            "created_at": research_sessions[0]["created_at"],
+            "last_message_at": research_sessions[0]["last_message_at"],
+            "message_count": 3,
+            "last_message_preview": "再补一段最近一个月的变化",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_conversation_memory_sqlite_persists_messages(tmp_path: Path):
     db_path = tmp_path / "memory.sqlite3"
     store = ConversationMemoryStore(backend="sqlite", sqlite_path=str(db_path))

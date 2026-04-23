@@ -182,6 +182,28 @@ class _StubPlannerLLM:
         return self.payloads.pop(0)
 
 
+class _StubUploadStore:
+    def __init__(self, *, unsupported_multimodal: bool = False):
+        self.unsupported_multimodal = unsupported_multimodal
+        self.seen_attachment_ids: list[str] = []
+
+    async def build_attachment_context(self, upload_ids):
+        self.seen_attachment_ids = list(upload_ids)
+        return {
+            "attachments": [
+                {
+                    "upload_id": upload_id,
+                    "filename": "brief.txt",
+                    "kind": "text",
+                    "status": "ready",
+                }
+                for upload_id in upload_ids
+            ],
+            "prompt": "\n\n[附件上下文]\n附件摘要：新能源供应链月报。",
+            "unsupported_multimodal": self.unsupported_multimodal,
+        }
+
+
 @pytest.mark.asyncio
 async def test_agent_core_chat_ignores_duplicate_reserved_tool_args():
     config = KGAgentConfig(
@@ -624,6 +646,156 @@ async def test_agent_core_preview_route_uses_smart_memory_window():
     assert "We are now discussing lunch" in contents
     assert "Lunch plan is undecided." in contents
     assert "Acknowledged" not in contents
+
+
+@pytest.mark.asyncio
+async def test_agent_core_chat_applies_query_mode_web_search_and_attachment_overrides():
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False),
+        runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+    )
+    registry = ToolRegistry()
+    observed_queries: dict[str, str] = {}
+
+    async def _web_search_tool(query: str, **kwargs):
+        observed_queries["web_search"] = query
+        return ToolResult(
+            tool_name="web_search",
+            success=True,
+            data={"pages": [], "urls": []},
+            metadata={"source": "stub"},
+        )
+
+    async def _naive_search_tool(query: str, **kwargs):
+        observed_queries["kg_naive_search"] = query
+        return ToolResult(
+            tool_name="kg_naive_search",
+            success=True,
+            data={"data": {"chunks": []}, "status": "success"},
+            metadata={"mode": "naive"},
+        )
+
+    async def _hybrid_search_tool(query: str, mode: str = "hybrid", **kwargs):
+        observed_queries["kg_hybrid_search"] = f"{mode}:{query}"
+        return ToolResult(
+            tool_name="kg_hybrid_search",
+            success=True,
+            data={"data": {"chunks": []}, "status": "success"},
+            metadata={"mode": mode},
+        )
+
+    registry.register(
+        ToolDefinition(
+            name="web_search",
+            description="Stub web search",
+            input_schema={},
+            handler=_web_search_tool,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="kg_naive_search",
+            description="Stub naive search",
+            input_schema={},
+            handler=_naive_search_tool,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="kg_hybrid_search",
+            description="Stub hybrid search",
+            input_schema={},
+            handler=_hybrid_search_tool,
+        )
+    )
+
+    route = RouteDecision(
+        need_tools=True,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="planner_default",
+        tool_sequence=[ToolCallPlan(tool="kg_hybrid_search")],
+        reason="planner defaulted to hybrid retrieval",
+        max_iterations=2,
+    )
+    upload_store = _StubUploadStore(unsupported_multimodal=True)
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=config,
+        tool_registry=registry,
+        route_judge=_StubRouteJudge(route=route),
+        upload_store=upload_store,
+    )
+
+    response = await agent.chat(
+        query="总结附件中的重点",
+        session_id="override-session",
+        use_memory=False,
+        query_mode="naive",
+        force_web_search=True,
+        attachment_ids=["upload-1"],
+    )
+
+    assert upload_store.seen_attachment_ids == ["upload-1"]
+    assert [item["tool"] for item in response.tool_calls] == [
+        "web_search",
+        "kg_naive_search",
+    ]
+    assert "[附件上下文]" in observed_queries["web_search"]
+    assert "新能源供应链月报" in observed_queries["kg_naive_search"]
+    assert response.route["strategy"] == "manual_route_override"
+    assert response.metadata["requested_query_mode"] == "naive"
+    assert response.metadata["effective_query_mode"] == "naive"
+    assert response.metadata["web_search_forced"] is True
+    assert response.metadata["attachment_ids"] == ["upload-1"]
+    assert response.metadata["unsupported_multimodal"] is True
+    assert response.metadata["attachments"][0]["filename"] == "brief.txt"
+
+
+@pytest.mark.asyncio
+async def test_agent_core_query_mode_override_does_not_suppress_skill_route():
+    route = RouteDecision(
+        need_tools=False,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="skill_request",
+        tool_sequence=[],
+        reason="skill route",
+        max_iterations=1,
+        skill_plan=SkillPlan(
+            skill_name="example-skill",
+            goal="Use example-skill to create a report",
+            reason="Matched local skill",
+        ),
+    )
+    skill_executor = _StubSkillExecutor()
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        route_judge=_StubRouteJudge(route=route),
+        skill_executor=skill_executor,
+    )
+
+    response = await agent.chat(
+        query="run a report skill",
+        session_id="skill-route-with-query-mode",
+        use_memory=False,
+        debug=True,
+        query_mode="hybrid",
+    )
+
+    assert [item["tool"] for item in response.tool_calls] == ["skill:example-skill"]
+    assert response.route["strategy"] == "skill_request"
+    assert response.metadata["requested_query_mode"] == "hybrid"
+    assert response.metadata["effective_query_mode"] is None
+    assert skill_executor.calls[0]["skill_name"] == "example-skill"
 
 
 @pytest.mark.asyncio

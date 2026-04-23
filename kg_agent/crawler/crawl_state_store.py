@@ -13,6 +13,7 @@ from pathlib import Path
 class EventClusterRecord:
     cluster_id: str
     headline: str = ""
+    summary: str = ""
     signature_text: str = ""
     content_fingerprint: str = ""
     published_at: str | None = None
@@ -41,6 +42,7 @@ class EventClusterRecord:
         return cls(
             cluster_id=str(cluster_id or "").strip(),
             headline=str(data.get("headline") or "").strip(),
+            summary=str(data.get("summary") or "").strip(),
             signature_text=str(data.get("signature_text") or "").strip(),
             content_fingerprint=str(data.get("content_fingerprint") or "").strip(),
             published_at=str(data.get("published_at") or "").strip() or None,

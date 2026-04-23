@@ -35,7 +35,9 @@ async def kg_hybrid_search(
     **_: Any,
 ) -> ToolResult:
     effective_query = (search_query or query or "").strip()
-    param = QueryParam(mode=mode if mode in {"hybrid", "mix"} else "hybrid")
+    param = QueryParam(
+        mode=mode if mode in {"local", "global", "hybrid", "mix"} else "hybrid"
+    )
     if top_k is not None:
         param.top_k = top_k
     if chunk_top_k is not None:

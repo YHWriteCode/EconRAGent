@@ -45,9 +45,9 @@ source .venv/bin/activate  # Activate the virtual environment (Linux/macOS)
 # pip install -e ".[api]"
 
 # Build front-end artifacts
-cd lightrag_webui
-bun install --frozen-lockfile
-bun run build
+cd EconRAGent_webui
+npm install
+node .\node_modules\vite\bin\vite.js build
 cd ..
 ```
 

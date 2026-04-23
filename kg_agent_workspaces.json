@@ -1,0 +1,18 @@
+[
+  {
+    "workspace_id": "ops-default",
+    "display_name": "ops-default",
+    "created_at": "2026-04-22T22:26:45.810535+08:00",
+    "updated_at": "2026-04-22T22:26:45.810535+08:00",
+    "description": "Default workspace",
+    "archived": false
+  },
+  {
+    "workspace_id": "kg_agent_demo",
+    "display_name": "kg_agent_demo",
+    "created_at": "2026-04-22T15:21:41.896387+08:00",
+    "updated_at": "2026-04-22T15:21:41.896387+08:00",
+    "description": "Default workspace",
+    "archived": false
+  }
+]

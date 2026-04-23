@@ -178,20 +178,20 @@ def check_frontend_build():
         ASCIIColors.yellow(
             "\nTo enable WebUI, build the frontend using these commands:\n"
         )
-        ASCIIColors.cyan("    cd lightrag_webui")
-        ASCIIColors.cyan("    bun install --frozen-lockfile")
-        ASCIIColors.cyan("    bun run build")
+        ASCIIColors.cyan("    cd EconRAGent_webui")
+        ASCIIColors.cyan("    npm install")
+        ASCIIColors.cyan("    node .\\node_modules\\vite\\bin\\vite.js build")
         ASCIIColors.cyan("    cd ..")
         ASCIIColors.yellow("\nThen restart the service.\n")
         ASCIIColors.cyan(
-            "Note: Make sure you have Bun installed. Visit https://bun.sh for installation."
+            "Note: Make sure Node.js and npm are available in your environment."
         )
         ASCIIColors.yellow("=" * 80 + "\n")
         return (False, False)  # Assets don't exist, not outdated
 
     # 2. Check if this is a development environment (source directory exists)
     try:
-        source_dir = Path(__file__).parent.parent.parent / "lightrag_webui"
+        source_dir = Path(__file__).parent.parent.parent / "EconRAGent_webui"
         src_dir = source_dir / "src"
 
         # Determine if this is a development environment: source directory exists and contains src directory
@@ -225,7 +225,7 @@ def check_frontend_build():
             ".mdx",  # Markdown
         }
 
-        # Key configuration files (in lightrag_webui root directory)
+        # Key configuration files (in the EconRAGent_webui root directory)
         key_files = [
             source_dir / "package.json",
             source_dir / "bun.lock",
@@ -269,9 +269,9 @@ def check_frontend_build():
             ASCIIColors.cyan(
                 "Recommended: Rebuild the frontend to use the latest changes:"
             )
-            ASCIIColors.cyan("    cd lightrag_webui")
-            ASCIIColors.cyan("    bun install --frozen-lockfile")
-            ASCIIColors.cyan("    bun run build")
+            ASCIIColors.cyan("    cd EconRAGent_webui")
+            ASCIIColors.cyan("    npm install")
+            ASCIIColors.cyan("    node .\\node_modules\\vite\\bin\\vite.js build")
             ASCIIColors.cyan("    cd ..")
             ASCIIColors.yellow("\nThe server will continue with the current build.")
             ASCIIColors.yellow("=" * 80 + "\n")

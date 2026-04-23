@@ -5,6 +5,7 @@
 **核心特性：**
 - 基于知识图谱（KG）+ 向量数据库的混合检索，专为经济金融分析场景优化
 - Agent 主循环：路由判断 → 工具调用 → 路径解释 → 最终答案
+- 统一 WebUI：对话 / 知识图谱 / 发现 / 空间管理四页同源部署
 - 支持 Redis 分布式锁、时序元数据维护（`created_at`/`last_confirmed_at`/`confirmation_count`）
 - 动态图谱感知新鲜度排序（Freshness-Aware Ranking）
 - 定时爬虫 + Feed 感知内容摄入调度
@@ -69,6 +70,12 @@ EconRAGent/
 │   ├── api/                # kg_agent REST API 服务
 │   └── AGENTS.md           # 业务层详细规范
 │
+├── EconRAGent_webui/       # React + TypeScript + Vite 前端源码
+│   ├── src/                # 页面、组件、状态管理与测试
+│   ├── package.json        # 前端依赖与脚本
+│   ├── package-lock.json   # 前端锁文件（应提交）
+│   └── AGENTS.md           # 前端开发规范
+│
 ├── mcp-server/             # 独立 MCP 技能运行时服务（Docker 化）
 │   ├── server.py           # FastMCP stdio 入口，durable SQLite 队列
 │   └── Dockerfile          # 容器镜像（预置金融依赖：numpy/pandas/yfinance/akshare 等）
@@ -81,7 +88,8 @@ EconRAGent/
 │   └── (lightrag_fork/tests/e2e/ 位于子模块内)
 │
 ├── .env.example            # 环境变量模板
-└── AGENTS.md               # 本文件（项目总览）
+├── AGENTS.md               # 仓库级协作说明
+└── README.md               # 本文件（项目总览）
 ```
 
 ---
@@ -269,7 +277,35 @@ python -m lightrag_fork.api.lightrag_server
 docker build -f mcp-server/Dockerfile -t lightrag-mcp-skill-service:latest .
 ```
 
-### 11.2.1 Skill Runtime 持久化与依赖预热
+### 11.2.1 WebUI 前端开发与构建
+
+前端源码位于 `EconRAGent_webui/`，构建产物输出到 `kg_agent/api/webui/`，由 `kg_agent` 统一挂载 `/webui` 提供静态页面。
+
+```bash
+cd EconRAGent_webui
+
+# 安装前端依赖
+npm install
+
+# 运行前端测试
+node .\node_modules\vitest\vitest.mjs run
+
+# 构建前端静态产物到 kg_agent/api/webui/
+node .\node_modules\vite\bin\vite.js build
+```
+
+前端协作规则：
+
+- `EconRAGent_webui/node_modules/` 是本地依赖目录，不应提交到 git
+- `EconRAGent_webui/package-lock.json` 应提交，用于锁定已验证的依赖版本
+- 修改前端源码后，应同步刷新 `kg_agent/api/webui/` 构建产物，否则后端打包出来的静态页面会落后于源码
+- WebUI 默认页面入口包括：
+  - `/webui/chat`
+  - `/webui/graph`
+  - `/webui/discover`
+  - `/webui/spaces`
+
+### 11.2.2 Skill Runtime 持久化与依赖预热
 
 当前 `mcp-server` 已改为：
 
@@ -296,7 +332,7 @@ powershell -ExecutionPolicy Bypass -File .\mcp-server\scripts\prefetch-skill-whe
 
 `init-skill-runtime-host.ps1` 现在默认输出使用 Docker named volume 的 `KG_AGENT_MCP_SERVERS_JSON`，避免不同宿主机上的路径格式差异；只有共享输出目录会绑定到仓库根目录下的 `skill_output/`。
 
-如果是本地开发调试，不想每次都重建镜像，可以追加 `-SourceRoot D:\AllForLearning\lightrag`。这样容器会直接挂载当前仓库源码，执行 `/src/mcp-server/server.py`，镜像只负责提供基础运行时环境。
+如果是本地开发调试，不想每次都重建镜像，可以追加 `-SourceRoot D:\AllForLearning\EconRAGent`。这样容器会直接挂载当前仓库源码，执行 `/src/mcp-server/server.py`，镜像只负责提供基础运行时环境。
 
 首次部署后，建议先预热 wheel 缓存：
 
@@ -369,6 +405,11 @@ docker build -f mcp-server/Dockerfile.local-rebuild -t lightrag-mcp-skill-servic
 |---|---|---|
 | POST | `/agent/chat` | 主对话入口（支持 SSE 流式） |
 | POST | `/agent/ingest` | 向知识图谱摄入内容 |
+| POST | `/agent/uploads` | 上传聊天或导入附件 |
+| GET | `/agent/sessions` | 按 workspace 查询会话摘要 |
+| GET | `/agent/workspaces` | 查询知识库空间列表 |
+| GET | `/agent/graph/overview` | 查询图谱概览/联邦概览 |
+| GET | `/agent/discover/events` | 查询发现页事件流 |
 | GET | `/agent/tools` | 查看当前可用工具/能力 |
 | GET | `/agent/skills` | 查看本地技能目录 |
 | POST | `/agent/skills/{skill_name}/invoke` | 直接调用本地技能 |
@@ -376,6 +417,7 @@ docker build -f mcp-server/Dockerfile.local-rebuild -t lightrag-mcp-skill-servic
 | POST | `/agent/capabilities/{name}/invoke` | 直接调用单个能力 |
 | GET | `/agent/sources` | 查看监控爬取来源 |
 | POST | `/agent/sources` | 添加/更新监控来源 |
+| GET | `/webui/chat` | WebUI 对话页入口 |
 | GET | `/health` | 健康检查 |
 
 ---
@@ -418,8 +460,10 @@ python -m pytest tests/kg_agent/test_feed_scheduler_chain.py
 
 | 文档 | 内容 |
 |---|---|
+| [`AGENTS.md`](AGENTS.md) | 仓库级协作规范，包括 `.venv` 使用和前端依赖管理约束 |
 | [`lightrag_fork/AGENTS.md`](lightrag_fork/AGENTS.md) | 后端层完整架构、存储后端配置、分布式锁、领域 Schema、时序元数据、开发命令 |
 | [`kg_agent/AGENTS.md`](kg_agent/AGENTS.md) | Agent 层完整架构、路由判断、路径解释、工具注册、技能系统、记忆系统、API 端点、配置参数 |
+| [`EconRAGent_webui/AGENTS.md`](EconRAGent_webui/AGENTS.md) | WebUI 前端源码、依赖管理、测试与构建规范 |
 | [`lightrag_fork/docs/CHANGES.md`](lightrag_fork/docs/CHANGES.md) | 后端层完整变更日志 |
 | [`.env.example`](.env.example) | 环境变量配置模板 |
 

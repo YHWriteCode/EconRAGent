@@ -5,13 +5,16 @@ import inspect
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from lightrag_fork import LightRAG
 from lightrag_fork.api.config import get_default_host
@@ -28,6 +31,7 @@ from lightrag_fork.utils import EmbeddingFunc, get_env_value
 
 from kg_agent.agent.agent_core import AgentCore
 from kg_agent.api.agent_routes import build_error_envelope, create_agent_routes
+from kg_agent.api.webui_routes import create_webui_routes
 from kg_agent.config import KGAgentConfig
 from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
 from kg_agent.crawler.crawl_state_store import build_crawl_state_store
@@ -37,6 +41,8 @@ from kg_agent.mcp.adapter import MCPAdapter
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.memory.cross_session_store import CrossSessionStore
 from kg_agent.memory.user_profile import UserProfileStore
+from kg_agent.uploads import UploadStore
+from kg_agent.workspace_registry import WorkspaceRecord, build_workspace_registry
 
 load_dotenv(dotenv_path=".env", override=False)
 logger = logging.getLogger(__name__)
@@ -75,6 +81,36 @@ class EnvLightRAGProvider:
 
     def list_active_workspaces(self) -> list[str]:
         return sorted(self._instances)
+
+    async def evict_workspace(self, workspace: str | None) -> None:
+        resolved_workspace = self._resolve_workspace(workspace)
+        rag = self._instances.pop(resolved_workspace, None)
+        if rag is not None:
+            await rag.finalize_storages()
+
+    async def drop_workspace(self, workspace: str | None) -> None:
+        resolved_workspace = self._resolve_workspace(workspace)
+        rag = await self.get(resolved_workspace)
+        storages = [
+            getattr(rag, "full_docs", None),
+            getattr(rag, "text_chunks", None),
+            getattr(rag, "full_entities", None),
+            getattr(rag, "full_relations", None),
+            getattr(rag, "entity_chunks", None),
+            getattr(rag, "relation_chunks", None),
+            getattr(rag, "entities_vdb", None),
+            getattr(rag, "relationships_vdb", None),
+            getattr(rag, "chunks_vdb", None),
+            getattr(rag, "chunk_entity_relation_graph", None),
+            getattr(rag, "doc_status", None),
+        ]
+        for storage in storages:
+            drop_func = getattr(storage, "drop", None)
+            if callable(drop_func):
+                result = drop_func()
+                if inspect.isawaitable(result):
+                    await result
+        await self.evict_workspace(resolved_workspace)
 
     async def finalize_all(self) -> None:
         instances = list(self._instances.values())
@@ -547,6 +583,7 @@ def build_agent_core_from_env(
         sqlite_path=config.persistence.user_profile_sqlite_path,
         mongo_collection=config.persistence.user_profile_mongo_collection,
     )
+    upload_store = UploadStore(config.persistence.uploads_dir)
     cross_session_store = build_cross_session_store_from_env(
         config=config,
         conversation_memory=conversation_memory,
@@ -560,6 +597,7 @@ def build_agent_core_from_env(
             conversation_memory=conversation_memory,
             cross_session_store=cross_session_store,
             user_profile_store=user_profile_store,
+            upload_store=upload_store,
         )
     return AgentCore(
         rag=rag or build_rag_from_env(),
@@ -569,6 +607,7 @@ def build_agent_core_from_env(
         conversation_memory=conversation_memory,
         cross_session_store=cross_session_store,
         user_profile_store=user_profile_store,
+        upload_store=upload_store,
     )
 
 
@@ -601,6 +640,12 @@ def create_app(
     crawler_adapter = None
     mcp_adapter = None
     scheduler = None
+    workspace_registry = build_workspace_registry(
+        backend=config_obj.persistence.scheduler_store_backend,
+        file_path=config_obj.persistence.workspace_registry_file,
+        sqlite_path=config_obj.persistence.workspace_registry_sqlite_path,
+    )
+    upload_store = UploadStore(config_obj.persistence.uploads_dir)
 
     if agent_core is None:
         crawler_adapter = build_crawler_adapter_from_env(config=config_obj)
@@ -630,6 +675,7 @@ def create_app(
                 conversation_memory=conversation_memory,
                 cross_session_store=cross_session_store,
                 user_profile_store=user_profile_store,
+                upload_store=upload_store,
             )
         else:
             agent_core = AgentCore(
@@ -640,15 +686,18 @@ def create_app(
                 conversation_memory=conversation_memory,
                 cross_session_store=cross_session_store,
                 user_profile_store=user_profile_store,
+                upload_store=upload_store,
             )
     elif rag_instance is None:
         rag_instance = getattr(agent_core, "_rag", None)
         rag_provider = getattr(agent_core, "_rag_provider", None)
         crawler_adapter = getattr(agent_core, "crawler_adapter", None)
         mcp_adapter = getattr(agent_core, "mcp_adapter", None)
+        upload_store = getattr(agent_core, "upload_store", None) or upload_store
     else:
         crawler_adapter = getattr(agent_core, "crawler_adapter", None)
         mcp_adapter = getattr(agent_core, "mcp_adapter", None)
+        upload_store = getattr(agent_core, "upload_store", None) or upload_store
 
     if crawler_adapter is not None and agent_core is not None:
         scheduler = IngestScheduler(
@@ -677,6 +726,19 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         try:
+            default_workspace = (config_obj.runtime.default_workspace or "").strip()
+            if default_workspace:
+                existing_workspace = await workspace_registry.get_workspace(default_workspace)
+                if existing_workspace is None:
+                    await workspace_registry.upsert_workspace(
+                        WorkspaceRecord(
+                            workspace_id=default_workspace,
+                            display_name=default_workspace,
+                            description="Default workspace",
+                            created_at=datetime.now().astimezone().isoformat(),
+                            updated_at=datetime.now().astimezone().isoformat(),
+                        )
+                    )
             if scheduler is not None:
                 await scheduler.start()
             if agent_core is not None:
@@ -754,7 +816,11 @@ def create_app(
     app.state.mcp_adapter = mcp_adapter
     app.state.agent_core = agent_core
     app.state.scheduler = scheduler
+    app.state.workspace_registry = workspace_registry
+    app.state.upload_store = upload_store
     app.state.config = config_obj
+    if agent_core is not None and getattr(agent_core, "upload_store", None) is None:
+        agent_core.upload_store = upload_store
     app.include_router(
         create_agent_routes(
             agent_core,
@@ -762,6 +828,46 @@ def create_app(
             expose_internal_errors=_expose_internal_errors(),
         )
     )
+    app.include_router(
+        create_webui_routes(
+            agent_core,
+            scheduler=scheduler,
+            workspace_registry=workspace_registry,
+            upload_store=upload_store,
+            rag_provider=rag_provider,
+        )
+    )
+
+    webui_dir = Path(__file__).resolve().parent / "webui"
+    if webui_dir.exists():
+        assets_dir = webui_dir / "assets"
+        if assets_dir.exists():
+            app.mount("/webui/assets", StaticFiles(directory=assets_dir), name="webui-assets")
+
+        @app.get("/", include_in_schema=False)
+        async def webui_root_redirect():
+            return RedirectResponse(url="/webui/chat", status_code=307)
+
+        @app.get("/webui", include_in_schema=False)
+        async def serve_webui_index():
+            index_file = webui_dir / "index.html"
+            if not index_file.exists():
+                raise HTTPException(status_code=503, detail="WebUI build is not available")
+            return FileResponse(index_file)
+
+        @app.get("/webui/{full_path:path}", include_in_schema=False)
+        async def serve_webui(full_path: str):
+            index_file = webui_dir / "index.html"
+            if not index_file.exists():
+                raise HTTPException(status_code=503, detail="WebUI build is not available")
+            candidate = (webui_dir / full_path).resolve()
+            try:
+                candidate.relative_to(webui_dir.resolve())
+            except ValueError:
+                raise HTTPException(status_code=404, detail="Not found")
+            if candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(index_file)
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(

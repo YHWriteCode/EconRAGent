@@ -1937,6 +1937,7 @@ class IngestScheduler:
         updated_record = EventClusterRecord(
             cluster_id=cluster_id,
             headline=(title or "").strip() or (current.headline if current else ""),
+            summary=current.summary if current else "",
             signature_text=cls._build_event_signature_text(title=title, content=content),
             content_fingerprint=content_fingerprint
             or (current.content_fingerprint if current else ""),
