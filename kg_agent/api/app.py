@@ -521,7 +521,7 @@ def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
         ),
         enable_llm_cache=get_env_value("ENABLE_LLM_CACHE", True, bool),
         max_parallel_insert=get_env_value("MAX_PARALLEL_INSERT", 2, int),
-        max_graph_nodes=get_env_value("MAX_GRAPH_NODES", 1000, int),
+        max_graph_nodes=get_env_value("MAX_GRAPH_NODES", 800, int),
     )
     return rag
 

@@ -678,6 +678,73 @@ def test_webui_graph_routes_expose_overview_filters_and_path_explanation(tmp_pat
     )
 
 
+def test_webui_graph_routes_reallocate_unused_all_workspace_budget(tmp_path):
+    class _ImbalancedFakeRAG:
+        def __init__(self, workspace_id: str):
+            self.workspace = workspace_id
+
+        async def get_knowledge_graph(
+            self,
+            *,
+            node_label: str,
+            max_depth: int,
+            max_nodes: int,
+        ):
+            del node_label, max_depth
+            total_nodes = 5 if self.workspace == "ws-alpha" else 1
+            nodes = [
+                _FakeNode(
+                    node_id=f"{self.workspace}-node-{index}",
+                    entity_type="Company",
+                    updated_at="2026-04-04T08:00:00+00:00",
+                )
+                for index in range(total_nodes)
+            ][:max_nodes]
+            return SimpleNamespace(
+                nodes=nodes,
+                edges=[],
+                is_truncated=total_nodes > max_nodes,
+            )
+
+    class _ImbalancedAgentCore(_FakeAgentCore):
+        async def _resolve_rag(self, workspace: str | None):
+            workspace_id = (workspace or "").strip()
+            if workspace_id not in self._rag_by_workspace:
+                self._rag_by_workspace[workspace_id] = _ImbalancedFakeRAG(workspace_id)
+            return self._rag_by_workspace[workspace_id]
+
+    memory = ConversationMemoryStore()
+    registry = InMemoryWorkspaceRegistry()
+    _seed_workspace_registry(registry)
+    upload_store = UploadStore(str(tmp_path / "uploads"))
+    app = FastAPI()
+    app.include_router(
+        create_webui_routes(
+            _ImbalancedAgentCore(conversation_memory=memory),
+            scheduler=None,
+            workspace_registry=registry,
+            upload_store=upload_store,
+            rag_provider=None,
+        )
+    )
+    client = TestClient(app)
+
+    response = client.get(
+        "/agent/graph/overview",
+        params={"workspace": "all", "max_nodes": 4},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["summary"]["node_count"] == 4
+    workspace_counts: dict[str, int] = {}
+    for node in payload["nodes"]:
+        workspace_id = str(node["workspace_id"])
+        workspace_counts[workspace_id] = workspace_counts.get(workspace_id, 0) + 1
+    assert workspace_counts == {"ws-alpha": 3, "ws-beta": 1}
+    assert payload["is_truncated"] is True
+
+
 def test_webui_discover_routes_paginate_and_fallback_to_doc_summary(tmp_path):
     client, *_ = _build_client(tmp_path)
 

@@ -376,6 +376,122 @@ async def _load_graph_payload(
     }
 
 
+def _budget_by_workspace(workspace_ids: list[str], max_nodes: int) -> dict[str, int]:
+    if not workspace_ids or max_nodes <= 0:
+        return {}
+    base = max_nodes // len(workspace_ids)
+    remainder = max_nodes % len(workspace_ids)
+    return {
+        workspace_id: base + (1 if index < remainder else 0)
+        for index, workspace_id in enumerate(workspace_ids)
+    }
+
+
+def _merge_workspace_graph_payloads(
+    payloads: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    ordered_workspaces = list(payloads.keys())
+    return {
+        "workspace": "all",
+        "nodes": [
+            node
+            for workspace_id in ordered_workspaces
+            for node in payloads[workspace_id].get("nodes", [])
+        ],
+        "edges": [
+            edge
+            for workspace_id in ordered_workspaces
+            for edge in payloads[workspace_id].get("edges", [])
+        ],
+        "is_truncated": any(
+            bool(payloads[workspace_id].get("is_truncated"))
+            for workspace_id in ordered_workspaces
+        ),
+    }
+
+
+async def _load_all_workspace_graph_payloads(
+    *,
+    agent_core: Any,
+    workspace_ids: list[str],
+    label: str,
+    max_depth: int,
+    max_nodes: int,
+) -> dict[str, Any]:
+    if not workspace_ids:
+        return {
+            "workspace": "all",
+            "nodes": [],
+            "edges": [],
+            "is_truncated": False,
+        }
+
+    budgets = _budget_by_workspace(workspace_ids, max_nodes)
+    payloads = {
+        workspace_id: payload
+        for workspace_id, payload in zip(
+            workspace_ids,
+            await asyncio.gather(
+                *[
+                    _load_graph_payload(
+                        agent_core=agent_core,
+                        workspace_id=workspace_id,
+                        label=label,
+                        max_depth=max_depth,
+                        max_nodes=budgets[workspace_id],
+                    )
+                    for workspace_id in workspace_ids
+                ]
+            ),
+            strict=False,
+        )
+    }
+
+    while True:
+        used_nodes = sum(len(payload.get("nodes", [])) for payload in payloads.values())
+        remaining_budget = max_nodes - used_nodes
+        expandable_workspaces = [
+            workspace_id
+            for workspace_id in workspace_ids
+            if remaining_budget > 0 and bool(payloads[workspace_id].get("is_truncated"))
+        ]
+        if remaining_budget <= 0 or not expandable_workspaces:
+            break
+
+        extra_budgets = _budget_by_workspace(expandable_workspaces, remaining_budget)
+        updated_payloads = {
+            workspace_id: payload
+            for workspace_id, payload in zip(
+                expandable_workspaces,
+                await asyncio.gather(
+                    *[
+                        _load_graph_payload(
+                            agent_core=agent_core,
+                            workspace_id=workspace_id,
+                            label=label,
+                            max_depth=max_depth,
+                            max_nodes=budgets[workspace_id] + extra_budgets[workspace_id],
+                        )
+                        for workspace_id in expandable_workspaces
+                    ]
+                ),
+                strict=False,
+            )
+        }
+
+        growth = 0
+        for workspace_id in expandable_workspaces:
+            previous_count = len(payloads[workspace_id].get("nodes", []))
+            new_count = len(updated_payloads[workspace_id].get("nodes", []))
+            growth += max(0, new_count - previous_count)
+            budgets[workspace_id] += extra_budgets[workspace_id]
+            payloads[workspace_id] = updated_payloads[workspace_id]
+        if growth == 0:
+            break
+
+    return _merge_workspace_graph_payloads(payloads)
+
+
 async def _resolve_event_summary(
     *,
     agent_core: Any,
@@ -865,7 +981,7 @@ def create_webui_routes(
     @router.get("/agent/graph/overview")
     async def get_graph_overview(
         workspace: str = "all",
-        max_nodes: int = Query(default=120, ge=1, le=2000),
+        max_nodes: int = Query(default=800, ge=1, le=800),
     ):
         normalized_workspace = (workspace or "all").strip() or "all"
         if normalized_workspace == "all":
@@ -879,25 +995,13 @@ def create_webui_routes(
                     "summary": _graph_summary({"nodes": [], "edges": [], "is_truncated": False}),
                     "is_truncated": False,
                 }
-            per_workspace_budget = max(1, max_nodes // max(1, len(workspace_ids)))
-            payloads = await asyncio.gather(
-                *[
-                    _load_graph_payload(
-                        agent_core=agent_core,
-                        workspace_id=workspace_id,
-                        label="*",
-                        max_depth=2,
-                        max_nodes=per_workspace_budget,
-                    )
-                    for workspace_id in workspace_ids
-                ]
+            merged = await _load_all_workspace_graph_payloads(
+                agent_core=agent_core,
+                workspace_ids=workspace_ids,
+                label="*",
+                max_depth=2,
+                max_nodes=max_nodes,
             )
-            merged = {
-                "workspace": "all",
-                "nodes": [node for payload in payloads for node in payload.get("nodes", [])],
-                "edges": [edge for payload in payloads for edge in payload.get("edges", [])],
-                "is_truncated": any(bool(payload.get("is_truncated")) for payload in payloads),
-            }
             return {
                 **merged,
                 "summary": _graph_summary(merged),
@@ -920,7 +1024,7 @@ def create_webui_routes(
         workspace: str,
         label: str = "*",
         max_depth: int = Query(default=2, ge=1, le=6),
-        max_nodes: int = Query(default=120, ge=1, le=2000),
+        max_nodes: int = Query(default=800, ge=1, le=800),
         entity_type: str | None = None,
         time_from: str | None = None,
         time_to: str | None = None,
@@ -928,13 +1032,33 @@ def create_webui_routes(
         workspace_id = _normalize_workspace(workspace)
         if workspace_id is None:
             raise HTTPException(status_code=400, detail="workspace is required")
-        payload = await _load_graph_payload(
-            agent_core=agent_core,
-            workspace_id=workspace_id,
-            label=(label or "*").strip() or "*",
-            max_depth=max_depth,
-            max_nodes=max_nodes,
-        )
+        graph_label = (label or "*").strip() or "*"
+        if workspace_id == "all":
+            records = await workspace_registry.list_workspaces()
+            workspace_ids = [record.workspace_id for record in records]
+            if not workspace_ids:
+                payload = {
+                    "workspace": "all",
+                    "nodes": [],
+                    "edges": [],
+                    "is_truncated": False,
+                }
+            else:
+                payload = await _load_all_workspace_graph_payloads(
+                    agent_core=agent_core,
+                    workspace_ids=workspace_ids,
+                    label=graph_label,
+                    max_depth=max_depth,
+                    max_nodes=max_nodes,
+                )
+        else:
+            payload = await _load_graph_payload(
+                agent_core=agent_core,
+                workspace_id=workspace_id,
+                label=graph_label,
+                max_depth=max_depth,
+                max_nodes=max_nodes,
+            )
         filtered = _filter_graph_payload(
             payload,
             entity_type=entity_type,

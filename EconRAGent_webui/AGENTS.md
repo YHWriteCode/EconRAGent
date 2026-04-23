@@ -66,3 +66,15 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 - Preserve same-origin deployment assumptions; avoid adding environment-specific frontend API host logic unless required.
 - Prefer updating tests when UI contracts, route structure, or request parameters change.
 - Treat `kg_agent/api/webui/` as generated output. Edit source in `src/`, not the built files.
+
+---
+
+## 6. Current WebUI Layout Conventions
+
+- `AppShell` owns the shared left sidebar and top navigation for `chat`, `graph`, and `discover`.
+- The `spaces` route is a standalone management page: keep the left sidebar, hide the top navigation, and provide its own close/create controls.
+- Avoid using visual-only movement such as `transform` for major layout placement when it affects scroll boundaries; prefer real grid/flex layout space.
+- Keep `chat` and `graph` as fixed-viewport work surfaces. Only nested regions should scroll: chat message feed, graph filter panel, sidebar history, and spaces database list.
+- `discover` is a news/feed page and may use normal page scrolling.
+- Preserve the chat composer contract: attachment/search menu from the `+` button, retrieval mode buttons below the input, and auto-growing textarea with an internal max-height.
+- Preserve the graph page contract: Cytoscape canvas as the primary surface, with a collapsible database filter sidebar that allows the canvas to expand.

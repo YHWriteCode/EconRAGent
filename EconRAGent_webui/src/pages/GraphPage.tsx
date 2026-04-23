@@ -40,7 +40,7 @@ function createInitialFilters(workspaceFromUrl?: string | null): GraphFilters {
     workspace: workspaceFromUrl || "all",
     label: "*",
     maxDepth: 2,
-    maxNodes: 120,
+    maxNodes: 800,
     entityType: "",
     timeFrom: "",
     timeTo: "",

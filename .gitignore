@@ -212,4 +212,6 @@ __marimo__/
 # Frontend workspace
 EconRAGent_webui/node_modules/
 EconRAGent_webui/.vite/
+!EconRAGent_webui/src/lib/
+!EconRAGent_webui/src/lib/**
 npm-debug.log*
