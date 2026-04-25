@@ -1,16 +1,38 @@
-import { Suspense, lazy, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { Core } from "cytoscape";
 import { useSearchParams } from "react-router-dom";
 
-import { getGraphData, listWorkspaces, searchGraphLabels } from "../lib/api";
-import { toIsoDateTime } from "../lib/format";
 import {
+  getGraphData,
+  getGraphEntityDetail,
+  getGraphRelationDetail,
+  getGraphSchema,
+  listWorkspaces,
+  searchGraphLabels,
+} from "../lib/api";
+import { formatTime, toIsoDateTime } from "../lib/format";
+import {
+  resolveEntityTypeColor,
   resolveGraphNodeLabel,
   resolveGraphNodeSearchText,
 } from "../lib/graphVisual";
 import { queryKeys } from "../lib/queryKeys";
-import type { GraphFilters } from "../types";
+import type {
+  GraphEntityDetail,
+  GraphFilters,
+  GraphRelationDetail,
+  GraphSchemaOption,
+} from "../types";
 import type { GraphLayoutName } from "../components/CytoscapeGraph";
 
 const CytoscapeGraph = lazy(async () => {
@@ -18,22 +40,12 @@ const CytoscapeGraph = lazy(async () => {
   return { default: module.CytoscapeGraph };
 });
 
-const ENTITY_FILTERS = [
-  { label: "公司", value: "Company", icon: "▦" },
-  { label: "行业", value: "Industry", icon: "⌘" },
-  { label: "指标", value: "Metric", icon: "▥" },
-  { label: "政策", value: "Policy", icon: "▣" },
-  { label: "事件", value: "Event", icon: "▤" },
-  { label: "国家", value: "Country", icon: "◎" },
-] as const;
-
-const RELATION_FILTERS = [
-  { label: "影响", value: "impact", icon: "→" },
-  { label: "属于", value: "belongs_to", icon: "⊂" },
-  { label: "关联", value: "related", icon: "↔" },
-  { label: "导致", value: "causes", icon: "↪" },
-  { label: "竞争", value: "competes", icon: "⚔" },
-] as const;
+type GraphInspectState =
+  | { kind: "empty" }
+  | { kind: "loading"; title: string }
+  | { kind: "entity"; payload: GraphEntityDetail }
+  | { kind: "relation"; payload: GraphRelationDetail }
+  | { kind: "error"; message: string };
 
 function createInitialFilters(workspaceFromUrl?: string | null): GraphFilters {
   return {
@@ -42,9 +54,171 @@ function createInitialFilters(workspaceFromUrl?: string | null): GraphFilters {
     maxDepth: 2,
     maxNodes: 800,
     entityType: "",
+    relationType: "",
     timeFrom: "",
     timeTo: "",
   };
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function readText(record: Record<string, unknown>, keys: string[], fallback = "") {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim().replace(/<SEP>/g, " / ");
+    }
+    if (typeof value === "number") {
+      return String(value);
+    }
+  }
+  return fallback;
+}
+
+function optionLabel(option: GraphSchemaOption): string {
+  return option.display_name || option.name;
+}
+
+function chipLabelStyle(label: string) {
+  const length = Array.from(label).length;
+  if (length <= 4) {
+    return undefined;
+  }
+  return {
+    fontSize: length <= 6 ? "12px" : length <= 8 ? "11px" : "10px",
+  };
+}
+
+function entityTitle(node: Record<string, unknown>, fallback: string) {
+  return readText(node, ["entity_id", "entity_name", "name", "label", "id"], fallback);
+}
+
+function entityType(node: Record<string, unknown>) {
+  return readText(node, ["entity_type", "type"], "unknown");
+}
+
+function relationTitle(edge: Record<string, unknown>) {
+  return readText(edge, ["relation_type", "keywords", "relation", "type"], "关系");
+}
+
+function updatedAt(record: Record<string, unknown>) {
+  return readText(record, ["last_confirmed_at", "updated_at", "created_at"]);
+}
+
+function GraphInspectPanel({
+  detail,
+  onClose,
+}: {
+  detail: GraphInspectState;
+  onClose: () => void;
+}) {
+  if (detail.kind === "empty") {
+    return null;
+  }
+
+  if (detail.kind === "loading") {
+    return (
+      <aside className="graph-inspect-panel">
+        <div className="detail-header">
+          <div>
+            <span className="detail-kicker">详情</span>
+            <h3>{detail.title}</h3>
+          </div>
+          <button className="ghost-button" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        <div className="empty-inline">正在加载...</div>
+      </aside>
+    );
+  }
+
+  if (detail.kind === "error") {
+    return (
+      <aside className="graph-inspect-panel">
+        <div className="detail-header">
+          <div>
+            <span className="detail-kicker">详情</span>
+            <h3>加载失败</h3>
+          </div>
+          <button className="ghost-button" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        <div className="error-state">{detail.message}</div>
+      </aside>
+    );
+  }
+
+  if (detail.kind === "entity") {
+    const node = asRecord(detail.payload.node);
+    const type = entityType(node);
+    const source = readText(node, ["source_id", "source", "file_path", "doc_id"], "无");
+    const description = readText(node, ["description"], "暂无描述");
+    return (
+      <aside className="graph-inspect-panel">
+        <div className="detail-header">
+          <div>
+            <span className="detail-kicker">实体 · {detail.payload.workspace}</span>
+            <h3>{entityTitle(node, detail.payload.entity_id)}</h3>
+          </div>
+          <button className="ghost-button" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+        <div className="graph-inspect-summary">
+          <span className="entity-type-badge">
+            <span
+              className="legend-dot"
+              style={{ backgroundColor: resolveEntityTypeColor(type) }}
+            />
+            {type}
+          </span>
+          <p>{description}</p>
+        </div>
+        <dl className="graph-inspect-kv">
+          <div>
+            <dt>节点来源</dt>
+            <dd>{source}</dd>
+          </div>
+          <div>
+            <dt>节点更新时间</dt>
+            <dd>{formatTime(updatedAt(node))}</dd>
+          </div>
+        </dl>
+      </aside>
+    );
+  }
+
+  const edge = asRecord(detail.payload.edge);
+  const description = readText(edge, ["description"], "暂无描述");
+  return (
+    <aside className="graph-inspect-panel">
+      <div className="detail-header">
+        <div>
+          <span className="detail-kicker">关系 · {detail.payload.workspace}</span>
+          <h3>{detail.payload.source} → {detail.payload.target}</h3>
+        </div>
+        <button className="ghost-button" type="button" onClick={onClose}>
+          关闭
+        </button>
+      </div>
+      <dl className="graph-inspect-kv">
+        <div>
+          <dt>关系名</dt>
+          <dd>{relationTitle(edge)}</dd>
+        </div>
+        <div>
+          <dt>关系描述</dt>
+          <dd>{description}</dd>
+        </div>
+      </dl>
+    </aside>
+  );
 }
 
 export function GraphPage() {
@@ -58,10 +232,11 @@ export function GraphPage() {
   );
   const [layoutName] = useState<GraphLayoutName>("cose");
   const [graphSearchText, setGraphSearchText] = useState("");
-  const [relationFilter, setRelationFilter] = useState("");
   const [filterCollapsed, setFilterCollapsed] = useState(false);
   const [focusRequest, setFocusRequest] = useState({ query: "", nonce: 0 });
+  const [inspectDetail, setInspectDetail] = useState<GraphInspectState>({ kind: "empty" });
   const cyRef = useRef<Core | null>(null);
+  const detailRequestRef = useRef(0);
   const deferredLabel = useDeferredValue(draftFilters.label);
 
   useEffect(() => {
@@ -75,6 +250,11 @@ export function GraphPage() {
   const workspacesQuery = useQuery({
     queryKey: queryKeys.workspaces,
     queryFn: listWorkspaces,
+  });
+
+  const graphSchemaQuery = useQuery({
+    queryKey: queryKeys.graphSchema(draftFilters.workspace || "all"),
+    queryFn: () => getGraphSchema(draftFilters.workspace || "all"),
   });
 
   const graphScope = JSON.stringify(appliedFilters);
@@ -120,6 +300,59 @@ export function GraphPage() {
 
   const nodeSearchValue = draftFilters.label === "*" ? "" : draftFilters.label;
 
+  const entityFilters = graphSchemaQuery.data?.entity_types ?? [];
+  const relationFilters = graphSchemaQuery.data?.relation_types ?? [];
+
+  const closeInspectDetail = useCallback(() => {
+    detailRequestRef.current += 1;
+    setInspectDetail({ kind: "empty" });
+  }, []);
+
+  const handleNodeSelect = useCallback(async (workspaceId: string, entityId: string) => {
+    const requestId = detailRequestRef.current + 1;
+    detailRequestRef.current = requestId;
+    setInspectDetail({ kind: "loading", title: entityId });
+    try {
+      const payload = await getGraphEntityDetail(workspaceId, entityId);
+      if (detailRequestRef.current === requestId) {
+        setInspectDetail({ kind: "entity", payload });
+      }
+    } catch (error) {
+      if (detailRequestRef.current === requestId) {
+        setInspectDetail({
+          kind: "error",
+          message: error instanceof Error ? error.message : "节点详情加载失败",
+        });
+      }
+    }
+  }, []);
+
+  const handleEdgeSelect = useCallback(
+    async (workspaceId: string, source: string, target: string) => {
+      const requestId = detailRequestRef.current + 1;
+      detailRequestRef.current = requestId;
+      setInspectDetail({ kind: "loading", title: `${source} → ${target}` });
+      try {
+        const payload = await getGraphRelationDetail(workspaceId, source, target);
+        if (detailRequestRef.current === requestId) {
+          setInspectDetail({ kind: "relation", payload });
+        }
+      } catch (error) {
+        if (detailRequestRef.current === requestId) {
+          setInspectDetail({
+            kind: "error",
+            message: error instanceof Error ? error.message : "关系详情加载失败",
+          });
+        }
+      }
+    },
+    [],
+  );
+
+  const handleGraphReady = useCallback((instance: Core | null) => {
+    cyRef.current = instance;
+  }, []);
+
   const requestGraphFocus = () => {
     const query = graphSearchText.trim();
     if (!query) {
@@ -139,8 +372,8 @@ export function GraphPage() {
     const next = createInitialFilters(initialWorkspace);
     setDraftFilters(next);
     setAppliedFilters(next);
-    setRelationFilter("");
     setGraphSearchText("");
+    closeInspectDetail();
   };
 
   return (
@@ -210,12 +443,9 @@ export function GraphPage() {
                 layoutName={layoutName}
                 focusQuery={focusRequest.query}
                 focusNonce={focusRequest.nonce}
-                showEdgeLabels
-                onEdgeSelect={() => undefined}
-                onNodeSelect={() => undefined}
-                onReady={(instance) => {
-                  cyRef.current = instance;
-                }}
+                onEdgeSelect={handleEdgeSelect}
+                onNodeSelect={handleNodeSelect}
+                onReady={handleGraphReady}
               />
             </Suspense>
           ) : (
@@ -234,12 +464,11 @@ export function GraphPage() {
             </button>
           </div>
 
-          <div className="graph-line-legend" aria-label="关系图例">
-            <span><i className="line-solid" />影响</span>
-            <span><i className="line-muted" />属于</span>
-            <span><i className="line-dotted" />关联</span>
-            <span><i className="line-dashed" />导致</span>
+          <div className="graph-canvas-meta" aria-label="图谱统计">
+            <span>节点 {graphQuery.data?.summary.node_count ?? 0}</span>
+            <span>边 {graphQuery.data?.summary.edge_count ?? 0}</span>
           </div>
+          <GraphInspectPanel detail={inspectDetail} onClose={closeInspectDetail} />
         </div>
       </section>
 
@@ -280,8 +509,12 @@ export function GraphPage() {
                     }))
                   }
                 >
-                  <span className="filter-check" aria-hidden="true" />
-                  {workspace.label}
+                  <span
+                    className="filter-chip-label"
+                    style={chipLabelStyle(workspace.label)}
+                  >
+                    {workspace.label}
+                  </span>
                 </button>
               ))}
             </div>
@@ -290,22 +523,26 @@ export function GraphPage() {
           <section className="filter-panel">
             <h3>实体类型</h3>
             <div className="filter-chip-grid">
-              {ENTITY_FILTERS.map((entity) => (
+              {entityFilters.map((entity) => (
                 <button
                   className={`filter-chip ${
-                    draftFilters.entityType === entity.value ? "active" : ""
+                    draftFilters.entityType === entity.name ? "active" : ""
                   }`}
-                  key={entity.value}
+                  key={entity.name}
                   type="button"
                   onClick={() =>
                     setDraftFilters((current) => ({
                       ...current,
-                      entityType: current.entityType === entity.value ? "" : entity.value,
+                      entityType: current.entityType === entity.name ? "" : entity.name,
                     }))
                   }
                 >
-                  <span className="filter-icon" aria-hidden="true">{entity.icon}</span>
-                  {entity.label}
+                  <span
+                    className="filter-chip-label"
+                    style={chipLabelStyle(optionLabel(entity))}
+                  >
+                    {optionLabel(entity)}
+                  </span>
                 </button>
               ))}
             </div>
@@ -314,19 +551,27 @@ export function GraphPage() {
           <section className="filter-panel">
             <h3>关系类型</h3>
             <div className="filter-chip-grid relation-chip-grid">
-              {RELATION_FILTERS.map((relation) => (
+              {relationFilters.map((relation) => (
                 <button
-                  className={`filter-chip ${relationFilter === relation.value ? "active" : ""}`}
-                  key={relation.value}
+                  className={`filter-chip ${
+                    draftFilters.relationType === relation.name ? "active" : ""
+                  }`}
+                  key={relation.name}
                   type="button"
                   onClick={() =>
-                    setRelationFilter((current) =>
-                      current === relation.value ? "" : relation.value,
-                    )
+                    setDraftFilters((current) => ({
+                      ...current,
+                      relationType:
+                        current.relationType === relation.name ? "" : relation.name,
+                    }))
                   }
                 >
-                  <span className="filter-icon" aria-hidden="true">{relation.icon}</span>
-                  {relation.label}
+                  <span
+                    className="filter-chip-label"
+                    style={chipLabelStyle(optionLabel(relation))}
+                  >
+                    {optionLabel(relation)}
+                  </span>
                 </button>
               ))}
             </div>

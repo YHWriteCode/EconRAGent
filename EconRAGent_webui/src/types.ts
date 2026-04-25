@@ -80,6 +80,25 @@ export interface GraphPayload {
   is_truncated: boolean;
 }
 
+export interface GraphSchemaOption {
+  name: string;
+  display_name: string;
+  description: string;
+  aliases: string[];
+}
+
+export interface GraphSchemaPayload {
+  profile_name: string;
+  domain_name: string;
+  entity_types: GraphSchemaOption[];
+  relation_types: Array<
+    GraphSchemaOption & {
+      source_types: string[];
+      target_types: string[];
+    }
+  >;
+}
+
 export interface GraphEntityDetail {
   workspace: string;
   entity_id: string;
@@ -168,6 +187,7 @@ export interface GraphFilters {
   maxDepth: number;
   maxNodes: number;
   entityType: string;
+  relationType: string;
   timeFrom: string;
   timeTo: string;
 }

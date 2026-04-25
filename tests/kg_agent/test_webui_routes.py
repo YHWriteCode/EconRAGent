@@ -302,6 +302,9 @@ class _FakeAgentCore:
         self.conversation_memory = conversation_memory
         self.path_explainer = _FakePathExplainer()
         self.crawler_adapter = _FakeCrawlerAdapter()
+        self.config = SimpleNamespace(
+            runtime=SimpleNamespace(default_domain_schema="economy")
+        )
         self._rag_by_workspace: dict[str, _FakeRAG] = {}
 
     async def _resolve_rag(self, workspace: str | None):
@@ -641,6 +644,34 @@ def test_webui_graph_routes_expose_overview_filters_and_path_explanation(tmp_pat
     subgraph_payload = subgraph_response.json()
     assert subgraph_payload["summary"]["node_count"] == 1
     assert subgraph_payload["nodes"][0]["id"] == "Acme"
+
+    relation_filtered_response = client.get(
+        "/agent/graph/subgraph",
+        params={
+            "workspace": "ws-alpha",
+            "relation_type": "affected_by",
+        },
+    )
+    assert relation_filtered_response.status_code == 200
+    relation_filtered_payload = relation_filtered_response.json()
+    assert relation_filtered_payload["summary"]["edge_count"] == 1
+    assert relation_filtered_payload["edges"][0]["type"] == "affected_by"
+    assert {item["id"] for item in relation_filtered_payload["nodes"]} == {
+        "Acme",
+        "Macro",
+    }
+
+    schema_response = client.get("/agent/graph/schema")
+    assert schema_response.status_code == 200
+    schema_payload = schema_response.json()
+    assert schema_payload["profile_name"] == "economy"
+    assert {item["name"] for item in schema_payload["entity_types"]} >= {
+        "Company",
+        "Metric",
+    }
+    assert {
+        item["name"] for item in schema_payload["relation_types"]
+    } >= {"affects_metric", "belongs_to_industry"}
 
     labels_response = client.get(
         "/agent/graph/labels",

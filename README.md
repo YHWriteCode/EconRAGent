@@ -410,6 +410,7 @@ docker build -f mcp-server/Dockerfile.local-rebuild -t econragent-mcp-skill-serv
 | GET | `/agent/workspaces` | 查询知识库空间列表 |
 | GET | `/agent/graph/overview` | 查询图谱概览/联邦概览 |
 | GET | `/agent/discover/events` | 查询发现页事件流 |
+| GET | `/agent/graph/schema` | 查询 WebUI 图谱筛选使用的实体/关系 Schema 模板 |
 | GET | `/agent/tools` | 查看当前可用工具/能力 |
 | GET | `/agent/skills` | 查看本地技能目录 |
 | POST | `/agent/skills/{skill_name}/invoke` | 直接调用本地技能 |

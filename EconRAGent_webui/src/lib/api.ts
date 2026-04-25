@@ -9,6 +9,7 @@ import type {
   GraphPathResponse,
   GraphPayload,
   GraphRelationDetail,
+  GraphSchemaPayload,
   ImportStatusPayload,
   SessionSummary,
   SkillArtifactContentPayload,
@@ -205,6 +206,7 @@ export async function getGraphData(filters: GraphFilters): Promise<GraphPayload>
   const useOverview =
     filters.label.trim() === "*" &&
     !filters.entityType.trim() &&
+    !filters.relationType.trim() &&
     !filters.timeFrom &&
     !filters.timeTo;
 
@@ -224,8 +226,17 @@ export async function getGraphData(filters: GraphFilters): Promise<GraphPayload>
       max_depth: filters.maxDepth,
       max_nodes: filters.maxNodes,
       entity_type: filters.entityType.trim() || undefined,
+      relation_type: filters.relationType.trim() || undefined,
       time_from: filters.timeFrom || undefined,
       time_to: filters.timeTo || undefined,
+    })}`,
+  );
+}
+
+export async function getGraphSchema(workspaceId = "all"): Promise<GraphSchemaPayload> {
+  return fetchJson(
+    `/agent/graph/schema${buildQuery({
+      workspace: workspaceId || "all",
     })}`,
   );
 }

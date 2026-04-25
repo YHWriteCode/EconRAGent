@@ -9,6 +9,7 @@ const apiMocks = vi.hoisted(() => ({
   getGraphData: vi.fn(),
   getGraphEntityDetail: vi.fn(),
   getGraphRelationDetail: vi.fn(),
+  getGraphSchema: vi.fn(),
   listWorkspaces: vi.fn(),
   searchGraphLabels: vi.fn(),
 }));
@@ -18,6 +19,7 @@ vi.mock("../lib/api", () => ({
   getGraphData: apiMocks.getGraphData,
   getGraphEntityDetail: apiMocks.getGraphEntityDetail,
   getGraphRelationDetail: apiMocks.getGraphRelationDetail,
+  getGraphSchema: apiMocks.getGraphSchema,
   listWorkspaces: apiMocks.listWorkspaces,
   searchGraphLabels: apiMocks.searchGraphLabels,
 }));
@@ -29,6 +31,34 @@ describe("GraphPage", () => {
         {
           workspace_id: "macro",
           display_name: "宏观研究",
+        },
+      ],
+    });
+    apiMocks.getGraphSchema.mockResolvedValue({
+      profile_name: "economy",
+      domain_name: "economy",
+      entity_types: [
+        {
+          name: "Company",
+          display_name: "公司",
+          description: "",
+          aliases: [],
+        },
+        {
+          name: "Event",
+          display_name: "事件",
+          description: "",
+          aliases: [],
+        },
+      ],
+      relation_types: [
+        {
+          name: "affects_metric",
+          display_name: "影响指标",
+          description: "",
+          aliases: [],
+          source_types: [],
+          target_types: [],
         },
       ],
     });
@@ -55,12 +85,13 @@ describe("GraphPage", () => {
         maxDepth: 2,
         maxNodes: 800,
         entityType: "",
+        relationType: "",
         timeFrom: "",
         timeTo: "",
       });
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "事件" }));
+    fireEvent.click(await screen.findByRole("button", { name: "事件" }));
     fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
 
     await waitFor(() => {
@@ -70,6 +101,23 @@ describe("GraphPage", () => {
         maxDepth: 2,
         maxNodes: 800,
         entityType: "Event",
+        relationType: "",
+        timeFrom: "",
+        timeTo: "",
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "影响指标" }));
+    fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
+
+    await waitFor(() => {
+      expect(apiMocks.getGraphData).toHaveBeenLastCalledWith({
+        workspace: "all",
+        label: "*",
+        maxDepth: 2,
+        maxNodes: 800,
+        entityType: "Event",
+        relationType: "affects_metric",
         timeFrom: "",
         timeTo: "",
       });

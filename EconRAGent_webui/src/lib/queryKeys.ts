@@ -4,6 +4,7 @@ export const queryKeys = {
   sessionMessages: (sessionId: string) =>
     ["session-messages", sessionId] as const,
   graph: (scope: string) => ["graph", scope] as const,
+  graphSchema: (workspaceId: string) => ["graph-schema", workspaceId] as const,
   graphLabels: (workspaceId: string, query: string) =>
     ["graph-labels", workspaceId, query] as const,
   discover: (workspaceId: string, category: string) =>

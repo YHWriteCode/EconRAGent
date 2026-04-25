@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
+from lightrag_fork.schema import resolve_domain_schema
 from kg_agent.uploads import UploadStore
 from kg_agent.workspace_registry import (
     WorkspaceRecord,
@@ -136,10 +137,12 @@ def _filter_graph_payload(
     graph_payload: dict[str, Any],
     *,
     entity_type: str | None,
+    relation_type: str | None,
     time_from: str | None,
     time_to: str | None,
 ) -> dict[str, Any]:
     normalized_entity_type = (entity_type or "").strip().lower()
+    normalized_relation_type = _normalize_graph_filter_value(relation_type)
     nodes = []
     allowed_node_ids: set[tuple[str, str]] = set()
     for node in graph_payload.get("nodes", []):
@@ -159,6 +162,7 @@ def _filter_graph_payload(
         allowed_node_ids.add((str(node.get("workspace_id") or ""), str(node.get("id") or "")))
 
     edges = []
+    relation_node_ids: set[tuple[str, str]] = set()
     for edge in graph_payload.get("edges", []):
         if not isinstance(edge, dict):
             continue
@@ -169,13 +173,55 @@ def _filter_graph_payload(
         properties = edge.get("properties") if isinstance(edge.get("properties"), dict) else {}
         if not _within_time_window(properties, time_from=time_from, time_to=time_to):
             continue
+        if normalized_relation_type and normalized_relation_type not in _edge_relation_tokens(edge):
+            continue
         edges.append(edge)
+        relation_node_ids.add(source_key)
+        relation_node_ids.add(target_key)
+
+    if normalized_relation_type:
+        nodes = [
+            node
+            for node in nodes
+            if (str(node.get("workspace_id") or ""), str(node.get("id") or ""))
+            in relation_node_ids
+        ]
 
     return {
         **graph_payload,
         "nodes": nodes,
         "edges": edges,
     }
+
+
+def _normalize_graph_filter_value(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _split_graph_type_tokens(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        tokens: set[str] = set()
+        for item in value:
+            tokens.update(_split_graph_type_tokens(item))
+        return tokens
+    normalized = str(value).replace("<SEP>", ",")
+    for separator in ("，", "；", ";", "/", "|"):
+        normalized = normalized.replace(separator, ",")
+    return {
+        token.strip().lower()
+        for token in normalized.split(",")
+        if token.strip()
+    }
+
+
+def _edge_relation_tokens(edge: dict[str, Any]) -> set[str]:
+    properties = edge.get("properties") if isinstance(edge.get("properties"), dict) else {}
+    tokens = _split_graph_type_tokens(edge.get("type"))
+    for key in ("relation_type", "relation", "keywords"):
+        tokens.update(_split_graph_type_tokens(properties.get(key)))
+    return tokens
 
 
 def _graph_summary(graph_payload: dict[str, Any]) -> dict[str, Any]:
@@ -196,6 +242,84 @@ def _graph_summary(graph_payload: dict[str, Any]) -> dict[str, Any]:
         "entity_type_counts": entity_types,
         "is_truncated": bool(graph_payload.get("is_truncated", False)),
     }
+
+
+def _schema_option(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(item.get("name") or ""),
+        "display_name": str(item.get("display_name") or item.get("name") or ""),
+        "description": str(item.get("description") or ""),
+        "aliases": list(item.get("aliases") or []),
+    }
+
+
+def _schema_payload_from_runtime_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "profile_name": schema["profile_name"],
+        "domain_name": schema["domain_name"],
+        "entity_types": [
+            _schema_option(item)
+            for item in schema.get("entity_types", [])
+            if str(item.get("name") or "").strip()
+        ],
+        "relation_types": [
+            {
+                **_schema_option(item),
+                "source_types": list(item.get("source_types") or []),
+                "target_types": list(item.get("target_types") or []),
+            }
+            for item in schema.get("relation_types", [])
+            if str(item.get("name") or "").strip()
+        ],
+    }
+
+
+def _configured_graph_schema_payload(agent_core: Any) -> dict[str, Any]:
+    profile_name = "economy"
+    config = getattr(agent_core, "config", None)
+    runtime = getattr(config, "runtime", None)
+    configured_profile = getattr(runtime, "default_domain_schema", None)
+    if (
+        isinstance(configured_profile, str)
+        and configured_profile.strip()
+        and configured_profile.strip() != "general"
+    ):
+        profile_name = configured_profile.strip()
+
+    schema = resolve_domain_schema({"profile_name": profile_name}).to_runtime_dict()
+    return _schema_payload_from_runtime_schema(schema)
+
+
+async def _graph_schema_payload(
+    *,
+    agent_core: Any,
+    workspace_registry: WorkspaceRegistry,
+    workspace: str | None,
+) -> dict[str, Any]:
+    workspace_id = _normalize_workspace(workspace)
+    candidate_workspaces: list[str] = []
+    if workspace_id and workspace_id != "all":
+        candidate_workspaces.append(workspace_id)
+    else:
+        records = await workspace_registry.list_workspaces()
+        candidate_workspaces.extend(record.workspace_id for record in records)
+
+    for candidate in candidate_workspaces:
+        try:
+            rag = await agent_core._resolve_rag(candidate)
+        except Exception:
+            continue
+        addon_params = getattr(rag, "addon_params", None)
+        if not isinstance(addon_params, dict):
+            continue
+        runtime_schema = addon_params.get("domain_schema")
+        if not isinstance(runtime_schema, dict) or not runtime_schema.get("entity_types"):
+            continue
+        runtime_profile = str(runtime_schema.get("profile_name") or "").strip()
+        if runtime_profile != "general" or runtime_schema.get("relation_types"):
+            return _schema_payload_from_runtime_schema(runtime_schema)
+
+    return _configured_graph_schema_payload(agent_core)
 
 
 def _model_to_dict(value: Any) -> dict[str, Any]:
@@ -1019,6 +1143,14 @@ def create_webui_routes(
             "summary": _graph_summary(payload),
         }
 
+    @router.get("/agent/graph/schema")
+    async def get_graph_schema(workspace: str = "all"):
+        return await _graph_schema_payload(
+            agent_core=agent_core,
+            workspace_registry=workspace_registry,
+            workspace=workspace,
+        )
+
     @router.get("/agent/graph/subgraph")
     async def get_graph_subgraph(
         workspace: str,
@@ -1026,6 +1158,7 @@ def create_webui_routes(
         max_depth: int = Query(default=2, ge=1, le=6),
         max_nodes: int = Query(default=800, ge=1, le=800),
         entity_type: str | None = None,
+        relation_type: str | None = None,
         time_from: str | None = None,
         time_to: str | None = None,
     ):
@@ -1062,6 +1195,7 @@ def create_webui_routes(
         filtered = _filter_graph_payload(
             payload,
             entity_type=entity_type,
+            relation_type=relation_type,
             time_from=time_from,
             time_to=time_to,
         )

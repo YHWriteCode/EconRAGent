@@ -44,6 +44,7 @@ api/
 - session routes under `/agent/sessions`
 - workspace/import routes under `/agent/workspaces` and `/agent/imports`
 - graph routes under `/agent/graph/*`
+  - `GET /agent/graph/schema` exposes the active `lightrag_fork/schemas` entity and relation templates for WebUI filters, optionally scoped by `workspace`.
 - discover routes under `/agent/discover/*`
 - `GET /agent/tools`
 - `GET /agent/skills`
@@ -68,6 +69,7 @@ api/
 - The frontend source of truth is `EconRAGent_webui/`; files under `kg_agent/api/webui/` are generated assets that should be refreshed by the frontend build rather than hand-edited.
 - Graph routes treat `workspace=all` as a Web/API aggregation sentinel. Do not pass `all` into `LightRAG` as if it were a real workspace; resolve registered workspaces, query them individually, and merge the public payload at the API layer.
 - Graph route node budgets are intentionally aligned across layers: the current WebUI default request budget is `800`, and `/agent/graph/overview` plus `/agent/graph/subgraph` currently enforce `max_nodes <= 800`.
+- Graph filter option labels should stay schema-driven. The WebUI reads `/agent/graph/schema`; do not duplicate entity or relation type lists in frontend source when they already exist under `lightrag_fork/schemas`. If no workspace runtime schema is available, graph filters should fall back to the economy schema because the general schema intentionally has no relation type definitions.
 - For `workspace=all` graph requests, budget allocation is two-stage: first distribute node budget across workspaces, then recycle unused capacity to still-truncated workspaces so the merged response wastes less of the allowed node count.
 - SSE output is standardized as:
   - `event: <type>`

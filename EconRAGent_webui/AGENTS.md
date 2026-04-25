@@ -79,4 +79,7 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 - `discover` is a news/feed page and may use normal page scrolling.
 - Preserve the chat composer contract: attachment/search menu from the `+` button, retrieval mode buttons below the input, and auto-growing textarea with an internal max-height.
 - Preserve the graph page contract: Cytoscape canvas as the primary surface, with a collapsible database filter sidebar that allows the canvas to expand.
+- Graph entity and relation filter chips are schema-driven through `GET /agent/graph/schema`; keep them synchronized with `lightrag_fork/schemas` instead of hardcoding template lists in the frontend.
+- Graph filter chips should display only the schema label (`display_name` with `name` fallback); do not prepend generated initials or decorative text that can overflow narrow sidebar cards.
+- Graph edges should render as lines without inline relation text; clicking a node or edge may open an over-canvas detail panel for descriptions, source/type, timestamps, and relation names.
 - Graph page defaults currently start from `workspace="all"` and `maxNodes=800`; if you change these defaults, keep `src/pages/GraphPage.tsx`, the graph route tests, and the API-side limits in sync.

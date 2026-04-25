@@ -1404,6 +1404,84 @@ textarea,
   font-size: 18px;
 }
 
+.graph-canvas-meta {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  display: inline-flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(36, 33, 29, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #69635b;
+  font-size: 12px;
+  box-shadow: 0 8px 18px rgba(36, 33, 29, 0.06);
+}
+
+.graph-inspect-panel {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 3;
+  display: grid;
+  gap: 12px;
+  width: min(360px, calc(100% - 36px));
+  max-height: calc(100% - 36px);
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid rgba(36, 33, 29, 0.1);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.93);
+  box-shadow: 0 18px 42px rgba(36, 33, 29, 0.12);
+}
+
+.graph-inspect-panel .ghost-button {
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+}
+
+.graph-inspect-summary {
+  display: grid;
+  gap: 10px;
+}
+
+.graph-inspect-summary p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.graph-inspect-kv {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+
+.graph-inspect-kv div {
+  display: grid;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(49, 41, 33, 0.07);
+}
+
+.graph-inspect-kv dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.graph-inspect-kv dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .graph-line-legend {
   position: absolute;
   right: 22px;
@@ -1518,13 +1596,24 @@ textarea,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 9px;
   min-height: 38px;
-  padding: 8px 9px;
+  min-width: 0;
+  padding: 8px 7px;
   border: 1px solid rgba(36, 33, 29, 0.07);
   border-radius: 9px;
   background: rgba(255, 255, 255, 0.58);
   color: #5f5a53;
+  font-size: 13px;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.filter-chip-label {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .filter-chip.active {
