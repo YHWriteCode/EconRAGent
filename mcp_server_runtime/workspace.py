@@ -166,7 +166,22 @@ def _mirrored_skill_manifest_path(workspace_dir: Path) -> Path:
 
 def _is_internal_workspace_artifact(relative_path: str) -> bool:
     normalized = relative_path.replace("\\", "/").strip()
-    return normalized.startswith(f"{INTERNAL_RUNTIME_DIRNAME}/")
+    parts = [part for part in normalized.split("/") if part]
+    suffix = Path(normalized).suffix.lower()
+    return (
+        not normalized
+        or any(part.startswith(".") for part in parts)
+        or suffix in {".db", ".sqlite", ".sqlite3", ".sqlite-shm", ".sqlite-wal"}
+        or normalized.startswith(f"{INTERNAL_RUNTIME_DIRNAME}/")
+        or normalized
+        in {
+            SKILL_CONTEXT_FILENAME,
+            SKILL_INVOCATION_FILENAME,
+            "skill_runtime_runs.sqlite3",
+            "skill_runtime_runs.sqlite3-shm",
+            "skill_runtime_runs.sqlite3-wal",
+        }
+    )
 
 
 def _is_hidden_bootstrap_artifact(relative_path: str) -> bool:

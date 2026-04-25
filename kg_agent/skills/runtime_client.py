@@ -22,6 +22,13 @@ class MCPBasedSkillRuntimeClient:
     MAX_ARTIFACT_PREVIEW_BYTES = 131072
     MAX_ARTIFACT_TEXT_PREVIEW_CHARS = 1600
     MAX_ARTIFACT_TABLE_PREVIEW_ROWS = 3
+    INTERNAL_ARTIFACT_NAMES = {
+        "skill_context.json",
+        "skill_invocation.json",
+        "skill_runtime_runs.sqlite3",
+        "skill_runtime_runs.sqlite3-shm",
+        "skill_runtime_runs.sqlite3-wal",
+    }
 
     def __init__(
         self,
@@ -68,6 +75,7 @@ class MCPBasedSkillRuntimeClient:
         payload["runtime"] = self._runtime_metadata(remote_name=self.config.run_tool_name)
         payload["runtime_result"] = structured or data
         payload = self._map_workspace_to_host(payload)
+        payload = self._filter_public_artifacts(payload)
         payload = self._attach_host_artifact_previews(payload)
         return SkillRunRecord.from_dict(
             payload,
@@ -116,7 +124,53 @@ class MCPBasedSkillRuntimeClient:
                 fallback_reason=message,
             )
         normalized = self._map_workspace_to_host(self._normalize_run_payload(payload))
+        normalized = self._filter_public_artifacts(normalized)
         return self._attach_host_artifact_previews(normalized)
+
+    async def resolve_artifact_path(self, *, run_id: str, artifact_path: str) -> Path:
+        payload = await self.get_run_artifacts(run_id=run_id)
+        normalized_artifact_path = self._normalize_public_artifact_path(artifact_path)
+        artifacts = payload.get("artifacts")
+        if not isinstance(artifacts, list) or not any(
+            isinstance(item, dict)
+            and self._normalize_public_artifact_path(str(item.get("path", "")))
+            == normalized_artifact_path
+            for item in artifacts
+        ):
+            raise LookupError(f"Unknown artifact for run {run_id}: {artifact_path}")
+
+        runtime = (
+            dict(payload.get("runtime", {}))
+            if isinstance(payload.get("runtime"), dict)
+            else {}
+        )
+        runtime_workspace = (
+            str(runtime.get("container_workspace", "")).strip()
+            if isinstance(runtime.get("container_workspace"), str)
+            and str(runtime.get("container_workspace", "")).strip()
+            else str(payload.get("workspace", "")).strip()
+        )
+        runtime_target = (
+            dict(payload.get("runtime_target", {}))
+            if isinstance(payload.get("runtime_target"), dict)
+            else {}
+        )
+        host_workspace = self._resolve_host_workspace_path(
+            runtime_workspace=runtime_workspace,
+            runtime_target=runtime_target,
+        )
+        host_shared_output = self._resolve_host_shared_output_path(
+            runtime_workspace=runtime_workspace,
+            runtime_target=runtime_target,
+        )
+        source_path = self._resolve_host_artifact_path(
+            artifact_path=normalized_artifact_path,
+            host_workspace=host_workspace,
+            host_shared_output=host_shared_output,
+        )
+        if source_path is None or not source_path.is_file():
+            raise FileNotFoundError(f"Artifact is not available on this host: {artifact_path}")
+        return source_path
 
     async def _invoke_structured_tool(
         self,
@@ -326,6 +380,7 @@ class MCPBasedSkillRuntimeClient:
                 "artifacts": artifacts,
             }
         )
+        payload = self._filter_public_artifacts(payload)
         return self._attach_host_artifact_previews(payload)
 
     def _map_workspace_to_host(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -511,6 +566,8 @@ class MCPBasedSkillRuntimeClient:
                 continue
             if relative_path.startswith(".skill_bootstrap/"):
                 continue
+            if MCPBasedSkillRuntimeClient._is_internal_artifact_path(relative_path):
+                continue
             artifacts.append(
                 {
                     "path": relative_path,
@@ -518,6 +575,50 @@ class MCPBasedSkillRuntimeClient:
                 }
             )
         return artifacts
+
+    @classmethod
+    def _filter_public_artifacts(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(payload)
+        artifacts = normalized.get("artifacts")
+        if not isinstance(artifacts, list):
+            return normalized
+        public_artifacts = [
+            dict(item)
+            for item in artifacts
+            if isinstance(item, dict)
+            and not cls._is_internal_artifact_path(str(item.get("path", "")))
+        ]
+        normalized["artifacts"] = public_artifacts
+        return normalized
+
+    @classmethod
+    def _is_internal_artifact_path(cls, artifact_path: str) -> bool:
+        normalized = artifact_path.replace("\\", "/").strip()
+        parts = [part for part in normalized.split("/") if part]
+        suffix = PurePosixPath(normalized).suffix.lower()
+        return (
+            not normalized
+            or any(part.startswith(".") for part in parts)
+            or suffix in {".db", ".sqlite", ".sqlite3", ".sqlite-shm", ".sqlite-wal"}
+            or normalized.startswith(".skill_runtime/")
+            or normalized.startswith(".skill_bootstrap/")
+            or normalized in cls.INTERNAL_ARTIFACT_NAMES
+            or normalized.endswith("/skill_context.json")
+            or normalized.endswith("/skill_invocation.json")
+        )
+
+    @classmethod
+    def _normalize_public_artifact_path(cls, artifact_path: str) -> str:
+        normalized = artifact_path.replace("\\", "/").strip().lstrip("/")
+        pure = PurePosixPath(normalized)
+        if (
+            not normalized
+            or pure.is_absolute()
+            or any(part in {"", ".", ".."} for part in pure.parts)
+            or cls._is_internal_artifact_path(normalized)
+        ):
+            raise ValueError("artifact_path must refer to a public run artifact")
+        return str(pure)
 
     def _attach_host_artifact_previews(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = dict(payload)

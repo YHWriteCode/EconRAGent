@@ -2,7 +2,7 @@
 param(
     [string]$RuntimeRoot = "",
     [string]$ServerName = "skill-runtime",
-    [string]$Image = "lightrag-mcp-skill-service:latest",
+    [string]$Image = "econragent-mcp-skill-service:latest",
     [string]$SourceRoot = "",
     [string]$ConfigOutputPath = "",
     [switch]$EmitJsonOnly

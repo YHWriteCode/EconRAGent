@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$RuntimeRoot = "",
-    [string]$Image = "lightrag-mcp-skill-service:latest",
+    [string]$Image = "econragent-mcp-skill-service:latest",
     [string]$SourceRoot = "",
     [string]$SkillName = "",
     [switch]$All

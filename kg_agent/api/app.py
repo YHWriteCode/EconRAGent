@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +31,7 @@ from lightrag_fork.utils import EmbeddingFunc, get_env_value
 from kg_agent.agent.agent_core import AgentCore
 from kg_agent.api.agent_routes import build_error_envelope, create_agent_routes
 from kg_agent.api.webui_routes import create_webui_routes
-from kg_agent.config import KGAgentConfig
+from kg_agent.config import KGAgentConfig, load_project_dotenv, resolve_project_path
 from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
 from kg_agent.crawler.crawl_state_store import build_crawl_state_store
 from kg_agent.crawler.scheduler import IngestScheduler, build_scheduler_coordinator
@@ -44,7 +43,7 @@ from kg_agent.memory.user_profile import UserProfileStore
 from kg_agent.uploads import UploadStore
 from kg_agent.workspace_registry import WorkspaceRecord, build_workspace_registry
 
-load_dotenv(dotenv_path=".env", override=False)
+load_project_dotenv(override=False)
 logger = logging.getLogger(__name__)
 
 
@@ -480,7 +479,9 @@ def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
     utility_llm_model_func, utility_llm_model_name = _build_optional_utility_llm_from_env()
 
     rag = LightRAG(
-        working_dir=get_env_value("WORKING_DIR", "./rag_storage", str),
+        working_dir=str(
+            resolve_project_path(get_env_value("WORKING_DIR", "./rag_storage", str))
+        ),
         workspace=workspace
         if workspace is not None
         else get_env_value("WORKSPACE", "", str),

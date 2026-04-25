@@ -779,10 +779,126 @@ p {
   white-space: pre-wrap;
 }
 
+.message.assistant .message-bubble {
+  white-space: normal;
+}
+
+.markdown-content {
+  display: grid;
+  gap: 10px;
+  line-height: 1.65;
+}
+
+.markdown-content p,
+.markdown-content ul,
+.markdown-content pre {
+  margin: 0;
+}
+
+.markdown-content ul {
+  padding-left: 18px;
+}
+
+.markdown-content h3,
+.markdown-content h4,
+.markdown-content h5 {
+  margin: 2px 0 0;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.markdown-content code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(49, 41, 33, 0.08);
+  font-size: 0.92em;
+}
+
+.markdown-content pre,
+.artifact-content-preview {
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f5f2ec;
+  border: 1px solid rgba(49, 41, 33, 0.08);
+  white-space: pre;
+}
+
+.markdown-table-wrap {
+  overflow-x: auto;
+}
+
+.markdown-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.markdown-table-wrap th,
+.markdown-table-wrap td {
+  padding: 7px 9px;
+  border: 1px solid rgba(49, 41, 33, 0.12);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-table-wrap th {
+  background: rgba(49, 41, 33, 0.06);
+  font-weight: 700;
+}
+
 .message.user .message-bubble {
   background: #eceae6;
   color: var(--text);
   border-color: transparent;
+}
+
+.artifact-list {
+  display: grid;
+  gap: 8px;
+  width: min(74%, 720px);
+}
+
+.artifact-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(49, 41, 33, 0.1);
+}
+
+.artifact-card-main {
+  display: grid;
+  gap: 2px;
+}
+
+.artifact-card-main strong {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.artifact-card-main span,
+.artifact-read-state {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.artifact-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.artifact-action {
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.artifact-content-preview {
+  max-height: 260px;
+  margin: 0;
+  font-size: 12px;
 }
 
 .message-badges,

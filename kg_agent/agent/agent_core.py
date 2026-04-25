@@ -6,7 +6,9 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
+from urllib.parse import quote
 
 from lightrag_fork import LightRAG
 
@@ -456,6 +458,12 @@ class AgentCore:
 
     async def get_skill_run_artifacts(self, *, run_id: str) -> dict[str, Any]:
         return await self.skill_executor.get_run_artifacts(run_id=run_id)
+
+    async def resolve_skill_run_artifact_path(self, *, run_id: str, artifact_path: str):
+        return await self.skill_executor.resolve_artifact_path(
+            run_id=run_id,
+            artifact_path=artifact_path,
+        )
 
     async def get_skill_run_status(self, *, run_id: str) -> dict[str, Any]:
         return await self.skill_executor.get_run_status(run_id=run_id)
@@ -2207,14 +2215,16 @@ class AgentCore:
                 summary["file_count"] = len(files)
             artifacts = data.get("artifacts")
             if isinstance(artifacts, list):
-                summary["artifact_count"] = len(artifacts)
-                summary["artifacts"] = [
-                    {
-                        "path": item.get("path"),
-                        "size_bytes": item.get("size_bytes"),
-                    }
-                    for item in artifacts[:10]
+                public_artifacts = [
+                    item
+                    for item in artifacts
                     if isinstance(item, dict)
+                    and AgentCore._is_public_artifact_path(str(item.get("path", "")))
+                ]
+                summary["artifact_count"] = len(public_artifacts)
+                summary["artifacts"] = [
+                    AgentCore._build_public_artifact_entry(item, data.get("run_id"))
+                    for item in public_artifacts[:10]
                 ]
             artifact_previews = data.get("artifact_previews")
             if isinstance(artifact_previews, list):
@@ -2294,6 +2304,54 @@ class AgentCore:
             summary["core_entity"] = data["core_entity"]
             summary["path_count"] = len(data.get("paths", []))
         return summary
+
+    @staticmethod
+    def _build_public_artifact_entry(
+        item: dict[str, Any],
+        run_id: Any,
+    ) -> dict[str, Any]:
+        path = str(item.get("path", "")).replace("\\", "/").strip()
+        entry: dict[str, Any] = {
+            "path": path,
+            "size_bytes": item.get("size_bytes"),
+        }
+        normalized_run_id = str(run_id or "").strip()
+        if normalized_run_id and path:
+            encoded_run_id = quote(normalized_run_id, safe="")
+            encoded_path = quote(path, safe="")
+            base = f"/agent/skill-runs/{encoded_run_id}/artifacts"
+            entry["download_url"] = f"{base}/download?path={encoded_path}"
+            entry["content_url"] = f"{base}/content?path={encoded_path}"
+            entry["readable"] = AgentCore._is_likely_readable_artifact(path)
+        return entry
+
+    @staticmethod
+    def _is_public_artifact_path(path: str) -> bool:
+        normalized = path.replace("\\", "/").strip().lstrip("/")
+        parts = [part for part in normalized.split("/") if part]
+        suffix = Path(normalized).suffix.lower()
+        return bool(normalized) and not (
+            any(part.startswith(".") for part in parts)
+            or suffix in {".db", ".sqlite", ".sqlite3", ".sqlite-shm", ".sqlite-wal"}
+            or normalized in {"skill_context.json", "skill_invocation.json"}
+            or normalized.endswith("/skill_context.json")
+            or normalized.endswith("/skill_invocation.json")
+        )
+
+    @staticmethod
+    def _is_likely_readable_artifact(path: str) -> bool:
+        suffix = Path(path).suffix.lower()
+        return suffix in {
+            ".csv",
+            ".json",
+            ".txt",
+            ".md",
+            ".markdown",
+            ".log",
+            ".yaml",
+            ".yml",
+            ".tsv",
+        }
 
     @staticmethod
     def _accumulate_explanation_inputs(
@@ -2529,16 +2587,34 @@ class AgentCore:
         strategy: str,
     ) -> list[dict[str, Any]]:
         timestamp = datetime.now(timezone.utc).isoformat()
-        return [
-            {
+        compacted: list[dict[str, Any]] = []
+        for item in raw_tool_calls:
+            compact_item = {
                 "tool": item.get("tool"),
                 "success": bool(item.get("success")),
                 "summary": item.get("summary"),
                 "strategy": strategy,
                 "timestamp": timestamp,
             }
-            for item in raw_tool_calls
-        ]
+            data = item.get("data")
+            if isinstance(data, dict) and str(item.get("tool", "")).startswith("skill:"):
+                run_id = str(data.get("run_id", "")).strip()
+                skill_name = str(data.get("skill_name", "")).strip()
+                artifacts = data.get("artifacts")
+                public_artifacts = [
+                    AgentCore._build_public_artifact_entry(artifact, run_id)
+                    for artifact in (artifacts if isinstance(artifacts, list) else [])
+                    if isinstance(artifact, dict)
+                    and AgentCore._is_public_artifact_path(str(artifact.get("path", "")))
+                ]
+                if run_id:
+                    compact_item["data"] = {
+                        "run_id": run_id,
+                        "skill_name": skill_name,
+                        "artifacts": public_artifacts,
+                    }
+            compacted.append(compact_item)
+        return compacted
 
     @staticmethod
     def _find_last_tool_call(

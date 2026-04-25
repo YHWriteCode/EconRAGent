@@ -1,4 +1,4 @@
-FROM lightrag-mcp-skill-service:latest
+FROM econragent-mcp-skill-service:latest
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

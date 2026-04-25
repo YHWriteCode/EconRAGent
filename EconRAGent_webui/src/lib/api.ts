@@ -11,6 +11,7 @@ import type {
   GraphRelationDetail,
   ImportStatusPayload,
   SessionSummary,
+  SkillArtifactContentPayload,
   UploadRecord,
   WorkspaceImportPayload,
   WorkspaceSummary,
@@ -182,6 +183,12 @@ export async function getSessionMessages(sessionId: string): Promise<{
   messages: Array<Record<string, unknown>>;
 }> {
   return fetchJson(`/agent/sessions/${encodeURIComponent(sessionId)}/messages`);
+}
+
+export async function readSkillArtifactContent(
+  contentUrl: string,
+): Promise<SkillArtifactContentPayload> {
+  return fetchJson(contentUrl);
 }
 
 export async function deleteSession(sessionId: string): Promise<{
@@ -393,5 +400,5 @@ export async function streamChat(
     }
   }
 
-  return finalPayload;
+return finalPayload;
 }

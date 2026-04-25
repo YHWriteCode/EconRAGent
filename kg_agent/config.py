@@ -6,12 +6,60 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from typing import AsyncIterator
 
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=".env", override=False)
+def _find_project_root() -> Path:
+    for candidate in Path(__file__).resolve().parents:
+        if (candidate / "pyproject.toml").is_file() and (candidate / "kg_agent").is_dir():
+            return candidate
+    return Path.cwd().resolve()
+
+
+PROJECT_ROOT = _find_project_root()
+
+
+def load_project_dotenv(*, override: bool = False) -> Path | None:
+    configured = os.getenv("KG_AGENT_DOTENV_PATH", "").strip()
+    dotenv_path = Path(configured).expanduser() if configured else PROJECT_ROOT / ".env"
+    if not dotenv_path.is_absolute():
+        dotenv_path = PROJECT_ROOT / dotenv_path
+    if not dotenv_path.is_file():
+        fallback = Path.cwd().resolve() / ".env"
+        dotenv_path = fallback if fallback.is_file() else dotenv_path
+    if dotenv_path.is_file():
+        load_dotenv(dotenv_path=dotenv_path, override=override)
+        os.environ.setdefault("KG_AGENT_DOTENV_PATH", str(dotenv_path))
+        os.environ.setdefault("KG_AGENT_PROJECT_ROOT", str(dotenv_path.parent))
+        return dotenv_path
+    os.environ.setdefault("KG_AGENT_PROJECT_ROOT", str(PROJECT_ROOT))
+    return None
+
+
+def resolve_project_path(path: str | os.PathLike[str]) -> Path:
+    raw = str(path).strip()
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    root = Path(os.getenv("KG_AGENT_PROJECT_ROOT", str(PROJECT_ROOT))).resolve()
+    return (root / candidate).resolve()
+
+
+def _normalize_docker_volume_arg(arg: str) -> str:
+    value = arg.strip()
+    if not value.startswith(("./", ".\\")):
+        return arg
+    host, separator, rest = value.partition(":")
+    if not separator:
+        return arg
+    resolved_host = str(resolve_project_path(host)).replace("\\", "/")
+    return f"{resolved_host}:{rest}"
+
+
+load_project_dotenv(override=False)
 logger = logging.getLogger(__name__)
 JSON_FENCE_PATTERN = re.compile(
     r"```(?:json)?\s*(?P<body>.*?)```",
@@ -302,11 +350,23 @@ class MCPServerConfig:
             if isinstance(env, dict)
             else {}
         )
+        normalized_args = [
+            str(item)
+            for item in args
+            if isinstance(item, (str, int, float))
+        ]
+        if command == "docker":
+            normalized_args = [
+                _normalize_docker_volume_arg(item)
+                if index > 0 and normalized_args[index - 1] in {"-v", "--volume"}
+                else item
+                for index, item in enumerate(normalized_args)
+            ]
         return cls(
             name=name,
             transport=str(payload.get("transport", "stdio")).strip() or "stdio",
             command=command,
-            args=[str(item) for item in args if isinstance(item, (str, int, float))],
+            args=normalized_args,
             stdio_framing=str(payload.get("stdio_framing", "auto")).strip() or "auto",
             env=normalized_env,
             startup_timeout_s=float(payload.get("startup_timeout_s", 15.0)),
@@ -827,7 +887,11 @@ class AgentRuntimeConfig:
             default_domain_schema=os.getenv(
                 "KG_AGENT_DEFAULT_DOMAIN_SCHEMA", "general"
             ),
-            skills_dir=os.getenv("KG_AGENT_SKILLS_DIR", "skills").strip() or "skills",
+            skills_dir=str(
+                resolve_project_path(
+                    os.getenv("KG_AGENT_SKILLS_DIR", "skills").strip() or "skills"
+                )
+            ),
             max_iterations=_env_int("KG_AGENT_MAX_ITERATIONS", 3),
             route_judge_prompt_version=(
                 os.getenv("KG_AGENT_ROUTE_JUDGE_PROMPT_VERSION", "v1").strip() or "v1"

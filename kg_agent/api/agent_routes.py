@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from kg_agent.crawler.source_registry import MonitoredSource
@@ -79,6 +82,65 @@ def _format_sse_event(payload: dict[str, Any]) -> str:
     event_type = str(payload.get("type", "message")).strip() or "message"
     serialized = json.dumps(payload, ensure_ascii=False)
     return f"event: {event_type}\ndata: {serialized}\n\n"
+
+
+_READABLE_ARTIFACT_SUFFIXES = {
+    ".csv",
+    ".json",
+    ".txt",
+    ".md",
+    ".markdown",
+    ".log",
+    ".yaml",
+    ".yml",
+    ".tsv",
+}
+
+
+def _is_likely_readable_artifact(path: str) -> bool:
+    return Path(path).suffix.lower() in _READABLE_ARTIFACT_SUFFIXES
+
+
+def _is_public_artifact_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").strip().lstrip("/")
+    parts = [part for part in normalized.split("/") if part]
+    suffix = Path(normalized).suffix.lower()
+    return bool(normalized) and not (
+        any(part.startswith(".") for part in parts)
+        or suffix in {".db", ".sqlite", ".sqlite3", ".sqlite-shm", ".sqlite-wal"}
+        or normalized in {"skill_context.json", "skill_invocation.json"}
+        or normalized.endswith("/skill_context.json")
+        or normalized.endswith("/skill_invocation.json")
+    )
+
+
+def _build_artifact_urls(run_id: str, artifact_path: str) -> dict[str, Any]:
+    normalized_run_id = quote(str(run_id).strip(), safe="")
+    normalized_path = quote(artifact_path.replace("\\", "/").strip(), safe="")
+    base = f"/agent/skill-runs/{normalized_run_id}/artifacts"
+    return {
+        "download_url": f"{base}/download?path={normalized_path}",
+        "content_url": f"{base}/content?path={normalized_path}",
+        "readable": _is_likely_readable_artifact(artifact_path),
+    }
+
+
+def _enrich_artifact_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    run_id = str(payload.get("run_id", "")).strip()
+    artifacts = payload.get("artifacts")
+    if not run_id or not isinstance(artifacts, list):
+        return payload
+    enriched = dict(payload)
+    enriched["artifacts"] = [
+        {
+            **dict(item),
+            **_build_artifact_urls(run_id, str(item.get("path", ""))),
+        }
+        for item in artifacts
+        if isinstance(item, dict)
+        and _is_public_artifact_path(str(item.get("path", "")))
+    ]
+    return enriched
 
 
 def _build_stream_error_payload(
@@ -308,6 +370,9 @@ class SkillRunLogsResponse(BaseModel):
 class SkillArtifactInfo(BaseModel):
     path: str
     size_bytes: int
+    download_url: str | None = None
+    content_url: str | None = None
+    readable: bool = False
 
 
 class SkillRunArtifactsResponse(BaseModel):
@@ -338,6 +403,17 @@ class SkillRunArtifactsResponse(BaseModel):
     cancel_requested: bool = False
     artifacts: list[SkillArtifactInfo] = Field(default_factory=list)
     summary: str | None = None
+
+
+class SkillArtifactContentResponse(BaseModel):
+    run_id: str
+    path: str
+    filename: str
+    size_bytes: int
+    content_type: str
+    encoding: str = "utf-8"
+    truncated: bool = False
+    content: str
 
 
 class RoutePreviewRequest(BaseModel):
@@ -755,11 +831,77 @@ def create_agent_routes(
     )
     async def get_skill_run_artifacts(run_id: str):
         try:
-            return await agent_core.get_skill_run_artifacts(run_id=run_id)
+            payload = await agent_core.get_skill_run_artifacts(run_id=run_id)
+            return _enrich_artifact_payload(payload)
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @router.get("/agent/skill-runs/{run_id}/artifacts/download")
+    async def download_skill_run_artifact(
+        run_id: str,
+        artifact_path: str = Query(..., alias="path", min_length=1),
+    ):
+        try:
+            source_path = await agent_core.resolve_skill_run_artifact_path(
+                run_id=run_id,
+                artifact_path=artifact_path,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (LookupError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        media_type = mimetypes.guess_type(str(source_path))[0] or "application/octet-stream"
+        return FileResponse(
+            source_path,
+            media_type=media_type,
+            filename=source_path.name,
+        )
+
+    @router.get(
+        "/agent/skill-runs/{run_id}/artifacts/content",
+        response_model=SkillArtifactContentResponse,
+    )
+    async def read_skill_run_artifact_content(
+        run_id: str,
+        artifact_path: str = Query(..., alias="path", min_length=1),
+        max_bytes: int = Query(default=262144, ge=1, le=2097152),
+    ):
+        try:
+            source_path = await agent_core.resolve_skill_run_artifact_path(
+                run_id=run_id,
+                artifact_path=artifact_path,
+            )
+            size_bytes = source_path.stat().st_size
+            with source_path.open("rb") as handle:
+                raw = handle.read(max_bytes + 1)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (LookupError, FileNotFoundError) as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        truncated = size_bytes > max_bytes
+        try:
+            content = raw[:max_bytes].decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise HTTPException(
+                status_code=415,
+                detail="Artifact is not UTF-8 text and can only be downloaded.",
+            ) from exc
+        return {
+            "run_id": run_id,
+            "path": artifact_path.replace("\\", "/").strip(),
+            "filename": source_path.name,
+            "size_bytes": size_bytes,
+            "content_type": mimetypes.guess_type(str(source_path))[0] or "text/plain",
+            "encoding": "utf-8",
+            "truncated": truncated,
+            "content": content,
+        }
 
     @router.post(
         "/agent/capabilities/{capability_name}/invoke",

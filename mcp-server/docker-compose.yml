@@ -4,7 +4,7 @@ services:
     build:
       context: ..
       dockerfile: mcp-server/Dockerfile
-    image: lightrag-mcp-skill-service:latest
+    image: econragent-mcp-skill-service:latest
     command: ["python", "/app/server.py"]
     stdin_open: true
     tty: false

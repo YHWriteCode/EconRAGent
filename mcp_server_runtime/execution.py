@@ -320,7 +320,7 @@ class RuntimeExecutionManager:
         try:
             request = Request(
                 download_url,
-                headers={"User-Agent": "lightrag-skill-runtime/1.0"},
+                headers={"User-Agent": "econragent-skill-runtime/1.0"},
             )
             with urlopen(request, timeout=max(10.0, min(float(timeout_s), DEFAULT_BOOTSTRAP_NODE_DOWNLOAD_TIMEOUT_S))) as response:
                 archive_path.write_bytes(response.read())

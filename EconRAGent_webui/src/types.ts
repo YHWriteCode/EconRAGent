@@ -202,6 +202,27 @@ export interface ChatStreamEvent {
   path_explanation?: Record<string, unknown> | null;
 }
 
+export interface SkillArtifact {
+  path: string;
+  size_bytes?: number;
+  download_url?: string | null;
+  content_url?: string | null;
+  readable?: boolean;
+  run_id?: string;
+  skill_name?: string | null;
+}
+
+export interface SkillArtifactContentPayload {
+  run_id: string;
+  path: string;
+  filename: string;
+  size_bytes: number;
+  content_type: string;
+  encoding: string;
+  truncated: boolean;
+  content: string;
+}
+
 export type WorkspaceImportPayload =
   | {
       kind: "text";

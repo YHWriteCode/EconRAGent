@@ -1,12 +1,23 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useShallow } from "zustand/react/shallow";
 
-import { getSessionMessages, streamChat, uploadFile } from "../lib/api";
+import {
+  getSessionMessages,
+  readSkillArtifactContent,
+  streamChat,
+  uploadFile,
+} from "../lib/api";
 import { formatTime } from "../lib/format";
 import { queryKeys } from "../lib/queryKeys";
 import { createSessionId, useAppStore } from "../store/useAppStore";
-import type { ChatMessage, UploadRecord, WebSearchMode } from "../types";
+import type {
+  ChatMessage,
+  SkillArtifact,
+  SkillArtifactContentPayload,
+  UploadRecord,
+  WebSearchMode,
+} from "../types";
 
 function normalizeServerMessage(message: Record<string, unknown>): ChatMessage {
   return {
@@ -61,6 +72,218 @@ function readObject(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function formatBytes(value: unknown): string {
+  const size = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  if (size >= 1024 * 1024) {
+    return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  }
+  if (size >= 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${size} B`;
+}
+
+function renderInlineMarkdown(text: string): ReactNode[] {
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\))/g;
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > cursor) {
+      nodes.push(text.slice(cursor, match.index));
+    }
+    const token = match[0];
+    const key = `${match.index}-${token}`;
+    if (token.startsWith("`")) {
+      nodes.push(<code key={key}>{token.slice(1, -1)}</code>);
+    } else if (token.startsWith("**")) {
+      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
+    } else {
+      const linkMatch = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token);
+      if (linkMatch) {
+        nodes.push(
+          <a href={linkMatch[2]} key={key} rel="noreferrer" target="_blank">
+            {linkMatch[1]}
+          </a>,
+        );
+      } else {
+        nodes.push(token);
+      }
+    }
+    cursor = match.index + token.length;
+  }
+  if (cursor < text.length) {
+    nodes.push(text.slice(cursor));
+  }
+  return nodes;
+}
+
+function splitMarkdownTableRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function isMarkdownTableSeparator(line: string): boolean {
+  return /^\s*\|?[\s:|-]+\|[\s:|-]*\s*$/.test(line);
+}
+
+function MarkdownContent({ content }: { content: string }) {
+  const blocks: ReactNode[] = [];
+  const lines = content.split("\n");
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+    if (trimmed.startsWith("```")) {
+      const codeLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      index += 1;
+      blocks.push(<pre key={`code-${index}`}>{codeLines.join("\n")}</pre>);
+      continue;
+    }
+    if (
+      trimmed.includes("|") &&
+      index + 1 < lines.length &&
+      isMarkdownTableSeparator(lines[index + 1])
+    ) {
+      const headers = splitMarkdownTableRow(trimmed);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && lines[index].trim().includes("|")) {
+        rows.push(splitMarkdownTableRow(lines[index]));
+        index += 1;
+      }
+      blocks.push(
+        <div className="markdown-table-wrap" key={`table-${index}`}>
+          <table>
+            <thead>
+              <tr>
+                {headers.map((header, headerIndex) => (
+                  <th key={`${header}-${headerIndex}`}>
+                    {renderInlineMarkdown(header)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={`row-${rowIndex}`}>
+                  {row.map((cell, cellIndex) => (
+                    <td key={`${rowIndex}-${cellIndex}`}>
+                      {renderInlineMarkdown(cell)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+    if (/^#{1,3}\s+/.test(trimmed)) {
+      const level = trimmed.match(/^#+/)?.[0].length ?? 1;
+      const text = trimmed.replace(/^#{1,3}\s+/, "");
+      const Tag = level === 1 ? "h3" : level === 2 ? "h4" : "h5";
+      blocks.push(<Tag key={`heading-${index}`}>{renderInlineMarkdown(text)}</Tag>);
+      index += 1;
+      continue;
+    }
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items: string[] = [];
+      while (index < lines.length && /^[-*]\s+/.test(lines[index].trim())) {
+        items.push(lines[index].trim().replace(/^[-*]\s+/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <ul key={`list-${index}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`${item}-${itemIndex}`}>{renderInlineMarkdown(item)}</li>
+          ))}
+        </ul>,
+      );
+      continue;
+    }
+    const paragraph: string[] = [trimmed];
+    index += 1;
+    while (index < lines.length && lines[index].trim()) {
+      const next = lines[index].trim();
+      if (
+        next.startsWith("```") ||
+        /^#{1,3}\s+/.test(next) ||
+        /^[-*]\s+/.test(next) ||
+        (next.includes("|") && index + 1 < lines.length && isMarkdownTableSeparator(lines[index + 1]))
+      ) {
+        break;
+      }
+      paragraph.push(next);
+      index += 1;
+    }
+    blocks.push(
+      <p key={`paragraph-${index}`}>{renderInlineMarkdown(paragraph.join(" "))}</p>,
+    );
+  }
+  return <div className="markdown-content">{blocks}</div>;
+}
+
+function collectSkillArtifacts(toolCalls: unknown[]): SkillArtifact[] {
+  const artifacts: SkillArtifact[] = [];
+  const seen = new Set<string>();
+  for (const toolCall of toolCalls) {
+    const typed = readObject(toolCall);
+    const data = readObject(typed?.data);
+    const runId = typeof data?.run_id === "string" ? data.run_id : "";
+    const skillName = typeof data?.skill_name === "string" ? data.skill_name : null;
+    const rawArtifacts = Array.isArray(data?.artifacts) ? data.artifacts : [];
+    for (const rawArtifact of rawArtifacts) {
+      const artifact = readObject(rawArtifact);
+      const path = typeof artifact?.path === "string" ? artifact.path : "";
+      if (!path || !runId) {
+        continue;
+      }
+      const key = `${runId}:${path}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      artifacts.push({
+        path,
+        run_id: runId,
+        skill_name: skillName,
+        size_bytes:
+          typeof artifact?.size_bytes === "number" ? artifact.size_bytes : undefined,
+        download_url:
+          typeof artifact?.download_url === "string" ? artifact.download_url : null,
+        content_url:
+          typeof artifact?.content_url === "string" ? artifact.content_url : null,
+        readable: artifact?.readable === true,
+      });
+    }
+  }
+  return artifacts;
+}
+
+function resolveToolCalls(metadata: Record<string, unknown>): unknown[] {
+  if (Array.isArray(metadata.tool_calls)) {
+    return metadata.tool_calls;
+  }
+  if (Array.isArray(metadata.compact_tool_calls)) {
+    return metadata.compact_tool_calls;
+  }
+  return [];
+}
+
 export function ChatPage() {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -71,6 +294,9 @@ export function ChatPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [isSending, setIsSending] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [artifactContents, setArtifactContents] = useState<
+    Record<string, SkillArtifactContentPayload | { error: string }>
+  >({});
   const {
     currentSessionId,
     currentWorkspaceId,
@@ -300,6 +526,34 @@ export function ChatPage() {
     }
   }
 
+  async function handleReadArtifact(artifact: SkillArtifact) {
+    if (!artifact.content_url || !artifact.run_id) {
+      return;
+    }
+    const key = `${artifact.run_id}:${artifact.path}`;
+    if (!window.confirm(`读取 ${artifact.path} 的文本内容？文件较大时只会加载前一部分。`)) {
+      return;
+    }
+    setArtifactContents((current) => ({
+      ...current,
+      [key]: { error: "正在读取..." },
+    }));
+    try {
+      const payload = await readSkillArtifactContent(artifact.content_url);
+      setArtifactContents((current) => ({
+        ...current,
+        [key]: payload,
+      }));
+    } catch (error) {
+      setArtifactContents((current) => ({
+        ...current,
+        [key]: {
+          error: error instanceof Error ? error.message : "读取失败",
+        },
+      }));
+    }
+  }
+
   const webSearchEnabled = webSearchMode === "on";
 
   const attachmentStrip = pendingAttachments.length ? (
@@ -442,9 +696,9 @@ export function ChatPage() {
             <div className="message-feed">
               {sessionMessages.map((message) => {
                 const cardMetadata = readObject(message.metadata.response_metadata);
-                const toolCalls = Array.isArray(message.metadata.tool_calls)
-                  ? message.metadata.tool_calls
-                  : [];
+                const toolCalls = resolveToolCalls(message.metadata);
+                const skillArtifacts =
+                  message.role === "assistant" ? collectSkillArtifacts(toolCalls) : [];
                 const attachments = Array.isArray(message.metadata.attachments)
                   ? message.metadata.attachments
                   : [];
@@ -452,7 +706,17 @@ export function ChatPage() {
                 return (
                   <article className={`message ${message.role}`} key={message.clientId}>
                     <div className="message-meta">{formatTime(message.timestamp)}</div>
-                    <div className="message-bubble">{message.content || "..."}</div>
+                    <div className="message-bubble">
+                      {message.content ? (
+                        message.role === "assistant" ? (
+                          <MarkdownContent content={message.content} />
+                        ) : (
+                          message.content
+                        )
+                      ) : (
+                        "..."
+                      )}
+                    </div>
                     {attachments.length ? (
                       <div className="attachment-list">
                         {attachments.map((attachment) => {
@@ -484,6 +748,56 @@ export function ChatPage() {
                         {toolCalls.length ? (
                           <span className="tag">工具调用 {toolCalls.length} 次</span>
                         ) : null}
+                      </div>
+                    ) : null}
+                    {skillArtifacts.length ? (
+                      <div className="artifact-list">
+                        {skillArtifacts.map((artifact) => {
+                          const key = `${artifact.run_id}:${artifact.path}`;
+                          const loaded = artifactContents[key];
+                          return (
+                            <div className="artifact-card" key={key}>
+                              <div className="artifact-card-main">
+                                <strong>{artifact.path}</strong>
+                                <span>
+                                  {artifact.skill_name || "skill"} ·{" "}
+                                  {formatBytes(artifact.size_bytes)}
+                                </span>
+                              </div>
+                              <div className="artifact-card-actions">
+                                {artifact.download_url ? (
+                                  <a
+                                    className="ghost-button artifact-action"
+                                    href={artifact.download_url}
+                                  >
+                                    下载
+                                  </a>
+                                ) : null}
+                                {artifact.readable && artifact.content_url ? (
+                                  <button
+                                    className="ghost-button artifact-action"
+                                    type="button"
+                                    onClick={() => void handleReadArtifact(artifact)}
+                                  >
+                                    读取
+                                  </button>
+                                ) : null}
+                              </div>
+                              {loaded ? (
+                                "content" in loaded ? (
+                                  <pre className="artifact-content-preview">
+                                    {loaded.content}
+                                    {loaded.truncated ? "\n\n...内容已截断" : ""}
+                                  </pre>
+                                ) : (
+                                  <div className="artifact-read-state">
+                                    {loaded.error}
+                                  </div>
+                                )
+                              ) : null}
+                            </div>
+                          );
+                        })}
                       </div>
                     ) : null}
                   </article>

@@ -274,7 +274,7 @@ python -m kg_agent.api.app
 python -m lightrag_fork.api.lightrag_server
 
 # 构建 MCP 技能运行时容器镜像
-docker build -f mcp-server/Dockerfile -t lightrag-mcp-skill-service:latest .
+docker build -f mcp-server/Dockerfile -t econragent-mcp-skill-service:latest .
 ```
 
 ### 11.2.1 WebUI 前端开发与构建
@@ -343,7 +343,7 @@ docker run --rm \
   -v mcp_skill_pip_cache:/workspace/pip-cache \
   -v mcp_skill_state:/workspace/state \
   -v mcp_skill_locks:/workspace/locks \
-  lightrag-mcp-skill-service:latest \
+  econragent-mcp-skill-service:latest \
   python /app/server.py --prefetch-all-skill-wheels
 ```
 
@@ -375,7 +375,7 @@ docker run --rm \
       "-v", "mcp_skill_wheelhouse:/workspace/wheelhouse",
       "-v", "mcp_skill_pip_cache:/workspace/pip-cache",
       "-v", "mcp_skill_locks:/workspace/locks",
-      "lightrag-mcp-skill-service:latest",
+      "econragent-mcp-skill-service:latest",
       "python",
       "/app/server.py"
     ],
@@ -386,15 +386,15 @@ docker run --rm \
 
 推荐顺序：
 
-1. `docker build -f mcp-server/Dockerfile -t lightrag-mcp-skill-service:latest .`
+1. `docker build -f mcp-server/Dockerfile -t econragent-mcp-skill-service:latest .`
 2. 运行 `init-skill-runtime-host.ps1`
 3. 运行 `prefetch-skill-wheels.ps1`
 4. 将脚本输出的 JSON 设置到 `KG_AGENT_MCP_SERVERS_JSON`
 
-如果当前机器无法访问 Docker Hub，但本地已经有旧版 `lightrag-mcp-skill-service:latest`，可以改用离线 fallback：
+如果当前机器无法访问 Docker Hub，但本地已经有旧版 `econragent-mcp-skill-service:latest`，可以改用离线 fallback：
 
 ```bash
-docker build -f mcp-server/Dockerfile.local-rebuild -t lightrag-mcp-skill-service:latest .
+docker build -f mcp-server/Dockerfile.local-rebuild -t econragent-mcp-skill-service:latest .
 ```
 
 这个 fallback 会基于本机现有镜像重建，覆盖最新的 `server.py`、`kg_agent/` 和 `skills/`，并补齐新的 `MCP_*_DIR` 默认环境变量与持久化目录。它的目标是本地开发/测试可继续推进，不用于替代正式的全量基础镜像构建。

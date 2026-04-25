@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Protocol
+from pathlib import Path
 
 from kg_agent.skills.command_planner import (
     SkillCommandPlanner,
@@ -40,6 +41,9 @@ class SkillRuntimeClient(Protocol):
         ...
 
     async def get_run_artifacts(self, *, run_id: str) -> dict[str, Any]:
+        ...
+
+    async def resolve_artifact_path(self, *, run_id: str, artifact_path: str) -> Path:
         ...
 
 
@@ -253,3 +257,11 @@ class SkillExecutor:
         if self.runtime_client is None:
             raise RuntimeError("Skill runtime client is not configured")
         return await self.runtime_client.get_run_artifacts(run_id=run_id)
+
+    async def resolve_artifact_path(self, *, run_id: str, artifact_path: str) -> Path:
+        if self.runtime_client is None:
+            raise RuntimeError("Skill runtime client is not configured")
+        resolver = getattr(self.runtime_client, "resolve_artifact_path", None)
+        if not callable(resolver):
+            raise RuntimeError("Skill runtime client does not expose artifact files")
+        return await resolver(run_id=run_id, artifact_path=artifact_path)

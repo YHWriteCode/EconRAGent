@@ -7,12 +7,14 @@ import { useAppStore } from "../store/useAppStore";
 
 const apiMocks = vi.hoisted(() => ({
   getSessionMessages: vi.fn(),
+  readSkillArtifactContent: vi.fn(),
   streamChat: vi.fn(),
   uploadFile: vi.fn(),
 }));
 
 vi.mock("../lib/api", () => ({
   getSessionMessages: apiMocks.getSessionMessages,
+  readSkillArtifactContent: apiMocks.readSkillArtifactContent,
   streamChat: apiMocks.streamChat,
   uploadFile: apiMocks.uploadFile,
 }));
