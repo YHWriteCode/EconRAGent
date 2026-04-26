@@ -17,6 +17,7 @@
 - Concurrency control (local locks / Redis distributed locks)
 - Optional domain schema prompt injection
 - Temporal metadata maintenance for graph nodes/edges (`created_at`, `last_confirmed_at`, `confirmation_count`) and retrieval result passthrough
+- Chunk provenance metadata propagation (`source_label`, page/section/file/crawler metadata) while preserving `file_path` as the backward-compatible citation field
 
 **Not Responsible For:**
 
@@ -193,6 +194,7 @@ LockBackend (abstract)
 - `schema.py` handles normalization: external input → `DomainSchema` dataclass → runtime dict
 - `operate.py::extract_entities()` appends domain constraint block at the end of the prompt
 - `schema.py` also provides post-parse canonicalization helpers so extracted entity types and relation keywords can be normalized back onto schema-defined canonical names when the schema is enabled
+- Keep economy relation aliases narrow and phrase-level. Avoid generic single-verb aliases such as `支持`, `影响`, or `属于`, because `relationship_keywords` are soft semantic labels rather than strict graph predicates and broad aliases will collapse unrelated edges onto the wrong canonical relation type.
 - `schema.py` now also carries an optional `explanation_profile` block on each built-in schema so upper layers can reuse domain-aware intent/tag/relation/evidence/output/guardrail contracts, node-role/path-constraint structure, plus optional `scenario_overrides` without hardcoding them inside `kg_agent`; the lower layer only exposes `prompt_bindings/template_id` hints, while actual prompt text remains in the upper-layer registry
 - The built-in general/economy explanation profiles are now intentionally organized into editable section blocks in `schemas/general.py` and `schemas/economy.py` (`supported_intents`, `intent_bindings`, `semantic_tags`, `relation_semantics`, `node_role_rules`, `path_constraints`, `evidence_policies`, `output_contracts`, `scenario_overrides`, `prompt_bindings`) so domain customization can usually stay inside the profile file instead of modifying the upper-layer explainer
 - Does not modify `prompt.py` static templates
@@ -213,7 +215,9 @@ LightRAG(addon_params=...)
 | Profile | File | Mode | Entity Types | Explanation Profile |
 |---|---|---|---|---|
 | `general` | `schemas/general.py` | `enabled=False` | Person, Organization, Location... (original defaults) | `general_explainer` |
-| `economy` | `schemas/economy.py` | `enabled=True, mode=domain` | Company, Industry, Metric, Policy, Event, Asset, Institution, Country | `economy_explainer` |
+| `economy` | `schemas/economy.py` | `enabled=True, mode=domain` | Company, Industry, Metric, Policy, Event, Asset, Institution, Location, Person, Concept | `economy_explainer` |
+
+The economy profile keeps entity-type canonicalization schema-managed: aliases live on `EntityTypeDefinition` / `DomainSchema.aliases`, and strict prompt/fallback behavior is declared under `DomainSchema.metadata` instead of hardcoded in upper-layer business code. Its default natural-language extraction/summary output is Chinese, while canonical schema identifiers remain stable English names for storage and filtering.
 
 ### 4.3 Dynamic-Graph Temporal Metadata
 
@@ -265,8 +269,8 @@ LightRAG(addon_params=...)
 
 ```
 User calls LightRAG.ainsert(documents)
-  → lightrag.py: document deduplication, filter_keys
-  → operate.py: chunking_by_token_size()      # Text chunking
+  → lightrag.py: document deduplication, filter_keys, optional `metadatas` / `segment_docs`
+  → operate.py: chunking_by_token_size()      # Text chunking, with optional segment/page metadata propagation
   → operate.py: extract_entities()             # LLM entity/relation extraction
       ├─ prompt.py: static prompt templates
       ├─ operate.py: _build_domain_schema_prompt_appendix()  # Optional schema append
@@ -284,6 +288,7 @@ User calls LightRAG.aquery(query, param)
       ├─ Vector retrieval (entities_vdb / relationships_vdb / chunks_vdb)
       ├─ Graph traversal (graph_storage)
       ├─ Text chunk recall
+      ├─ Reference formatting uses chunk `file_path` plus optional page/section/source metadata
       ├─ raw result assembly keeps `rank`
       ├─ `utils.convert_to_user_format()` passes temporal metadata through to user-facing results
       └─ LLM generates final answer
@@ -402,7 +407,7 @@ Before modifying code under `lightrag_fork/`, verify the following:
 
 ## 10. Known Limitations and TODOs
 
-- **Schema now affects prompt guidance plus post-parse canonicalization of extracted entity types / relation keywords**, and it can expose a formalized `explanation_profile` for upper-layer path explanation, but it is still not integrated into graph storage structure, retrieval ranking, or query understanding
+- **Schema now affects prompt guidance plus post-parse canonicalization of extracted entity types / relation keywords**, and schema profiles may opt into strict entity-type fallback through `metadata`, but schema is still not integrated into graph storage structure, retrieval ranking, or query understanding
 - **Built-in explanation profiles are still v1 contracts**; only `general` and `economy` are defined today, and their relation/evidence/output/guardrail/scenario plus node-role/path-constraint semantics are consumed by the upper-layer explainer rather than enforced inside the lower-layer retrieval/storage pipeline
 - **Relation type constraints are weak**; guided only via prompts, no post-processing normalization
 - **Redis distributed locks** still have window risks during master-slave failover/network partition scenarios
@@ -410,6 +415,7 @@ Before modifying code under `lightrag_fork/`, verify the following:
 - **No global transactions across storage backends**; inserts/deletes use eventual consistency
 - **Freshness-aware ranking** now exists in the core KG retrieval flow, but it is still a v1 heuristic layered on existing ranking signals rather than a full ranking-model redesign
 - **`confirmation_count` semantics** are cumulative confirmation events; there is no built-in notion of unique-source confirmation count yet
+- **Chunk provenance is best-effort across storage backends**; JSON/Mongo/Redis keep full chunk metadata, PostgreSQL stores chunk metadata as JSONB, and vector backends expose metadata according to their payload-field support
 
 ---
 

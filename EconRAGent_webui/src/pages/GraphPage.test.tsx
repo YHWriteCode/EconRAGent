@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { GraphPage } from "./GraphPage";
 import { renderWithProviders } from "../test/utils";
+import { useAppStore } from "../store/useAppStore";
 
 const apiMocks = vi.hoisted(() => ({
   explainGraphPath: vi.fn(),
@@ -83,7 +84,24 @@ describe("GraphPage", () => {
         workspace: "all",
         label: "*",
         maxDepth: 2,
-        maxNodes: 800,
+        maxNodes: 400,
+        entityType: "",
+        relationType: "",
+        timeFrom: "",
+        timeTo: "",
+      });
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "宏观研究" }));
+    fireEvent.click(screen.getByRole("button", { name: "应用筛选" }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().currentWorkspaceId).toBe("macro");
+      expect(apiMocks.getGraphData).toHaveBeenLastCalledWith({
+        workspace: "macro",
+        label: "*",
+        maxDepth: 2,
+        maxNodes: 400,
         entityType: "",
         relationType: "",
         timeFrom: "",
@@ -96,10 +114,10 @@ describe("GraphPage", () => {
 
     await waitFor(() => {
       expect(apiMocks.getGraphData).toHaveBeenLastCalledWith({
-        workspace: "all",
+        workspace: "macro",
         label: "*",
         maxDepth: 2,
-        maxNodes: 800,
+        maxNodes: 400,
         entityType: "Event",
         relationType: "",
         timeFrom: "",
@@ -112,10 +130,10 @@ describe("GraphPage", () => {
 
     await waitFor(() => {
       expect(apiMocks.getGraphData).toHaveBeenLastCalledWith({
-        workspace: "all",
+        workspace: "macro",
         label: "*",
         maxDepth: 2,
-        maxNodes: 800,
+        maxNodes: 400,
         entityType: "Event",
         relationType: "affects_metric",
         timeFrom: "",

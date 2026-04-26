@@ -8,6 +8,7 @@ import {
   createWorkspace,
   createWorkspaceImport,
   deleteWorkspace,
+  getImportStatus,
   listWorkspaces,
   updateWorkspace,
   uploadFile,
@@ -15,7 +16,7 @@ import {
 import { formatTime } from "../lib/format";
 import { queryKeys } from "../lib/queryKeys";
 import { useAppStore } from "../store/useAppStore";
-import type { WorkspaceSummary } from "../types";
+import type { ImportStatusPayload, WorkspaceSummary } from "../types";
 
 type DialogState =
   | { kind: "create" }
@@ -38,6 +39,67 @@ const SPACE_THEMES = [
   { icon: "◒", tone: "olive" },
 ] as const;
 
+const SUPPORTED_IMPORT_EXTENSIONS = [".docx", ".pdf", ".md", ".markdown", ".epub"] as const;
+const SUPPORTED_IMPORT_ACCEPT =
+  ".docx,.pdf,.md,.markdown,.epub,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf,application/epub+zip,text/markdown,text/x-markdown";
+const SUPPORTED_IMPORT_LABEL = "支持 Word（.docx）、PDF、Markdown（.md）和 EPUB";
+
+interface ProgressState {
+  percent: number;
+  message: string;
+}
+
+function isSupportedImportFile(file: File): boolean {
+  const normalizedName = file.name.toLowerCase();
+  return SUPPORTED_IMPORT_EXTENSIONS.some((extension) =>
+    normalizedName.endsWith(extension),
+  );
+}
+
+function readStatusCount(payload: ImportStatusPayload, names: string[]): number {
+  return names.reduce((sum, name) => sum + (payload.status_counts[name] ?? 0), 0);
+}
+
+function deriveImportProgress(payload?: ImportStatusPayload): ProgressState {
+  if (!payload) {
+    return {
+      percent: 35,
+      message: "导入任务已提交，正在获取处理状态...",
+    };
+  }
+  const total =
+    payload.document_count ||
+    Object.values(payload.status_counts).reduce((sum, count) => sum + count, 0);
+  const completed = readStatusCount(payload, ["processed", "done", "success"]);
+  const failed = readStatusCount(payload, ["failed", "error"]);
+  const running = readStatusCount(payload, ["pending", "processing", "preprocessed"]);
+  const settled = completed + failed;
+  const percent = total > 0 ? Math.min(100, Math.round((settled / total) * 100)) : 35;
+  if (running > 0) {
+    return {
+      percent: Math.max(percent, 20),
+      message: `后台处理中：${settled}/${total} 个文档完成`,
+    };
+  }
+  if (failed > 0) {
+    return {
+      percent: 100,
+      message: `处理结束：${completed} 个成功，${failed} 个失败`,
+    };
+  }
+  return {
+    percent: 100,
+    message: total > 0 ? `处理完成：${completed}/${total} 个文档` : "处理完成",
+  };
+}
+
+function isImportSettled(payload?: ImportStatusPayload): boolean {
+  if (!payload) {
+    return false;
+  }
+  return deriveImportProgress(payload).percent >= 100;
+}
+
 export function SpacesPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -52,6 +114,7 @@ export function SpacesPage() {
   const [dialogSecondaryInput, setDialogSecondaryInput] = useState("");
   const [dialogFile, setDialogFile] = useState<File | null>(null);
   const [formError, setFormError] = useState("");
+  const [dialogProgress, setDialogProgress] = useState<ProgressState | null>(null);
   const [openMenuWorkspaceId, setOpenMenuWorkspaceId] = useState("");
   const [activeImport, setActiveImport] = useState<{
     trackId: string;
@@ -110,24 +173,44 @@ export function SpacesPage() {
       value: string | File;
     }) => {
       if (payload.kind === "upload") {
+        setDialogProgress({
+          percent: 20,
+          message: "正在上传文件...",
+        });
         const uploadPayload = await uploadFile(payload.value as File);
+        setDialogProgress({
+          percent: 65,
+          message: "文件已上传，正在抽取文本并提交知识库...",
+        });
         return createWorkspaceImport(payload.workspaceId, {
           kind: "upload",
           upload_id: uploadPayload.upload.upload_id,
         });
       }
       if (payload.kind === "text") {
+        setDialogProgress({
+          percent: 45,
+          message: "正在提交文本导入任务...",
+        });
         return createWorkspaceImport(payload.workspaceId, {
           kind: "text",
           text: String(payload.value),
         });
       }
+      setDialogProgress({
+        percent: 45,
+        message: "正在抓取 URL 并提交导入任务...",
+      });
       return createWorkspaceImport(payload.workspaceId, {
         kind: "url",
         url: String(payload.value),
       });
     },
     onSuccess: (payload) => {
+      setDialogProgress({
+        percent: 100,
+        message: "导入提交成功，后台正在处理知识库写入。",
+      });
       setActiveImport({
         trackId: payload.track_id,
         workspaceId: payload.workspace_id,
@@ -138,6 +221,18 @@ export function SpacesPage() {
   });
 
   const workspaces = workspacesQuery.data?.workspaces ?? [];
+  const importStatusQuery = useQuery({
+    queryKey: activeImport
+      ? queryKeys.importStatus(activeImport.trackId, activeImport.workspaceId)
+      : queryKeys.importStatus("", ""),
+    queryFn: () => getImportStatus(activeImport!.trackId, activeImport!.workspaceId),
+    enabled: Boolean(activeImport),
+    refetchInterval: (query) => {
+      const payload = query.state.data as ImportStatusPayload | undefined;
+      return isImportSettled(payload) ? false : 2500;
+    },
+  });
+  const activeImportProgress = deriveImportProgress(importStatusQuery.data);
   const totalDocuments = useMemo(
     () => workspaces.reduce((sum, workspace) => sum + workspace.document_count, 0),
     [workspaces],
@@ -154,6 +249,7 @@ export function SpacesPage() {
     setDialogInput("");
     setDialogSecondaryInput("");
     setDialogFile(null);
+    setDialogProgress(null);
     setFormError("");
   }
 
@@ -216,12 +312,16 @@ export function SpacesPage() {
       if (!dialogFile) {
         throw new Error("请选择要上传的文件");
       }
+      if (!isSupportedImportFile(dialogFile)) {
+        throw new Error(SUPPORTED_IMPORT_LABEL);
+      }
       await importMutation.mutateAsync({
         workspaceId: dialog.workspace.workspace_id,
         kind: "upload",
         value: dialogFile,
       });
     } catch (error) {
+      setDialogProgress(null);
       setFormError(error instanceof Error ? error.message : "提交失败");
     }
   }
@@ -265,7 +365,20 @@ export function SpacesPage() {
 
       {activeImport ? (
         <div className="spaces-import-note">
-          最近导入任务 {activeImport.trackId} 已提交到 {activeImport.workspaceId}
+          <strong>导入提交成功</strong>
+          <span>
+            任务 {activeImport.trackId} 已提交到 {activeImport.workspaceId}
+          </span>
+          <div
+            className="import-progress-bar"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={activeImportProgress.percent}
+          >
+            <span style={{ width: `${activeImportProgress.percent}%` }} />
+          </div>
+          <small>{activeImportProgress.message}</small>
         </div>
       ) : null}
 
@@ -382,7 +495,7 @@ export function SpacesPage() {
               type="button"
               onClick={() => void submitDialog()}
             >
-              提交
+              {isBusy ? "提交中..." : "提交"}
             </button>
           </>
         }
@@ -396,7 +509,7 @@ export function SpacesPage() {
                 : dialog?.kind === "url"
                   ? "抓取网页内容后写入当前空间。"
                   : dialog?.kind === "upload"
-                    ? "先上传文件，再触发导入。"
+                    ? `${SUPPORTED_IMPORT_LABEL}。`
                     : undefined
         }
         open={Boolean(dialog)}
@@ -448,11 +561,40 @@ export function SpacesPage() {
           />
         ) : null}
         {dialog?.kind === "upload" ? (
-          <input
-            className="input"
-            type="file"
-            onChange={(event) => setDialogFile(event.target.files?.[0] ?? null)}
-          />
+          <>
+            <input
+              accept={SUPPORTED_IMPORT_ACCEPT}
+              className="input"
+              type="file"
+              onChange={(event) => {
+                const file = event.target.files?.[0] ?? null;
+                setDialogFile(file);
+                if (file && !isSupportedImportFile(file)) {
+                  setFormError(SUPPORTED_IMPORT_LABEL);
+                } else {
+                  setFormError("");
+                }
+              }}
+            />
+            <p className="modal-helper-text">{SUPPORTED_IMPORT_LABEL}</p>
+          </>
+        ) : null}
+        {dialogProgress ? (
+          <div className="modal-progress" role="status" aria-live="polite">
+            <div>
+              <span>{dialogProgress.message}</span>
+              <strong>{dialogProgress.percent}%</strong>
+            </div>
+            <div
+              className="import-progress-bar import-progress-bar-active"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={dialogProgress.percent}
+            >
+              <span style={{ width: `${dialogProgress.percent}%` }} />
+            </div>
+          </div>
         ) : null}
         {formError ? <div className="error-state inline-error">{formError}</div> : null}
       </Modal>

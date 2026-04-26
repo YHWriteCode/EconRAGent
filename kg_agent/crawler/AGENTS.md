@@ -40,6 +40,7 @@ crawler/
 - `MonitoredSource` carries source typing and per-source policy such as feed filtering, retention, priority, dedup, and content lifecycle.
 - `CrawlStateRecord` tracks content hashes, retained feed items, active doc IDs, expiry markers, and event-cluster bookkeeping.
 - `IngestScheduler` coordinates recurring polling and bridges crawler output into `rag.ainsert()` or deletion/supersession flows when the active backend supports them.
+- Scheduler ingest passes crawler provenance through `rag.ainsert(metadatas=...)`; keep `source_label="crawler"` while leaving `file_path` as the URL or feed item key for citation compatibility.
 
 ---
 
@@ -76,7 +77,7 @@ This layer is also where short-term news handling lives:
 - Scheduler coordination supports local leases and optional leader election, but there is still no scheduler sharding or richer distributed control plane.
 - Source persistence currently supports `json` and `sqlite`; there is still no Redis, MongoDB, or Postgres source/state backend.
 - RSS and feed support is now fairly broad, but source management is still URL-centric and does not yet model richer source credibility or feed provenance.
-- Update-aware provenance is still partial. The scheduler can supersede or delete short-term documents, but it does not maintain full version-aware histories or semantic delta ingest.
+- Update-aware provenance is still partial. The scheduler tags crawler chunks with source/feed/event metadata and can supersede or delete short-term documents, but it does not maintain full version-aware histories or semantic delta ingest.
 - Similar-news consolidation is heuristic and workspace-local. It is not a full long-lived event graph.
 - Retrieval suppression for expired or superseded crawler docs is best effort and still depends on lower-layer metadata such as `chunk_id`, `source_id`, and reverse mapping through `rag.text_chunks`.
 - Removed-source tombstones are a pragmatic fallback for backends that cannot delete by document ID; they are not a full archival model.

@@ -2505,7 +2505,9 @@ textarea,
 
 .spaces-import-note,
 .spaces-empty-state {
-  width: fit-content;
+  display: grid;
+  gap: 8px;
+  width: min(520px, 100%);
   padding: 12px 16px;
   border: 1px solid rgba(36, 33, 29, 0.08);
   border-radius: 14px;
@@ -2513,8 +2515,61 @@ textarea,
   color: #756f67;
 }
 
-.spaces-empty-state {
+.spaces-import-note strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.spaces-import-note span,
+.spaces-import-note small {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.import-progress-bar {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(48, 47, 42, 0.1);
+}
+
+.import-progress-bar span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  min-width: 8px;
+  border-radius: inherit;
+  background: #302f2a;
+  transition: width 220ms ease;
+}
+
+.import-progress-bar-active span {
+  background: linear-gradient(90deg, #302f2a, #6f8f72);
+}
+
+.modal-progress {
   display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(36, 33, 29, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.modal-progress div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.modal-progress strong {
+  color: var(--text);
+}
+
+.spaces-empty-state {
   gap: 6px;
   width: 100%;
   min-height: 220px;
@@ -2727,6 +2782,13 @@ textarea,
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 16px;
+}
+
+.modal-helper-text {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .empty-state,

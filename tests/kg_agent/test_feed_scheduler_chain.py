@@ -14,8 +14,10 @@ class _CapturingRAG:
     def __init__(self):
         self.insert_calls: list[dict] = []
 
-    async def ainsert(self, input, file_paths=None):
-        self.insert_calls.append({"input": input, "file_paths": file_paths})
+    async def ainsert(self, input, file_paths=None, metadatas=None):
+        self.insert_calls.append(
+            {"input": input, "file_paths": file_paths, "metadatas": metadatas}
+        )
         return f"track-{len(self.insert_calls)}"
 
 
@@ -119,6 +121,7 @@ async def test_feed_scheduler_chain_discovers_crawls_and_ingests(tmp_path: Path)
     ]
     assert len(rag.insert_calls) == 2
     assert rag.insert_calls[0]["file_paths"] == "https://example.com/article-1"
+    assert rag.insert_calls[0]["metadatas"]["source_label"] == "crawler"
     assert rag.insert_calls[0]["input"].startswith("Battery policy support")
     assert rag.insert_calls[1]["file_paths"] == "https://example.com/article-2"
     assert record is not None

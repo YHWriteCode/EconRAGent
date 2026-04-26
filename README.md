@@ -113,15 +113,23 @@ EconRAGent/
 
 ```
 用户调用 rag.ainsert(documents)
-  → lightrag_fork: 文档去重、filter_keys
-  → operate.py: 文本分块（chunking_by_token_size）
+  → lightrag_fork: 文档去重、filter_keys、接收可选 metadatas / segment_docs
+  → operate.py: 文本分块（chunking_by_token_size），并继承文件/页码/章节/crawler 来源元数据
   → operate.py: LLM 实体/关系抽取（extract_entities）
       ├─ 可注入领域 Schema 约束（economy / general）
       └─ Schema 后处理归一化
   → operate.py: 图谱合并（merge_nodes_and_edges）
-      └─ 更新时序元数据（created_at / last_confirmed_at / confirmation_count）
+      └─ 更新时序元数据（created_at / last_confirmed_at / confirmation_count）和轻量来源标签（source_labels）
   → kg/*_impl: 写入 Neo4j / Qdrant / MongoDB
 ```
+
+导入来源元数据约定：
+
+- `file_path` 保持为兼容旧检索和引用的主来源字段。
+- chunk 额外保存 `metadata`，常用字段包括 `source_label`、`source_filename`、`file_format`、`page_number`、`chapter_title`、`section_path`、`source_url`、`crawler_source_id`、`feed_item_key`、`event_cluster_id`、`published_at`。
+- PDF 始终先按页保留 `page_number`；当前不做 PDF 标题识别或 OCR。
+- 非 PDF 小文档在 token 数不超过 `chunk_token_size` 时直接作为单 chunk；大文档再按 Markdown/DOCX/EPUB 章节 segment 分块。
+- Crawl4AI、Feed 调度和事件聚合写入的 chunk 使用 `source_label="crawler"`，同时保留 URL 或 feed item key 作为 `file_path`。
 
 ### 5.2 查询对话流（Chat）
 
@@ -158,9 +166,11 @@ EconRAGent/
 | Schema | 文件 | 实体类型 | 默认状态 |
 |---|---|---|---|
 | `general` | `schemas/general.py` | Person, Organization, Location... | `enabled=False`（保持原始 LightRAG 行为） |
-| `economy` | `schemas/economy.py` | Company, Industry, Metric, Policy, Event, Asset, Institution, Country | `enabled=True, mode=domain` |
+| `economy` | `schemas/economy.py` | Company, Industry, Metric, Policy, Event, Asset, Institution, Location, Person, Concept | `enabled=True, mode=domain` |
 
 每个 Schema 还附带 `explanation_profile`，供上层 PathExplainer 消费意图触发、语义标签、关系语义、节点角色规则、路径约束、证据策略等信息，无需在 `kg_agent` 中硬编码。
+
+`kg_agent` 默认使用 `KG_AGENT_DEFAULT_DOMAIN_SCHEMA=economy` 启动动态工作区，因此 WebUI 图谱筛选模板和后端实体抽取会使用同一份 economy schema。economy schema 的实体类型 canonicalizer 由 schema 自身的 `aliases` 和 `metadata` 管理；未知实体类型会归入 `Concept`，不会额外在业务层写死映射。
 
 ---
 
@@ -299,6 +309,7 @@ node .\node_modules\vite\bin\vite.js build
 - `EconRAGent_webui/node_modules/` 是本地依赖目录，不应提交到 git
 - `EconRAGent_webui/package-lock.json` 应提交，用于锁定已验证的依赖版本
 - 修改前端源码后，应同步刷新 `kg_agent/api/webui/` 构建产物，否则后端打包出来的静态页面会落后于源码
+- 空间页文件导入支持 Word `.docx`、PDF、Markdown `.md`/`.markdown` 和 EPUB；上传后由 `kg_agent.uploads.UploadStore` 生成纯文本 `extracted.txt` 和结构化 `extracted.json`，再带来源元数据写入知识图谱
 - WebUI 默认页面入口包括：
   - `/webui/chat`
   - `/webui/graph`

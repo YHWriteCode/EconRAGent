@@ -8,6 +8,7 @@ import sys
 from kg_agent.agent.agent_core import AgentCore
 from kg_agent.api.app import (
     EnvLightRAGProvider,
+    _build_domain_schema_addon_params,
     _normalize_ollama_host,
     _build_optional_utility_llm_from_env,
     build_mcp_adapter_from_env,
@@ -32,6 +33,9 @@ class _FakeRAG:
 
 
 def test_build_rag_from_env_returns_lightrag_instance(tmp_path, monkeypatch):
+    monkeypatch.delenv("KG_AGENT_DEFAULT_DOMAIN_SCHEMA", raising=False)
+    monkeypatch.delenv("KG_AGENT_SUMMARY_LANGUAGE", raising=False)
+    monkeypatch.delenv("SUMMARY_LANGUAGE", raising=False)
     monkeypatch.setenv("WORKING_DIR", str(tmp_path / "rag_storage"))
     monkeypatch.setenv("LIGHTRAG_KV_STORAGE", "JsonKVStorage")
     monkeypatch.setenv("LIGHTRAG_GRAPH_STORAGE", "NetworkXStorage")
@@ -52,10 +56,28 @@ def test_build_rag_from_env_returns_lightrag_instance(tmp_path, monkeypatch):
     assert rag.llm_model_name == "dummy-chat-model"
     assert rag.embedding_func.embedding_dim == 1536
     assert rag.vector_storage == "NanoVectorDBStorage"
+    assert rag.addon_params["domain_schema"]["profile_name"] == "economy"
+    assert rag.addon_params["domain_schema"]["enabled"] is True
+    assert rag.addon_params["language"] == "Chinese"
+    assert "Company" in rag.addon_params["entity_types"]
+
+
+def test_build_domain_schema_addon_params_supports_general_opt_out():
+    economy_params = _build_domain_schema_addon_params(None)
+    general_params = _build_domain_schema_addon_params("general")
+
+    assert economy_params["domain_schema"]["profile_name"] == "economy"
+    assert economy_params["domain_schema"]["enabled"] is True
+    assert economy_params["language"] == "Chinese"
+    assert economy_params["domain_schema"]["language"] == "Chinese"
+    assert general_params["domain_schema"]["profile_name"] == "general"
+    assert general_params["domain_schema"]["enabled"] is False
+    assert general_params["language"] == "Chinese"
 
 
 def test_build_rag_from_env_wires_rerank_settings(tmp_path, monkeypatch):
     sentinel = object()
+    monkeypatch.delenv("KG_AGENT_DEFAULT_DOMAIN_SCHEMA", raising=False)
     monkeypatch.setenv("WORKING_DIR", str(tmp_path / "rag_storage"))
     monkeypatch.setenv("LIGHTRAG_KV_STORAGE", "JsonKVStorage")
     monkeypatch.setenv("LIGHTRAG_GRAPH_STORAGE", "NetworkXStorage")
@@ -97,6 +119,7 @@ def test_build_optional_utility_llm_from_env_returns_none_without_dedicated_conf
 
 def test_build_rag_from_env_wires_utility_llm(tmp_path, monkeypatch):
     sentinel = object()
+    monkeypatch.delenv("KG_AGENT_DEFAULT_DOMAIN_SCHEMA", raising=False)
     monkeypatch.setenv("WORKING_DIR", str(tmp_path / "rag_storage"))
     monkeypatch.setenv("LIGHTRAG_KV_STORAGE", "JsonKVStorage")
     monkeypatch.setenv("LIGHTRAG_GRAPH_STORAGE", "NetworkXStorage")
@@ -316,6 +339,8 @@ def test_normalize_ollama_host_strips_openai_style_suffix():
 @pytest.mark.asyncio
 async def test_env_rag_provider_reuses_same_workspace_instance(monkeypatch):
     created_workspaces: list[str] = []
+    created_profiles: list[str | None] = []
+    monkeypatch.delenv("KG_AGENT_DEFAULT_DOMAIN_SCHEMA", raising=False)
 
     class DummyRAG:
         def __init__(self, workspace: str):
@@ -333,8 +358,9 @@ async def test_env_rag_provider_reuses_same_workspace_instance(monkeypatch):
         async def finalize_storages(self):
             self.finalize_calls += 1
 
-    def fake_build_rag_from_env(*, workspace=None):
+    def fake_build_rag_from_env(*, workspace=None, domain_schema_profile=None):
         created_workspaces.append(workspace or "")
+        created_profiles.append(domain_schema_profile)
         return DummyRAG(workspace or "")
 
     monkeypatch.setattr("kg_agent.api.app.build_rag_from_env", fake_build_rag_from_env)
@@ -352,6 +378,7 @@ async def test_env_rag_provider_reuses_same_workspace_instance(monkeypatch):
     assert rag_a1.initialize_calls == 1
     assert rag_a1.migrate_calls == 1
     assert rag_b.initialize_calls == 1
+    assert created_profiles == ["economy", "economy"]
 
     await provider.finalize_all()
 

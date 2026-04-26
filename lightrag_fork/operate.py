@@ -165,7 +165,7 @@ def _build_domain_schema_prompt_appendix(domain_schema: dict[str, Any] | None) -
     """Build an optional schema guidance block for extraction prompts.
 
     The block is appended only when a domain schema is explicitly enabled.
-    It is guidance-only and must not be treated as a strict filtering whitelist.
+    Schema metadata can opt into strict entity-type canonicalization.
     """
     if not isinstance(domain_schema, dict):
         return ""
@@ -173,15 +173,63 @@ def _build_domain_schema_prompt_appendix(domain_schema: dict[str, Any] | None) -
     if not domain_schema.get("enabled"):
         return ""
 
-    entity_types = domain_schema.get("entity_type_names") or []
-    relation_types = domain_schema.get("relation_type_names") or []
+    def _schema_prompt_labels(collection_key: str, fallback_names: list[Any]) -> list[str]:
+        labels: list[str] = []
+        definitions = domain_schema.get(collection_key) or []
+        if isinstance(definitions, list):
+            for item in definitions:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                display_name = str(item.get("display_name") or "").strip()
+                if (
+                    display_name
+                    and name
+                    and display_name.strip().lower() != name.strip().lower()
+                ):
+                    labels.append(f"{display_name} ({name})")
+                elif display_name:
+                    labels.append(display_name)
+                elif name:
+                    labels.append(name)
+        if labels:
+            return labels
+        return [str(item) for item in fallback_names if str(item).strip()]
+
+    entity_types = _schema_prompt_labels(
+        "entity_types",
+        domain_schema.get("entity_type_names") or [],
+    )
+    relation_types = _schema_prompt_labels(
+        "relation_types",
+        domain_schema.get("relation_type_names") or [],
+    )
     extraction_rules = domain_schema.get("extraction_rules") or []
+    metadata = domain_schema.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    canonicalization_mode = str(
+        metadata.get("entity_type_canonicalization") or ""
+    ).strip().lower()
+    strict_entity_types = bool(metadata.get("strict_entity_types")) or (
+        canonicalization_mode in {"strict", "schema_only", "schema-only"}
+    )
+    fallback_entity_type = str(metadata.get("fallback_entity_type") or "").strip()
 
     lines: list[str] = []
     if entity_types:
-        lines.append(
-            f"本次抽取优先关注以下实体类型：{', '.join(str(item) for item in entity_types)}"
-        )
+        entity_type_list = ", ".join(str(item) for item in entity_types)
+        if strict_entity_types:
+            fallback_note = (
+                f"；无法明确归类时使用 {fallback_entity_type}"
+                if fallback_entity_type
+                else ""
+            )
+            lines.append(
+                f"entity_type 必须从以下实体类型中选择：{entity_type_list}{fallback_note}"
+            )
+        else:
+            lines.append(f"本次抽取优先关注以下实体类型：{entity_type_list}")
     if relation_types:
         lines.append(
             f"本次抽取优先关注以下关系类型：{', '.join(str(item) for item in relation_types)}"
@@ -194,11 +242,17 @@ def _build_domain_schema_prompt_appendix(domain_schema: dict[str, Any] | None) -
     if not lines:
         return ""
 
+    note = (
+        "注意：实体名称仍应覆盖文本中显著实体，但 entity_type 不要使用列表外标签。\n"
+        if strict_entity_types
+        else "注意：以上为优先引导，不要遗漏文本中显著的通用实体。\n"
+    )
+
     return (
         "\n\n---\n"
         "[领域约束]\n"
         + "\n".join(lines)
-        + "\n注意：以上为优先引导，不要遗漏文本中显著的通用实体。\n"
+        + f"\n{note}"
         "---"
     )
 
@@ -548,6 +602,7 @@ async def _handle_single_entity_extraction(
     chunk_key: str,
     timestamp: int,
     file_path: str = "unknown_source",
+    source_label: str = "",
 ):
     if len(record_attributes) != 4 or "entity" not in record_attributes[0]:
         if len(record_attributes) > 1 and "entity" in record_attributes[0]:
@@ -615,6 +670,7 @@ async def _handle_single_entity_extraction(
             description=entity_description,
             source_id=chunk_key,
             file_path=file_path,
+            source_label=source_label,
             timestamp=timestamp,
         )
 
@@ -635,6 +691,7 @@ async def _handle_single_relationship_extraction(
     chunk_key: str,
     timestamp: int,
     file_path: str = "unknown_source",
+    source_label: str = "",
 ):
     if (
         len(record_attributes) != 5 or "relation" not in record_attributes[0]
@@ -702,6 +759,7 @@ async def _handle_single_relationship_extraction(
             keywords=edge_keywords,
             source_id=edge_source_id,
             file_path=file_path,
+            source_label=source_label,
             timestamp=timestamp,
         )
 
@@ -1100,6 +1158,7 @@ async def _process_extraction_result(
     chunk_key: str,
     timestamp: int,
     file_path: str = "unknown_source",
+    source_label: str = "",
     tuple_delimiter: str = "<|#|>",
     completion_delimiter: str = "<|COMPLETE|>",
     domain_schema: dict[str, Any] | None = None,
@@ -1184,7 +1243,7 @@ async def _process_extraction_result(
 
         # Try to parse as entity
         entity_data = await _handle_single_entity_extraction(
-            record_attributes, chunk_key, timestamp, file_path
+            record_attributes, chunk_key, timestamp, file_path, source_label
         )
         if entity_data is not None:
             entity_data["entity_type"] = normalize_extracted_entity_type(
@@ -1203,7 +1262,7 @@ async def _process_extraction_result(
 
         # Try to parse as relationship
         relationship_data = await _handle_single_relationship_extraction(
-            record_attributes, chunk_key, timestamp, file_path
+            record_attributes, chunk_key, timestamp, file_path, source_label
         )
         if relationship_data is not None:
             relationship_data["keywords"] = normalize_extracted_relation_keywords(
@@ -1254,6 +1313,7 @@ async def _rebuild_from_extraction_result(
         if chunk_data
         else "unknown_source"
     )
+    source_label = chunk_data.get("source_label", "") if chunk_data else ""
 
     # Call the shared processing function
     return await _process_extraction_result(
@@ -1261,6 +1321,7 @@ async def _rebuild_from_extraction_result(
         chunk_id,
         timestamp,
         file_path,
+        source_label,
         tuple_delimiter=PROMPTS["DEFAULT_TUPLE_DELIMITER"],
         completion_delimiter=PROMPTS["DEFAULT_COMPLETION_DELIMITER"],
         domain_schema=domain_schema,
@@ -1808,6 +1869,7 @@ async def _merge_nodes_then_upsert(
     already_source_ids = []
     already_description = []
     already_file_paths = []
+    already_source_labels = []
     existing_created_at = None
     existing_confirmation_count = None
 
@@ -1844,6 +1906,13 @@ async def _merge_nodes_then_upsert(
 
         existing_file_path = already_node.get("file_path") or "unknown_source"
         already_file_paths.extend(existing_file_path.split(GRAPH_FIELD_SEP))
+        existing_source_labels = already_node.get("source_labels") or already_node.get(
+            "source_label"
+        )
+        if existing_source_labels:
+            already_source_labels.extend(
+                str(existing_source_labels).split(GRAPH_FIELD_SEP)
+            )
 
         existing_desc = (already_node.get("description") or "").strip()
         if existing_desc:
@@ -2030,6 +2099,20 @@ async def _merge_nodes_then_upsert(
     # Finalize file_path
     file_path = GRAPH_FIELD_SEP.join(file_paths_list)
 
+    source_labels_list = []
+    seen_source_labels = set()
+    for label in already_source_labels:
+        label = str(label or "").strip()
+        if label and label not in seen_source_labels:
+            source_labels_list.append(label)
+            seen_source_labels.add(label)
+    for dp in nodes_data:
+        label = str(dp.get("source_label") or "").strip()
+        if label and label not in seen_source_labels:
+            source_labels_list.append(label)
+            seen_source_labels.add(label)
+    source_labels = GRAPH_FIELD_SEP.join(source_labels_list)
+
     # 10.Log based on actual LLM usage
     num_fragment = len(description_list)
     already_fragment = len(already_description)
@@ -2076,6 +2159,7 @@ async def _merge_nodes_then_upsert(
         description=description,
         source_id=source_id,
         file_path=file_path,
+        source_labels=source_labels,
         created_at=existing_created_at
         if isinstance(existing_created_at, (int, float))
         else current_time,
@@ -2103,6 +2187,7 @@ async def _merge_nodes_then_upsert(
                 "content": entity_content,
                 "source_id": source_id,
                 "file_path": file_path,
+                "source_labels": source_labels,
             }
         }
         await safe_vdb_operation_with_exception(
@@ -2140,6 +2225,7 @@ async def _merge_edges_then_upsert(
     already_description = []
     already_keywords = []
     already_file_paths = []
+    already_source_labels = []
     existing_edge_created_at = None
     existing_edge_confirmation_count = None
 
@@ -2163,6 +2249,13 @@ async def _merge_edges_then_upsert(
             if already_edge.get("file_path") is not None:
                 already_file_paths.extend(
                     already_edge["file_path"].split(GRAPH_FIELD_SEP)
+                )
+            existing_source_labels = already_edge.get("source_labels") or already_edge.get(
+                "source_label"
+            )
+            if existing_source_labels:
+                already_source_labels.extend(
+                    str(existing_source_labels).split(GRAPH_FIELD_SEP)
                 )
 
             # Get description with empty string default if missing or None
@@ -2384,6 +2477,20 @@ async def _merge_edges_then_upsert(
     # Finalize file_path
     file_path = GRAPH_FIELD_SEP.join(file_paths_list)
 
+    source_labels_list = []
+    seen_source_labels = set()
+    for label in already_source_labels:
+        label = str(label or "").strip()
+        if label and label not in seen_source_labels:
+            source_labels_list.append(label)
+            seen_source_labels.add(label)
+    for dp in edges_data:
+        label = str(dp.get("source_label") or "").strip()
+        if label and label not in seen_source_labels:
+            source_labels_list.append(label)
+            seen_source_labels.add(label)
+    source_labels = GRAPH_FIELD_SEP.join(source_labels_list)
+
     # 10. Log based on actual LLM usage
     num_fragment = len(description_list)
     already_fragment = len(already_description)
@@ -2436,6 +2543,7 @@ async def _merge_edges_then_upsert(
                 "description": description,
                 "entity_type": "UNKNOWN",
                 "file_path": file_path,
+                "source_labels": source_labels,
                 "created_at": node_created_at,
                 "last_confirmed_at": node_created_at,
                 "confirmation_count": 1,
@@ -2466,6 +2574,7 @@ async def _merge_edges_then_upsert(
                         "source_id": source_id,
                         "entity_type": "UNKNOWN",
                         "file_path": file_path,
+                        "source_labels": source_labels,
                     }
                 }
                 await safe_vdb_operation_with_exception(
@@ -2484,6 +2593,7 @@ async def _merge_edges_then_upsert(
                     "description": description,
                     "source_id": source_id,
                     "file_path": file_path,
+                    "source_labels": source_labels,
                     "created_at": node_created_at,
                     "last_confirmed_at": node_created_at,
                     "confirmation_count": 1,
@@ -2551,9 +2661,26 @@ async def _merge_edges_then_upsert(
 
             if limited_source_id_str != existing_node.get("source_id", ""):
                 updated = True
+                existing_node_labels = [
+                    item
+                    for item in str(
+                        existing_node.get("source_labels")
+                        or existing_node.get("source_label")
+                        or ""
+                    ).split(GRAPH_FIELD_SEP)
+                    if item
+                ]
+                merged_node_labels = []
+                seen_node_labels = set()
+                for label in [*existing_node_labels, *source_labels_list]:
+                    label = str(label or "").strip()
+                    if label and label not in seen_node_labels:
+                        merged_node_labels.append(label)
+                        seen_node_labels.add(label)
                 updated_node_data = {
                     **existing_node,
                     "source_id": limited_source_id_str,
+                    "source_labels": GRAPH_FIELD_SEP.join(merged_node_labels),
                 }
                 await knowledge_graph_inst.upsert_node(
                     need_insert_id, node_data=updated_node_data
@@ -2573,6 +2700,9 @@ async def _merge_edges_then_upsert(
                             "entity_type": existing_node.get("entity_type", "UNKNOWN"),
                             "file_path": existing_node.get(
                                 "file_path", "unknown_source"
+                            ),
+                            "source_labels": updated_node_data.get(
+                                "source_labels", ""
                             ),
                         }
                     }
@@ -2603,6 +2733,7 @@ async def _merge_edges_then_upsert(
             keywords=keywords,
             source_id=source_id,
             file_path=file_path,
+            source_labels=source_labels,
             created_at=existing_edge_created_at
             if isinstance(existing_edge_created_at, (int, float))
             else edge_created_at,
@@ -2624,6 +2755,7 @@ async def _merge_edges_then_upsert(
         keywords=keywords,
         source_id=source_id,
         file_path=file_path,
+        source_labels=source_labels,
         created_at=existing_edge_created_at
         if isinstance(existing_edge_created_at, (int, float))
         else edge_created_at,
@@ -2662,6 +2794,7 @@ async def _merge_edges_then_upsert(
                 "description": description,
                 "weight": weight,
                 "file_path": file_path,
+                "source_labels": source_labels,
             }
         }
         await safe_vdb_operation_with_exception(
@@ -3108,6 +3241,7 @@ async def extract_entities(
         content = chunk_dp["content"]
         # Get file path from chunk data or use default
         file_path = chunk_dp.get("file_path", "unknown_source")
+        source_label = str(chunk_dp.get("source_label") or "")
 
         # Create cache keys collector for batch processing
         cache_keys_collector = []
@@ -3154,6 +3288,7 @@ async def extract_entities(
             chunk_key,
             timestamp,
             file_path,
+            source_label,
             tuple_delimiter=context_base["tuple_delimiter"],
             completion_delimiter=context_base["completion_delimiter"],
             domain_schema=domain_schema,
@@ -3198,6 +3333,7 @@ async def extract_entities(
                     chunk_key,
                     timestamp,
                     file_path,
+                    source_label,
                     tuple_delimiter=context_base["tuple_delimiter"],
                     completion_delimiter=context_base["completion_delimiter"],
                     domain_schema=domain_schema,
@@ -3718,13 +3854,41 @@ async def _get_vector_context(
         valid_chunks = []
         for result in results:
             if "content" in result:
+                metadata = result.get("metadata", {})
+                if isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except json.JSONDecodeError:
+                        metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
                 chunk_with_metadata = {
                     "content": result["content"],
                     "created_at": result.get("created_at", None),
                     "file_path": result.get("file_path", "unknown_source"),
+                    "metadata": metadata,
                     "source_type": "vector",  # Mark the source type
                     "chunk_id": result.get("id"),  # Add chunk_id for deduplication
                 }
+                for key in (
+                    "source_label",
+                    "source_filename",
+                    "source_url",
+                    "file_format",
+                    "page_number",
+                    "page_range",
+                    "chapter_title",
+                    "section_path",
+                    "crawler_source_id",
+                    "crawler_source_name",
+                    "feed_item_key",
+                    "event_cluster_id",
+                    "published_at",
+                ):
+                    if key in result:
+                        chunk_with_metadata[key] = result[key]
+                    elif key in metadata:
+                        chunk_with_metadata[key] = metadata[key]
                 valid_chunks.append(chunk_with_metadata)
 
         logger.info(
@@ -4375,7 +4539,7 @@ async def _build_context_str(
         json.dumps(text_unit, ensure_ascii=False) for text_unit in chunks_context
     )
     reference_list_str = "\n".join(
-        f"[{ref['reference_id']}] {ref['file_path']}"
+        f"[{ref['reference_id']}] {ref.get('label') or ref['file_path']}"
         for ref in reference_list
         if ref["reference_id"]
     )
@@ -5316,7 +5480,7 @@ async def naive_query(
         json.dumps(text_unit, ensure_ascii=False) for text_unit in chunks_context
     )
     reference_list_str = "\n".join(
-        f"[{ref['reference_id']}] {ref['file_path']}"
+        f"[{ref['reference_id']}] {ref.get('label') or ref['file_path']}"
         for ref in reference_list
         if ref["reference_id"]
     )

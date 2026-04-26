@@ -1,5 +1,5 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SpacesPage } from "./SpacesPage";
 import { renderWithProviders } from "../test/utils";
@@ -25,6 +25,10 @@ vi.mock("../lib/api", () => ({
 }));
 
 describe("SpacesPage", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("creates a workspace from the create modal", async () => {
     apiMocks.listWorkspaces.mockResolvedValue({ workspaces: [] });
     apiMocks.getImportStatus.mockResolvedValue({
@@ -66,5 +70,77 @@ describe("SpacesPage", () => {
         description: "观察全球宏观主题",
       });
     });
+  });
+
+  it("limits workspace file imports to supported document formats", async () => {
+    apiMocks.listWorkspaces.mockResolvedValue({
+      workspaces: [
+        {
+          workspace_id: "macro",
+          display_name: "宏观研究",
+          description: "观察全球宏观主题",
+          created_at: "2026-04-21T10:00:00+08:00",
+          updated_at: "2026-04-21T10:00:00+08:00",
+          document_count: 0,
+          node_count: 0,
+          source_count: 0,
+          last_updated_at: "2026-04-21T10:00:00+08:00",
+          archived: false,
+        },
+      ],
+    });
+    apiMocks.uploadFile.mockResolvedValue({
+      upload_id: "upload-1",
+      upload: {
+        upload_id: "upload-1",
+        filename: "report.epub",
+      },
+    });
+    apiMocks.createWorkspaceImport.mockResolvedValue({
+      status: "accepted",
+      workspace_id: "macro",
+      track_id: "track-1",
+    });
+    apiMocks.getImportStatus.mockResolvedValue({
+      track_id: "track-1",
+      workspace_id: "macro",
+      document_count: 1,
+      status_counts: { processed: 1 },
+      documents: [],
+    });
+
+    const { container } = renderWithProviders(<SpacesPage />, { route: "/spaces" });
+
+    fireEvent.click(await screen.findByRole("button", { name: "宏观研究 操作菜单" }));
+    fireEvent.click(screen.getByRole("button", { name: /导入文件/ }));
+
+    expect(screen.getByText("支持 Word（.docx）、PDF、Markdown（.md）和 EPUB")).toBeInTheDocument();
+
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput.accept).toContain(".epub");
+    expect(fileInput.accept).toContain(".docx");
+
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(["epub"], "report.epub", {
+            type: "application/epub+zip",
+          }),
+        ],
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
+
+    expect(screen.getByRole("button", { name: "提交中..." })).toBeDisabled();
+    expect(screen.getByRole("status")).toHaveTextContent("正在上传文件");
+
+    await waitFor(() => {
+      expect(apiMocks.uploadFile).toHaveBeenCalled();
+      expect(apiMocks.createWorkspaceImport).toHaveBeenCalledWith("macro", {
+        kind: "upload",
+        upload_id: "upload-1",
+      });
+    });
+    expect(await screen.findByText("导入提交成功")).toBeInTheDocument();
   });
 });

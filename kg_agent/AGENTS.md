@@ -18,6 +18,7 @@
 - Conversation memory, cross-session memory, and user profile handling
 - Web crawling, recurring ingest, and source management
 - FastAPI service and dynamic workspace bootstrapping
+- Upload-backed workspace imports, with text and structured chunk-provenance extraction delegated to `kg_agent.uploads.UploadStore` for supported document formats.
 
 **Not responsible for:**
 
@@ -80,6 +81,9 @@ kg_agent/
 - Prefer schema-bounded LLM normalization for fuzzy skill parameters when a utility model is available; keep regex and hardcoded parsing as validation/fallback layers rather than the primary reasoning path.
 - Do not hardcode domain-specific placeholder tools into the native built-in registry; specialized integrations belong behind MCP or the skill runtime.
 - Prefer `rag_provider`-based dynamic workspace loading in API-facing flows instead of binding the app to one fixed `LightRAG` instance.
+- Dynamic workspace `LightRAG` instances should receive `config.runtime.default_domain_schema` through `addon_params`; the default is `economy` so WebUI graph filters and extraction prompts share the same schema unless explicitly configured otherwise.
+- Keep workspace upload import format support aligned across `kg_agent/uploads.py`, `kg_agent/api/webui_routes.py`, and the WebUI spaces dialog.
+- Workspace imports should pass provenance metadata into `LightRAG.ainsert()` via `metadatas` and `segment_docs`; preserve `file_path` as the compatibility citation source.
 
 ---
 

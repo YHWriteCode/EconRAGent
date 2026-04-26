@@ -67,10 +67,17 @@ api/
 - `POST /agent/chat` remains the primary chat endpoint for both normal and streaming flows.
 - Streaming mode is still activated by `stream=true` in the request body and returns `text/event-stream`.
 - The frontend source of truth is `EconRAGent_webui/`; files under `kg_agent/api/webui/` are generated assets that should be refreshed by the frontend build rather than hand-edited.
+- Upload-backed workspace imports depend on `kg_agent.uploads.UploadStore` text and manifest extraction. Keep API behavior aligned with the WebUI import dialog for Word `.docx`, PDF, Markdown `.md`/`.markdown`, and EPUB.
+- Workspace import routes should keep `file_path` stable for citations while passing document provenance through `metadatas` and structured segments through `segment_docs`; URL imports sourced by Crawl4AI should use `source_label="crawler"`.
+- `build_rag_from_env()` and `EnvLightRAGProvider` should pass `KG_AGENT_DEFAULT_DOMAIN_SCHEMA` / `config.runtime.default_domain_schema` into LightRAG `addon_params`. The project default is `economy`; setting it to `general` is the explicit opt-out path.
+- Agent-managed LightRAG construction defaults extraction/summary language to Chinese through `SUMMARY_LANGUAGE` / `KG_AGENT_SUMMARY_LANGUAGE`; schema canonical names such as `Company` or `policy_supports` remain internal identifiers while WebUI labels should use `display_name`.
 - Graph routes treat `workspace=all` as a Web/API aggregation sentinel. Do not pass `all` into `LightRAG` as if it were a real workspace; resolve registered workspaces, query them individually, and merge the public payload at the API layer.
-- Graph route node budgets are intentionally aligned across layers: the current WebUI default request budget is `800`, and `/agent/graph/overview` plus `/agent/graph/subgraph` currently enforce `max_nodes <= 800`.
+- Workspace deletion/drop paths should clear `llm_response_cache` together with graph/vector/KV/doc-status storage so stale extraction outputs do not survive a delete-and-reimport test cycle.
+- Graph route node budgets are intentionally aligned across layers: the current WebUI default request budget is `400`, and `/agent/graph/overview` plus `/agent/graph/subgraph` currently enforce `max_nodes <= 400`.
 - Graph filter option labels should stay schema-driven. The WebUI reads `/agent/graph/schema`; do not duplicate entity or relation type lists in frontend source when they already exist under `lightrag_fork/schemas`. If no workspace runtime schema is available, graph filters should fall back to the economy schema because the general schema intentionally has no relation type definitions.
+- Graph filtering should canonicalize entity and relation filter values through the active schema aliases/display names before comparing them with graph node/edge properties. The filter sidebar itself should stay schema-only: `/agent/graph/schema` should expose the configured `RelationTypeDefinition` / `EntityTypeDefinition` options, while legacy free-form edge keywords may still be matched if a client manually sends them as filter values.
 - For `workspace=all` graph requests, budget allocation is two-stage: first distribute node budget across workspaces, then recycle unused capacity to still-truncated workspaces so the merged response wastes less of the allowed node count.
+- Graph entity and relation detail routes may enrich graph `source_id` chunk hashes with `source_metadata` resolved from `rag.text_chunks`; the frontend should display this readable provenance instead of raw chunk ids.
 - SSE output is standardized as:
   - `event: <type>`
   - `data: <json>`

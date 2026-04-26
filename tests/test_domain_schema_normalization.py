@@ -16,20 +16,60 @@ def test_domain_schema_entity_type_normalization_uses_builtin_aliases():
     assert normalize_extracted_entity_type("公司", schema) == "Company"
     assert normalize_extracted_entity_type("company", schema) == "Company"
     assert normalize_extracted_entity_type("产业", schema) == "Industry"
+    assert normalize_extracted_entity_type("国家", schema) == "Location"
+    assert normalize_extracted_entity_type("country", schema) == "Location"
+    assert normalize_extracted_entity_type("高管", schema) == "Person"
+    assert normalize_extracted_entity_type("主题", schema) == "Concept"
 
 
-def test_domain_schema_relation_keyword_normalization_deduplicates_aliases():
+def test_economy_schema_uses_strict_schema_managed_entity_canonicalization():
+    schema = resolve_domain_schema(
+        {"profile_name": "economy", "enabled": True}
+    ).to_runtime_dict()
+
+    assert "Country" not in schema["entity_type_names"]
+    assert {"Location", "Person", "Concept"}.issubset(schema["entity_type_names"])
+    assert schema["language"] == "Chinese"
+    assert schema["metadata"]["entity_type_canonicalization"] == "strict"
+    assert normalize_extracted_entity_type("made_up_llm_type", schema) == "Concept"
+
+
+def test_domain_schema_relation_keyword_normalization_uses_strict_aliases():
     schema = resolve_domain_schema(
         {"profile_name": "economy", "enabled": True}
     ).to_runtime_dict()
 
     assert (
-        normalize_extracted_relation_keywords("政策支持,扶持,支持,景气度", schema)
+        normalize_extracted_relation_keywords(
+            "政策支持,政策扶持,政策刺激,景气度",
+            schema,
+        )
         == "policy_supports,景气度"
     )
     assert (
-        normalize_extracted_relation_keywords("影响,驱动,盈利能力", schema)
+        normalize_extracted_relation_keywords(
+            "影响指标,驱动指标,改善指标,盈利能力",
+            schema,
+        )
         == "affects_metric,盈利能力"
+    )
+    assert (
+        normalize_extracted_relation_keywords(
+            "所属行业,行业归属,新能源车",
+            schema,
+        )
+        == "belongs_to_industry,新能源车"
+    )
+    assert (
+        normalize_extracted_relation_keywords(
+            "所在国家,所在地区,海外市场",
+            schema,
+        )
+        == "operates_in_location,海外市场"
+    )
+    assert (
+        normalize_extracted_relation_keywords("扶持,支持,影响,属于", schema)
+        == "扶持,支持,影响,属于"
     )
 
 
@@ -109,4 +149,4 @@ async def test_extraction_result_applies_domain_schema_normalization():
     )
 
     assert maybe_nodes["比亚迪"][0]["entity_type"] == "Company"
-    assert maybe_edges[("政策", "比亚迪")][0]["keywords"] == "policy_supports"
+    assert maybe_edges[("政策", "比亚迪")][0]["keywords"] == "policy_supports,扶持"

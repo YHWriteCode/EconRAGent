@@ -72,7 +72,10 @@ class EnvLightRAGProvider:
             if cached is not None:
                 return cached
 
-            rag = build_rag_from_env(workspace=resolved_workspace)
+            rag = build_rag_from_env(
+                workspace=resolved_workspace,
+                domain_schema_profile=self.config.runtime.default_domain_schema,
+            )
             await rag.initialize_storages()
             await rag.check_and_migrate_data()
             self._instances[resolved_workspace] = rag
@@ -102,6 +105,7 @@ class EnvLightRAGProvider:
             getattr(rag, "chunks_vdb", None),
             getattr(rag, "chunk_entity_relation_graph", None),
             getattr(rag, "doc_status", None),
+            getattr(rag, "llm_response_cache", None),
         ]
         for storage in storages:
             drop_func = getattr(storage, "drop", None)
@@ -457,7 +461,51 @@ def build_embedding_func_from_env() -> EmbeddingFunc:
     )
 
 
-def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
+def _kg_agent_extraction_language() -> str:
+    return (
+        os.getenv("KG_AGENT_SUMMARY_LANGUAGE")
+        or os.getenv("SUMMARY_LANGUAGE")
+        or "Chinese"
+    ).strip() or "Chinese"
+
+
+def _build_domain_schema_addon_params(profile_name: str | None) -> dict[str, Any]:
+    normalized_profile = (profile_name or "").strip() or "economy"
+    language = _kg_agent_extraction_language()
+    if normalized_profile.lower() in {"general", "none", "disabled", "false", "off"}:
+        return {
+            "language": language,
+            "domain_schema": {
+                "enabled": False,
+                "mode": "general",
+                "profile_name": "general",
+                "language": language,
+            }
+        }
+    return {
+        "language": language,
+        "domain_schema": {
+            "enabled": True,
+            "mode": "domain",
+            "profile_name": normalized_profile,
+            "language": language,
+        }
+    }
+
+
+def build_rag_from_env(
+    *,
+    workspace: str | None = None,
+    domain_schema_profile: str | None = None,
+) -> LightRAG:
+    resolved_domain_schema_profile = (
+        str(domain_schema_profile).strip()
+        if domain_schema_profile is not None and str(domain_schema_profile).strip()
+        else (
+            os.getenv("KG_AGENT_DEFAULT_DOMAIN_SCHEMA", "economy").strip()
+            or "economy"
+        )
+    )
     llm_binding = get_env_value("LLM_BINDING", "openai", str)
     if llm_binding == "openai-ollama":
         llm_binding = "openai"
@@ -522,7 +570,10 @@ def build_rag_from_env(*, workspace: str | None = None) -> LightRAG:
         ),
         enable_llm_cache=get_env_value("ENABLE_LLM_CACHE", True, bool),
         max_parallel_insert=get_env_value("MAX_PARALLEL_INSERT", 2, int),
-        max_graph_nodes=get_env_value("MAX_GRAPH_NODES", 800, int),
+        max_graph_nodes=get_env_value("MAX_GRAPH_NODES", 400, int),
+        addon_params=_build_domain_schema_addon_params(
+            resolved_domain_schema_profile
+        ),
     )
     return rag
 
@@ -601,7 +652,10 @@ def build_agent_core_from_env(
             upload_store=upload_store,
         )
     return AgentCore(
-        rag=rag or build_rag_from_env(),
+        rag=rag
+        or build_rag_from_env(
+            domain_schema_profile=config.runtime.default_domain_schema,
+        ),
         config=config,
         mcp_adapter=mcp_adapter,
         crawler_adapter=crawler_adapter,

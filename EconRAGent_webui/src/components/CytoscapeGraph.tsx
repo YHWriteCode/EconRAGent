@@ -3,7 +3,7 @@ import cytoscape, {
   type Core,
   type ElementDefinition,
   type EventObject,
-  type Stylesheet,
+  type StylesheetJson,
 } from "cytoscape";
 
 import type { GraphPayload } from "../types";
@@ -35,7 +35,7 @@ const MAX_NODE_SIZE = 94;
 const MIN_EDGE_SIZE = 1.1;
 const MAX_EDGE_SIZE = 5.4;
 
-function createGraphStyle(showEdgeLabels: boolean): Stylesheet[] {
+function createGraphStyle(showEdgeLabels: boolean): StylesheetJson {
   return [
   {
     selector: "node",
@@ -120,7 +120,7 @@ function createGraphStyle(showEdgeLabels: boolean): Stylesheet[] {
         "target-arrow-color": "#9a3412",
       },
     },
-  ];
+  ] as unknown as StylesheetJson;
 }
 
 function resolveLayout(name: GraphLayoutName) {

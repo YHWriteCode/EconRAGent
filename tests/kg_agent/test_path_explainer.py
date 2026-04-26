@@ -266,8 +266,8 @@ def test_path_explainer_scores_node_role_alignment_for_economy_paths():
     misaligned_path = {
         "path_text": "政策支持 -> 新能源汽车行业 -> 比亚迪收入",
         "nodes": [
-            {"id": "政策支持", "entity_type": "Country"},
-            {"id": "新能源汽车行业", "entity_type": "Country"},
+            {"id": "政策支持", "entity_type": "Location"},
+            {"id": "新能源汽车行业", "entity_type": "Location"},
             {"id": "比亚迪收入", "entity_type": "Industry"},
         ],
         "edges": [

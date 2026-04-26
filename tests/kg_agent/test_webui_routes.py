@@ -1,4 +1,6 @@
 import asyncio
+from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZipFile
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -11,6 +13,42 @@ from kg_agent.crawler.crawl_state_store import CrawlStateRecord, EventClusterRec
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.uploads import UploadStore
 from kg_agent.workspace_registry import InMemoryWorkspaceRegistry, WorkspaceRecord
+
+
+def _build_minimal_epub(title: str, body: str) -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr(
+            "META-INF/container.xml",
+            """<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>""",
+        )
+        archive.writestr(
+            "OEBPS/content.opf",
+            """<?xml version="1.0"?>
+<package version="3.0" xmlns="http://www.idpf.org/2007/opf">
+  <manifest>
+    <item id="chapter-1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="chapter-1"/>
+  </spine>
+</package>""",
+        )
+        archive.writestr(
+            "OEBPS/chapter1.xhtml",
+            f"""<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head><title>{title}</title></head>
+  <body><h1>{title}</h1><p>{body}</p></body>
+</html>""",
+        )
+    return output.getvalue()
 
 
 @dataclass
@@ -97,6 +135,8 @@ class _FakeChunkGraph:
                 "Acme": {
                     "entity_name": "Acme",
                     "entity_type": "Company",
+                    "source_id": "chunk-alpha-report",
+                    "source_labels": "file",
                     "updated_at": base_time,
                 },
                 "Macro": {
@@ -113,10 +153,12 @@ class _FakeChunkGraph:
             self.edges = {
                 ("Acme", "Macro"): {
                     "relation": "affected_by",
+                    "source_id": "chunk-alpha-report",
+                    "source_labels": "file",
                     "updated_at": base_time,
                 },
                 ("Macro", "Policy"): {
-                    "relation": "linked_to",
+                    "relation": "政策支持",
                     "updated_at": "2026-04-03T08:00:00+00:00",
                 },
             }
@@ -166,10 +208,29 @@ class _FakeChunkGraph:
         return self.edges.get((source, target)) or self.edges.get((target, source))
 
 
+class _FakeTextChunks:
+    def __init__(self):
+        self.items = {
+            "chunk-alpha-report": {
+                "file_path": "alpha-report.pdf",
+                "metadata": {
+                    "source_label": "file",
+                    "source_filename": "alpha-report.pdf",
+                    "file_format": "pdf",
+                    "page_number": 3,
+                },
+            }
+        }
+
+    async def get_by_ids(self, ids: list[str]):
+        return [self.items[item] for item in ids if item in self.items]
+
+
 class _FakeRAG:
     def __init__(self, workspace_id: str):
         self.workspace = workspace_id
         self.chunk_entity_relation_graph = _FakeChunkGraph(workspace_id)
+        self.text_chunks = _FakeTextChunks()
         if workspace_id == "ws-alpha":
             self.doc_status = _FakeDocStatusStore(
                 status_counts={"processed": 2, "failed": 1},
@@ -203,7 +264,7 @@ class _FakeRAG:
                     )
                 ],
             )
-        self.insert_calls: list[tuple[object, object]] = []
+        self.insert_calls: list[dict[str, object]] = []
         self._track_counter = 0
 
     async def get_graph_labels(self):
@@ -258,10 +319,17 @@ class _FakeRAG:
         ]
         return SimpleNamespace(nodes=nodes, edges=edges, is_truncated=is_truncated)
 
-    async def ainsert(self, *, input, file_paths):
+    async def ainsert(self, *, input, file_paths, metadatas=None, segment_docs=None):
         self._track_counter += 1
         track_id = f"{self.workspace}-track-{self._track_counter}"
-        self.insert_calls.append((input, file_paths))
+        self.insert_calls.append(
+            {
+                "input": input,
+                "file_paths": file_paths,
+                "metadatas": metadatas,
+                "segment_docs": segment_docs,
+            }
+        )
         self.doc_status.by_track[track_id] = {
             f"{track_id}-doc": _FakeDocStatus(
                 status="processed",
@@ -620,6 +688,59 @@ def test_webui_workspace_crud_imports_and_delete(tmp_path):
     assert scheduler.removed_source_ids == ["source-beta"]
 
 
+def test_webui_workspace_upload_import_accepts_epub(tmp_path):
+    client, agent_core, *_ = _build_client(tmp_path)
+
+    upload_response = client.post(
+        "/agent/uploads",
+        files={
+            "file": (
+                "macro.epub",
+                _build_minimal_epub("宏观报告", "财政政策支持新能源行业投资。"),
+                "application/epub+zip",
+            )
+        },
+    )
+    assert upload_response.status_code == 200
+    upload_payload = upload_response.json()
+    assert upload_payload["upload"]["kind"] == "document"
+
+    import_response = client.post(
+        "/agent/workspaces/ws-alpha/imports",
+        json={"kind": "upload", "upload_id": upload_payload["upload_id"]},
+    )
+    assert import_response.status_code == 200
+
+    rag = agent_core._rag_by_workspace["ws-alpha"]
+    insert_call = rag.insert_calls[-1]
+    assert "财政政策支持新能源行业投资" in insert_call["input"]
+    assert insert_call["file_paths"] == "macro.epub"
+    assert insert_call["metadatas"]["source_label"] == "file"
+    assert insert_call["metadatas"]["source_filename"] == "macro.epub"
+    assert insert_call["segment_docs"]["metadata"]["file_format"] == "epub"
+    assert insert_call["segment_docs"]["segments"][0]["metadata"]["source_label"] == "file"
+
+
+def test_upload_store_markdown_manifest_preserves_sections(tmp_path):
+    upload_store = UploadStore(str(tmp_path / "uploads"))
+    record = asyncio.run(
+        upload_store.save_upload(
+            filename="guide.md",
+            content=b"# Chapter One\nPolicy support\n\n## Detail\nInvestment rises",
+            content_type="text/markdown",
+        )
+    )
+
+    extracted = asyncio.run(upload_store.read_extracted_document(record.upload_id))
+
+    assert extracted.metadata["source_label"] == "file"
+    assert extracted.metadata["file_format"] == "markdown"
+    assert [segment.metadata.get("section_path") for segment in extracted.segments] == [
+        ["Chapter One"],
+        ["Chapter One", "Detail"],
+    ]
+
+
 def test_webui_graph_routes_expose_overview_filters_and_path_explanation(tmp_path):
     client, *_ = _build_client(tmp_path)
 
@@ -661,6 +782,18 @@ def test_webui_graph_routes_expose_overview_filters_and_path_explanation(tmp_pat
         "Macro",
     }
 
+    schema_alias_filtered_response = client.get(
+        "/agent/graph/subgraph",
+        params={
+            "workspace": "ws-alpha",
+            "relation_type": "policy_supports",
+        },
+    )
+    assert schema_alias_filtered_response.status_code == 200
+    schema_alias_filtered_payload = schema_alias_filtered_response.json()
+    assert schema_alias_filtered_payload["summary"]["edge_count"] == 1
+    assert schema_alias_filtered_payload["edges"][0]["type"] == "政策支持"
+
     schema_response = client.get("/agent/graph/schema")
     assert schema_response.status_code == 200
     schema_payload = schema_response.json()
@@ -669,9 +802,14 @@ def test_webui_graph_routes_expose_overview_filters_and_path_explanation(tmp_pat
         "Company",
         "Metric",
     }
-    assert {
-        item["name"] for item in schema_payload["relation_types"]
-    } >= {"affects_metric", "belongs_to_industry"}
+    relation_names = {item["name"] for item in schema_payload["relation_types"]}
+    assert relation_names >= {
+        "affects_metric",
+        "belongs_to_industry",
+        "founded_by",
+        "associated_with_concept",
+    }
+    assert "affected_by" not in relation_names
 
     labels_response = client.get(
         "/agent/graph/labels",
@@ -687,14 +825,19 @@ def test_webui_graph_routes_expose_overview_filters_and_path_explanation(tmp_pat
         params={"workspace": "ws-alpha"},
     )
     assert entity_response.status_code == 200
-    assert entity_response.json()["neighbors"][0]["entity_id"] == "Macro"
+    entity_payload = entity_response.json()
+    assert entity_payload["neighbors"][0]["entity_id"] == "Macro"
+    assert entity_payload["node"]["source_metadata"][0]["source_filename"] == "alpha-report.pdf"
+    assert entity_payload["node"]["source_metadata"][0]["page_number"] == 3
 
     relation_response = client.get(
         "/agent/graph/relations",
         params={"workspace": "ws-alpha", "source": "Acme", "target": "Macro"},
     )
     assert relation_response.status_code == 200
-    assert relation_response.json()["edge"]["relation"] == "affected_by"
+    relation_payload = relation_response.json()
+    assert relation_payload["edge"]["relation"] == "affected_by"
+    assert relation_payload["edge"]["source_metadata"][0]["source_label"] == "file"
 
     path_response = client.post(
         "/agent/graph/path_explain",

@@ -869,7 +869,7 @@ class APIConfig:
 @dataclass
 class AgentRuntimeConfig:
     default_workspace: str = ""
-    default_domain_schema: str = "general"
+    default_domain_schema: str = "economy"
     skills_dir: str = "skills"
     max_iterations: int = 3
     route_judge_prompt_version: str = "v1"
@@ -884,8 +884,9 @@ class AgentRuntimeConfig:
             default_workspace=os.getenv(
                 "KG_AGENT_DEFAULT_WORKSPACE", os.getenv("WORKSPACE", "")
             ),
-            default_domain_schema=os.getenv(
-                "KG_AGENT_DEFAULT_DOMAIN_SCHEMA", "general"
+            default_domain_schema=(
+                os.getenv("KG_AGENT_DEFAULT_DOMAIN_SCHEMA", "economy").strip()
+                or "economy"
             ),
             skills_dir=str(
                 resolve_project_path(

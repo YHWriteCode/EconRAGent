@@ -56,7 +56,9 @@ ECONOMY_DOMAIN_TYPES = {
     "event",
     "asset",
     "institution",
-    "country",
+    "location",
+    "person",
+    "concept",
 }
 
 

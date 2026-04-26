@@ -11,6 +11,7 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import type { Core } from "cytoscape";
 import { useSearchParams } from "react-router-dom";
+import { useShallow } from "zustand/react/shallow";
 
 import {
   getGraphData,
@@ -20,13 +21,14 @@ import {
   listWorkspaces,
   searchGraphLabels,
 } from "../lib/api";
-import { formatTime, toIsoDateTime } from "../lib/format";
+import { formatBeijingTime, toIsoDateTime } from "../lib/format";
 import {
   resolveEntityTypeColor,
   resolveGraphNodeLabel,
   resolveGraphNodeSearchText,
 } from "../lib/graphVisual";
 import { queryKeys } from "../lib/queryKeys";
+import { useAppStore } from "../store/useAppStore";
 import type {
   GraphEntityDetail,
   GraphFilters,
@@ -40,6 +42,8 @@ const CytoscapeGraph = lazy(async () => {
   return { default: module.CytoscapeGraph };
 });
 
+const DEFAULT_GRAPH_MAX_NODES = 400;
+
 type GraphInspectState =
   | { kind: "empty" }
   | { kind: "loading"; title: string }
@@ -52,7 +56,7 @@ function createInitialFilters(workspaceFromUrl?: string | null): GraphFilters {
     workspace: workspaceFromUrl || "all",
     label: "*",
     maxDepth: 2,
-    maxNodes: 800,
+    maxNodes: DEFAULT_GRAPH_MAX_NODES,
     entityType: "",
     relationType: "",
     timeFrom: "",
@@ -77,6 +81,84 @@ function readText(record: Record<string, unknown>, keys: string[], fallback = ""
     }
   }
   return fallback;
+}
+
+function splitSourceTokens(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((item) => splitSourceTokens(item))
+      .filter(Boolean);
+  }
+  if (typeof value !== "string") {
+    return [];
+  }
+  return value
+    .split(/<SEP>|\s*\/\s*/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function formatSectionPath(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean).join(" / ");
+  }
+  if (typeof value === "string") {
+    return value.trim().replace(/<SEP>/g, " / ");
+  }
+  return "";
+}
+
+function sourceLabelText(value: unknown): string {
+  const label = typeof value === "string" ? value.trim() : "";
+  if (label === "file") {
+    return "文件";
+  }
+  if (label === "crawler") {
+    return "爬虫";
+  }
+  if (label === "manual_text") {
+    return "手动文本";
+  }
+  return label;
+}
+
+function formatSourceMetadataItem(item: Record<string, unknown>): string {
+  const sourceLabel = sourceLabelText(item.source_label);
+  const title =
+    readText(item, ["source_filename", "file_path", "source_url", "feed_item_key"]) ||
+    "未知来源";
+  const details = [
+    sourceLabel ? `来源标签：${sourceLabel}` : "",
+    item.page_number !== undefined && item.page_number !== null
+      ? `第 ${String(item.page_number)} 页`
+      : "",
+    readText(item, ["page_range"]) ? `页码：${readText(item, ["page_range"])}` : "",
+    formatSectionPath(item.section_path) || readText(item, ["chapter_title"]),
+  ].filter(Boolean);
+  return details.length ? `${title}（${details.join("，")}）` : title;
+}
+
+function formatEntitySources(node: Record<string, unknown>): string {
+  const rawItems = Array.isArray(node.source_metadata) ? node.source_metadata : [];
+  const items = rawItems
+    .map((item) => asRecord(item))
+    .filter((item) => Object.keys(item).length > 0)
+    .map(formatSourceMetadataItem);
+  const deduped = Array.from(new Set(items)).filter(Boolean);
+  if (deduped.length) {
+    const visible = deduped.slice(0, 3);
+    return deduped.length > visible.length
+      ? `${visible.join("\n")} 等 ${deduped.length} 个来源`
+      : visible.join("\n");
+  }
+  const sourceLabels = splitSourceTokens(node.source_labels)
+    .map(sourceLabelText)
+    .filter(Boolean);
+  if (sourceLabels.length) {
+    return `来源标签：${Array.from(new Set(sourceLabels)).join(" / ")}`;
+  }
+  const fileSource = readText(node, ["source_filename", "file_path", "source_url"]);
+  return fileSource || "旧数据未记录来源 metadata";
 }
 
 function optionLabel(option: GraphSchemaOption): string {
@@ -105,8 +187,17 @@ function relationTitle(edge: Record<string, unknown>) {
   return readText(edge, ["relation_type", "keywords", "relation", "type"], "关系");
 }
 
-function updatedAt(record: Record<string, unknown>) {
-  return readText(record, ["last_confirmed_at", "updated_at", "created_at"]);
+function updatedAt(record: Record<string, unknown>): string | number | null {
+  for (const key of ["last_confirmed_at", "updated_at", "created_at"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === "number") {
+      return value;
+    }
+  }
+  return null;
 }
 
 function GraphInspectPanel({
@@ -157,7 +248,7 @@ function GraphInspectPanel({
   if (detail.kind === "entity") {
     const node = asRecord(detail.payload.node);
     const type = entityType(node);
-    const source = readText(node, ["source_id", "source", "file_path", "doc_id"], "无");
+    const source = formatEntitySources(node);
     const description = readText(node, ["description"], "暂无描述");
     return (
       <aside className="graph-inspect-panel">
@@ -187,7 +278,7 @@ function GraphInspectPanel({
           </div>
           <div>
             <dt>节点更新时间</dt>
-            <dd>{formatTime(updatedAt(node))}</dd>
+            <dd>{formatBeijingTime(updatedAt(node))}</dd>
           </div>
         </dl>
       </aside>
@@ -224,11 +315,18 @@ function GraphInspectPanel({
 export function GraphPage() {
   const [searchParams] = useSearchParams();
   const initialWorkspace = searchParams.get("workspace");
+  const { currentWorkspaceId, setCurrentWorkspaceId } = useAppStore(
+    useShallow((state) => ({
+      currentWorkspaceId: state.currentWorkspaceId,
+      setCurrentWorkspaceId: state.setCurrentWorkspaceId,
+    })),
+  );
+  const initialFilterWorkspace = initialWorkspace || currentWorkspaceId || "all";
   const [draftFilters, setDraftFilters] = useState<GraphFilters>(() =>
-    createInitialFilters(initialWorkspace),
+    createInitialFilters(initialFilterWorkspace),
   );
   const [appliedFilters, setAppliedFilters] = useState<GraphFilters>(() =>
-    createInitialFilters(initialWorkspace),
+    createInitialFilters(initialFilterWorkspace),
   );
   const [layoutName] = useState<GraphLayoutName>("cose");
   const [graphSearchText, setGraphSearchText] = useState("");
@@ -245,7 +343,8 @@ export function GraphPage() {
     }
     setDraftFilters((current) => ({ ...current, workspace: initialWorkspace }));
     setAppliedFilters((current) => ({ ...current, workspace: initialWorkspace }));
-  }, [initialWorkspace]);
+    setCurrentWorkspaceId(initialWorkspace === "all" ? "" : initialWorkspace);
+  }, [initialWorkspace, setCurrentWorkspaceId]);
 
   const workspacesQuery = useQuery({
     queryKey: queryKeys.workspaces,
@@ -362,16 +461,19 @@ export function GraphPage() {
   };
 
   const applyFilters = () => {
-    setAppliedFilters({
+    const nextFilters = {
       ...draftFilters,
       label: draftFilters.label.trim() || "*",
-    });
+    };
+    setAppliedFilters(nextFilters);
+    setCurrentWorkspaceId(nextFilters.workspace === "all" ? "" : nextFilters.workspace);
   };
 
   const resetFilters = () => {
-    const next = createInitialFilters(initialWorkspace);
+    const next = createInitialFilters(initialWorkspace || "all");
     setDraftFilters(next);
     setAppliedFilters(next);
+    setCurrentWorkspaceId(next.workspace === "all" ? "" : next.workspace);
     setGraphSearchText("");
     closeInspectDetail();
   };

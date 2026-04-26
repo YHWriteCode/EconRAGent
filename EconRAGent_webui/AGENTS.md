@@ -74,6 +74,7 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 
 - `AppShell` owns the shared left sidebar and top navigation for `chat`, `graph`, and `discover`.
 - The `spaces` route is a standalone management page: keep the left sidebar, hide the top navigation, and provide its own close/create controls.
+- The `spaces` file import dialog should advertise and client-filter the same document formats supported by the API import path: Word `.docx`, PDF, Markdown `.md`/`.markdown`, and EPUB.
 - Avoid using visual-only movement such as `transform` for major layout placement when it affects scroll boundaries; prefer real grid/flex layout space.
 - Keep `chat` and `graph` as fixed-viewport work surfaces. Only nested regions should scroll: chat message feed, graph filter panel, sidebar history, and spaces database list.
 - `discover` is a news/feed page and may use normal page scrolling.
@@ -81,5 +82,8 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 - Preserve the graph page contract: Cytoscape canvas as the primary surface, with a collapsible database filter sidebar that allows the canvas to expand.
 - Graph entity and relation filter chips are schema-driven through `GET /agent/graph/schema`; keep them synchronized with `lightrag_fork/schemas` instead of hardcoding template lists in the frontend.
 - Graph filter chips should display only the schema label (`display_name` with `name` fallback); do not prepend generated initials or decorative text that can overflow narrow sidebar cards.
+- Graph relation filter options should come only from schema-defined `RelationTypeDefinition` items returned by `/agent/graph/schema`; do not extend the visible option list with ad hoc relation keywords observed in the current graph payload.
 - Graph edges should render as lines without inline relation text; clicking a node or edge may open an over-canvas detail panel for descriptions, source/type, timestamps, and relation names.
-- Graph page defaults currently start from `workspace="all"` and `maxNodes=800`; if you change these defaults, keep `src/pages/GraphPage.tsx`, the graph route tests, and the API-side limits in sync.
+- Graph page defaults currently start from `workspace="all"` and `maxNodes=400`; if you change these defaults, keep `src/pages/GraphPage.tsx`, the graph route tests, and the API-side limits in sync.
+- Applying a graph database filter writes the selected workspace into the shared Zustand app state so the chat page uses the same database for retrieval; `workspace="all"` maps to an empty shared workspace id.
+- `chat`, `graph`, and `discover` remain route-level chunks, but the app preloads these page modules and the Cytoscape renderer after boot so first navigation does not start from a cold dynamic import.

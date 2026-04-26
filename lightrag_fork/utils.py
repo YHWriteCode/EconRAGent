@@ -3190,6 +3190,7 @@ def convert_to_user_format(
                     "description": original_entity.get("description", ""),
                     "source_id": original_entity.get("source_id", ""),
                     "file_path": original_entity.get("file_path", "unknown_source"),
+                    "source_labels": original_entity.get("source_labels", ""),
                     "created_at": original_entity.get("created_at", ""),
                     "last_confirmed_at": original_entity.get("last_confirmed_at"),
                     "confirmation_count": original_entity.get(
@@ -3207,6 +3208,7 @@ def convert_to_user_format(
                     "description": entity.get("description", ""),
                     "source_id": entity.get("source_id", ""),
                     "file_path": entity.get("file_path", "unknown_source"),
+                    "source_labels": entity.get("source_labels", ""),
                     "created_at": entity.get("created_at", ""),
                     "last_confirmed_at": entity.get("last_confirmed_at"),
                     "confirmation_count": entity.get("confirmation_count"),
@@ -3237,6 +3239,7 @@ def convert_to_user_format(
                     "weight": original_relation.get("weight", 1.0),
                     "source_id": original_relation.get("source_id", ""),
                     "file_path": original_relation.get("file_path", "unknown_source"),
+                    "source_labels": original_relation.get("source_labels", ""),
                     "created_at": original_relation.get("created_at", ""),
                     "last_confirmed_at": original_relation.get("last_confirmed_at"),
                     "confirmation_count": original_relation.get(
@@ -3256,6 +3259,7 @@ def convert_to_user_format(
                     "weight": relation.get("weight", 1.0),
                     "source_id": relation.get("source_id", ""),
                     "file_path": relation.get("file_path", "unknown_source"),
+                    "source_labels": relation.get("source_labels", ""),
                     "created_at": relation.get("created_at", ""),
                     "last_confirmed_at": relation.get("last_confirmed_at"),
                     "confirmation_count": relation.get("confirmation_count"),
@@ -3271,7 +3275,21 @@ def convert_to_user_format(
             "content": chunk.get("content", ""),
             "file_path": chunk.get("file_path", "unknown_source"),
             "chunk_id": chunk.get("chunk_id", ""),
+            "metadata": chunk.get("metadata", {}),
         }
+        for key in (
+            "source_label",
+            "source_filename",
+            "source_url",
+            "file_format",
+            "page_number",
+            "page_range",
+            "chapter_title",
+            "section_path",
+            "published_at",
+        ):
+            if key in chunk:
+                chunk_data[key] = chunk[key]
         formatted_chunks.append(chunk_data)
 
     logger.debug(
@@ -3300,6 +3318,73 @@ def convert_to_user_format(
     }
 
 
+def _chunk_reference_key(chunk: dict) -> tuple:
+    metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+    file_path = chunk.get("file_path") or metadata.get("file_path") or ""
+    page_number = chunk.get("page_number", metadata.get("page_number"))
+    page_range = chunk.get("page_range", metadata.get("page_range"))
+    section_path = chunk.get("section_path", metadata.get("section_path"))
+    if isinstance(section_path, list):
+        section_path_key = tuple(str(item) for item in section_path if str(item))
+    else:
+        section_path_key = tuple(
+            item.strip() for item in str(section_path or "").split("/") if item.strip()
+        )
+    return (
+        str(file_path),
+        str(page_number or ""),
+        str(page_range or ""),
+        section_path_key,
+        str(chunk.get("chapter_title") or metadata.get("chapter_title") or ""),
+        str(chunk.get("source_label") or metadata.get("source_label") or ""),
+    )
+
+
+def _chunk_reference_payload(reference_id: str, chunk: dict) -> dict:
+    metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+    file_path = str(chunk.get("file_path") or metadata.get("file_path") or "")
+    source_label = str(chunk.get("source_label") or metadata.get("source_label") or "")
+    section_path = chunk.get("section_path", metadata.get("section_path"))
+    if isinstance(section_path, list):
+        section_path_value = [str(item) for item in section_path if str(item)]
+    else:
+        section_path_value = [
+            item.strip() for item in str(section_path or "").split("/") if item.strip()
+        ]
+    payload = {
+        "reference_id": reference_id,
+        "file_path": file_path,
+    }
+    optional_fields = {
+        "source_label": source_label,
+        "source_filename": chunk.get("source_filename")
+        or metadata.get("source_filename"),
+        "source_url": chunk.get("source_url") or metadata.get("source_url"),
+        "file_format": chunk.get("file_format") or metadata.get("file_format"),
+        "page_number": chunk.get("page_number", metadata.get("page_number")),
+        "page_range": chunk.get("page_range", metadata.get("page_range")),
+        "chapter_title": chunk.get("chapter_title") or metadata.get("chapter_title"),
+        "section_path": section_path_value,
+        "published_at": chunk.get("published_at") or metadata.get("published_at"),
+    }
+    for key, value in optional_fields.items():
+        if value not in (None, "", []):
+            payload[key] = value
+    label_parts = [file_path]
+    if payload.get("page_number"):
+        label_parts.append(f"page {payload['page_number']}")
+    elif payload.get("page_range"):
+        label_parts.append(f"pages {payload['page_range']}")
+    if section_path_value:
+        label_parts.append(" / ".join(section_path_value))
+    elif payload.get("chapter_title"):
+        label_parts.append(str(payload["chapter_title"]))
+    if source_label == "crawler" and payload.get("source_url"):
+        label_parts[0] = str(payload["source_url"])
+    payload["label"] = " - ".join(part for part in label_parts if part)
+    return payload
+
+
 def generate_reference_list_from_chunks(
     chunks: list[dict],
 ) -> tuple[list[dict], list[dict]]:
@@ -3321,46 +3406,51 @@ def generate_reference_list_from_chunks(
     if not chunks:
         return [], []
 
-    # 1. Extract all valid file_paths and count their occurrences
-    file_path_counts = {}
+    # 1. Extract all valid references and count their occurrences
+    reference_counts = {}
     for chunk in chunks:
-        file_path = chunk.get("file_path", "")
-        if file_path and file_path != "unknown_source":
-            file_path_counts[file_path] = file_path_counts.get(file_path, 0) + 1
+        ref_key = _chunk_reference_key(chunk)
+        if ref_key[0] and ref_key[0] != "unknown_source":
+            reference_counts[ref_key] = reference_counts.get(ref_key, 0) + 1
 
-    # 2. Sort file paths by frequency (descending), then by first appearance order
-    # Create a list of (file_path, count, first_index) tuples
-    file_path_with_indices = []
-    seen_paths = set()
+    # 2. Sort references by frequency (descending), then by first appearance order
+    reference_with_indices = []
+    seen_refs = set()
     for i, chunk in enumerate(chunks):
-        file_path = chunk.get("file_path", "")
-        if file_path and file_path != "unknown_source" and file_path not in seen_paths:
-            file_path_with_indices.append((file_path, file_path_counts[file_path], i))
-            seen_paths.add(file_path)
+        ref_key = _chunk_reference_key(chunk)
+        if ref_key[0] and ref_key[0] != "unknown_source" and ref_key not in seen_refs:
+            reference_with_indices.append((ref_key, reference_counts[ref_key], i))
+            seen_refs.add(ref_key)
 
     # Sort by count (descending), then by first appearance index (ascending)
-    sorted_file_paths = sorted(file_path_with_indices, key=lambda x: (-x[1], x[2]))
-    unique_file_paths = [item[0] for item in sorted_file_paths]
+    sorted_refs = sorted(reference_with_indices, key=lambda x: (-x[1], x[2]))
+    unique_refs = [item[0] for item in sorted_refs]
 
-    # 3. Create mapping from file_path to reference_id (prioritized by frequency)
-    file_path_to_ref_id = {}
-    for i, file_path in enumerate(unique_file_paths):
-        file_path_to_ref_id[file_path] = str(i + 1)
+    # 3. Create mapping from reference key to reference_id (prioritized by frequency)
+    ref_key_to_ref_id = {}
+    for i, ref_key in enumerate(unique_refs):
+        ref_key_to_ref_id[ref_key] = str(i + 1)
 
     # 4. Add reference_id field to each chunk
     updated_chunks = []
     for chunk in chunks:
         chunk_copy = chunk.copy()
-        file_path = chunk_copy.get("file_path", "")
-        if file_path and file_path != "unknown_source":
-            chunk_copy["reference_id"] = file_path_to_ref_id[file_path]
+        ref_key = _chunk_reference_key(chunk_copy)
+        if ref_key[0] and ref_key[0] != "unknown_source":
+            chunk_copy["reference_id"] = ref_key_to_ref_id[ref_key]
         else:
             chunk_copy["reference_id"] = ""
         updated_chunks.append(chunk_copy)
 
     # 5. Build reference_list
     reference_list = []
-    for i, file_path in enumerate(unique_file_paths):
-        reference_list.append({"reference_id": str(i + 1), "file_path": file_path})
+    first_chunk_by_ref = {}
+    for chunk in chunks:
+        ref_key = _chunk_reference_key(chunk)
+        first_chunk_by_ref.setdefault(ref_key, chunk)
+    for i, ref_key in enumerate(unique_refs):
+        reference_list.append(
+            _chunk_reference_payload(str(i + 1), first_chunk_by_ref[ref_key])
+        )
 
     return reference_list, updated_chunks

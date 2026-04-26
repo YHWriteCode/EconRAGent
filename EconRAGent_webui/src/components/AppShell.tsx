@@ -89,10 +89,10 @@ export function AppShell() {
       return;
     }
     if (
-      !currentWorkspaceId ||
+      currentWorkspaceId &&
       !items.some((item) => item.workspace_id === currentWorkspaceId)
     ) {
-      setCurrentWorkspaceId(items[0].workspace_id);
+      setCurrentWorkspaceId("");
     }
   }, [currentWorkspaceId, setCurrentWorkspaceId, workspacesQuery.data?.workspaces]);
 

@@ -23,8 +23,10 @@ class _FakeRAG:
     def __init__(self):
         self.calls: list[dict] = []
 
-    async def ainsert(self, input, file_paths=None):
-        self.calls.append({"input": input, "file_paths": file_paths})
+    async def ainsert(self, input, file_paths=None, metadatas=None):
+        self.calls.append(
+            {"input": input, "file_paths": file_paths, "metadatas": metadatas}
+        )
         return f"track-{len(self.calls)}"
 
 
@@ -54,9 +56,14 @@ class _LifecycleRAG:
         self.chunks_vdb = chunks_vdb
         self.workspace = workspace
 
-    async def ainsert(self, input, file_paths=None, ids=None):
+    async def ainsert(self, input, file_paths=None, ids=None, metadatas=None):
         self.insert_calls.append(
-            {"input": input, "file_paths": file_paths, "ids": ids}
+            {
+                "input": input,
+                "file_paths": file_paths,
+                "ids": ids,
+                "metadatas": metadatas,
+            }
         )
         return f"track-{len(self.insert_calls)}"
 
@@ -70,9 +77,14 @@ class _NoDeleteLifecycleRAG:
         self.insert_calls: list[dict] = []
         self.workspace = workspace
 
-    async def ainsert(self, input, file_paths=None, ids=None):
+    async def ainsert(self, input, file_paths=None, ids=None, metadatas=None):
         self.insert_calls.append(
-            {"input": input, "file_paths": file_paths, "ids": ids}
+            {
+                "input": input,
+                "file_paths": file_paths,
+                "ids": ids,
+                "metadatas": metadatas,
+            }
         )
         return f"track-{len(self.insert_calls)}"
 
@@ -1640,6 +1652,8 @@ async def test_feed_source_filters_entries_before_crawling(tmp_path: Path):
     assert result["ingested_count"] == 1
     assert len(rag.calls) == 1
     assert rag.calls[0]["file_paths"] == "https://example.com/article-1"
+    assert rag.calls[0]["metadatas"]["source_label"] == "crawler"
+    assert rag.calls[0]["metadatas"]["feed_item_key"] == "https://example.com/article-1"
     assert record is not None
     assert record.recent_item_keys == ["https://example.com/article-1"]
     assert list(record.last_content_hashes.keys()) == ["https://example.com/article-1"]

@@ -107,6 +107,7 @@ Keep those layers distinct. A local skill is not a planner-visible MCP tool, and
 - When adding LLM-assisted normalization for skills, keep it schema-bounded and prompt-driven; do not let planner prompts devolve into free-form command generation outside the skill runtime boundary.
 - Keep native capability exposure lightweight and metadata-driven. Domain-specific external systems should usually be surfaced through MCP rather than hardcoded into the native registry.
 - Keep path explanation optional and fallback-safe. Plain answers must still work when graph paths or evidence are weak.
+- Keep path role expectations tolerant of schema evolution. For economy geography roles, preserve legacy `country_context` compatibility while accepting the current `location_context` role emitted by the schema profile.
 
 ---
 

@@ -133,6 +133,65 @@ config = configparser.ConfigParser()
 config.read("config.ini", "utf-8")
 
 
+CHUNK_METADATA_FIELD_KEYS = {
+    "source_label",
+    "source_filename",
+    "source_url",
+    "file_format",
+    "page_number",
+    "page_range",
+    "chapter_title",
+    "section_path",
+    "crawler_source_id",
+    "crawler_source_name",
+    "feed_item_key",
+    "event_cluster_id",
+    "published_at",
+}
+
+
+def _metadata_dict(payload: Any) -> dict[str, Any]:
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _normalize_optional_list(
+    value: Any,
+    count: int,
+    *,
+    name: str,
+) -> list[Any]:
+    if value is None:
+        return [None] * count
+    if isinstance(value, dict):
+        value = [value]
+    elif not isinstance(value, list):
+        raise ValueError(f"{name} must be a dict or list of dicts")
+    if len(value) != count:
+        raise ValueError(f"Number of {name} entries must match the number of documents")
+    return list(value)
+
+
+def _chunk_metadata_fields(metadata: dict[str, Any]) -> dict[str, Any]:
+    fields = {}
+    for key in CHUNK_METADATA_FIELD_KEYS:
+        if key not in metadata:
+            continue
+        value = metadata[key]
+        if key == "section_path" and isinstance(value, list):
+            value = " / ".join(str(item) for item in value if str(item))
+        fields[key] = value
+    fields["metadata"] = metadata
+    return fields
+
+
+def _merge_metadata(*items: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for item in items:
+        if isinstance(item, dict):
+            merged.update(item)
+    return merged
+
+
 def _chunk_fields_from_status_doc(
     status_doc: "DocProcessingStatus",
 ) -> tuple[list[str], int]:
@@ -153,6 +212,118 @@ def _chunk_fields_from_status_doc(
         return chunks_list, status_doc.chunks_count
 
     return chunks_list, len(chunks_list)
+
+
+async def _run_chunking_func(
+    chunking_func: Callable[..., Any],
+    tokenizer: Tokenizer,
+    content: str,
+    split_by_character: str | None,
+    split_by_character_only: bool,
+    chunk_overlap_token_size: int,
+    chunk_token_size: int,
+) -> list[dict[str, Any]]:
+    chunking_result = chunking_func(
+        tokenizer,
+        content,
+        split_by_character,
+        split_by_character_only,
+        chunk_overlap_token_size,
+        chunk_token_size,
+    )
+    if inspect.isawaitable(chunking_result):
+        chunking_result = await chunking_result
+    if not isinstance(chunking_result, (list, tuple)):
+        raise TypeError(
+            f"chunking_func must return a list or tuple of dicts, got {type(chunking_result)}"
+        )
+    return [dict(item) for item in chunking_result if isinstance(item, dict)]
+
+
+async def _build_chunking_result(
+    *,
+    tokenizer: Tokenizer,
+    chunking_func: Callable[..., Any],
+    content: str,
+    doc_metadata: dict[str, Any],
+    segment_doc: dict[str, Any] | None,
+    split_by_character: str | None,
+    split_by_character_only: bool,
+    chunk_overlap_token_size: int,
+    chunk_token_size: int,
+) -> list[dict[str, Any]]:
+    segment_doc = segment_doc if isinstance(segment_doc, dict) else None
+    segment_doc_metadata = _metadata_dict(
+        segment_doc.get("metadata") if segment_doc else None
+    )
+    merged_doc_metadata = _merge_metadata(segment_doc_metadata, doc_metadata)
+    file_format = str(merged_doc_metadata.get("file_format") or "").lower()
+    content_tokens = tokenizer.encode(content)
+    segments = segment_doc.get("segments") if segment_doc else None
+
+    if (
+        file_format != "pdf"
+        and len(content_tokens) <= chunk_token_size
+    ):
+        metadata = dict(merged_doc_metadata)
+        return [
+            {
+                "tokens": len(content_tokens),
+                "content": content.strip(),
+                "chunk_order_index": 0,
+                **_chunk_metadata_fields(metadata),
+            }
+        ]
+
+    if not isinstance(segments, list) or not segments:
+        chunking_result = await _run_chunking_func(
+            chunking_func,
+            tokenizer,
+            content,
+            split_by_character,
+            split_by_character_only,
+            chunk_overlap_token_size,
+            chunk_token_size,
+        )
+        return [
+            {
+                **chunk,
+                **_chunk_metadata_fields(dict(merged_doc_metadata)),
+            }
+            for chunk in chunking_result
+        ]
+
+    results: list[dict[str, Any]] = []
+    order_index = 0
+    for segment_index, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            continue
+        segment_content = sanitize_text_for_encoding(
+            str(segment.get("content") or "")
+        ).strip()
+        if not segment_content:
+            continue
+        segment_metadata = _merge_metadata(
+            merged_doc_metadata,
+            segment.get("metadata") if isinstance(segment.get("metadata"), dict) else {},
+        )
+        segment_metadata.setdefault("segment_index", segment_index)
+        segment_chunks = await _run_chunking_func(
+            chunking_func,
+            tokenizer,
+            segment_content,
+            split_by_character,
+            split_by_character_only,
+            chunk_overlap_token_size,
+            chunk_token_size,
+        )
+        for chunk in segment_chunks:
+            chunk["chunk_order_index"] = order_index
+            chunk.update(_chunk_metadata_fields(dict(segment_metadata)))
+            results.append(chunk)
+            order_index += 1
+
+    return results
 
 
 @final
@@ -685,19 +856,38 @@ class LightRAG:
             namespace=NameSpace.VECTOR_STORE_ENTITIES,
             workspace=self.workspace,
             embedding_func=self.embedding_func,
-            meta_fields={"entity_name", "source_id", "content", "file_path"},
+            meta_fields={
+                "entity_name",
+                "source_id",
+                "content",
+                "file_path",
+                "source_labels",
+            },
         )
         self.relationships_vdb: BaseVectorStorage = self.vector_db_storage_cls(  # type: ignore
             namespace=NameSpace.VECTOR_STORE_RELATIONSHIPS,
             workspace=self.workspace,
             embedding_func=self.embedding_func,
-            meta_fields={"src_id", "tgt_id", "source_id", "content", "file_path"},
+            meta_fields={
+                "src_id",
+                "tgt_id",
+                "source_id",
+                "content",
+                "file_path",
+                "source_labels",
+            },
         )
         self.chunks_vdb: BaseVectorStorage = self.vector_db_storage_cls(  # type: ignore
             namespace=NameSpace.VECTOR_STORE_CHUNKS,
             workspace=self.workspace,
             embedding_func=self.embedding_func,
-            meta_fields={"full_doc_id", "content", "file_path"},
+            meta_fields={
+                "full_doc_id",
+                "content",
+                "file_path",
+                "metadata",
+                *CHUNK_METADATA_FIELD_KEYS,
+            },
         )
 
         # Initialize document status storage
@@ -1178,6 +1368,8 @@ class LightRAG:
         ids: str | list[str] | None = None,
         file_paths: str | list[str] | None = None,
         track_id: str | None = None,
+        metadatas: dict[str, Any] | list[dict[str, Any]] | None = None,
+        segment_docs: dict[str, Any] | list[dict[str, Any]] | None = None,
     ) -> str:
         """Sync Insert documents with checkpoint support
 
@@ -1190,6 +1382,8 @@ class LightRAG:
             ids: single string of the document ID or list of unique document IDs, if not provided, MD5 hash IDs will be generated
             file_paths: single string of the file path or list of file paths, used for citation
             track_id: tracking ID for monitoring processing status, if not provided, will be generated
+            metadatas: optional document-level metadata dictionaries
+            segment_docs: optional structured extraction manifests with segments
 
         Returns:
             str: tracking ID for monitoring processing status
@@ -1203,6 +1397,8 @@ class LightRAG:
                 ids,
                 file_paths,
                 track_id,
+                metadatas,
+                segment_docs,
             )
         )
 
@@ -1214,6 +1410,8 @@ class LightRAG:
         ids: str | list[str] | None = None,
         file_paths: str | list[str] | None = None,
         track_id: str | None = None,
+        metadatas: dict[str, Any] | list[dict[str, Any]] | None = None,
+        segment_docs: dict[str, Any] | list[dict[str, Any]] | None = None,
     ) -> str:
         """Async Insert documents with checkpoint support
 
@@ -1226,6 +1424,8 @@ class LightRAG:
             ids: list of unique document IDs, if not provided, MD5 hash IDs will be generated
             file_paths: list of file paths corresponding to each document, used for citation
             track_id: tracking ID for monitoring processing status, if not provided, will be generated
+            metadatas: optional document-level metadata dictionaries
+            segment_docs: optional structured extraction manifests with segments
 
         Returns:
             str: tracking ID for monitoring processing status
@@ -1234,7 +1434,9 @@ class LightRAG:
         if track_id is None:
             track_id = generate_track_id("insert")
 
-        await self.apipeline_enqueue_documents(input, ids, file_paths, track_id)
+        await self.apipeline_enqueue_documents(
+            input, ids, file_paths, track_id, metadatas, segment_docs
+        )
         await self.apipeline_process_enqueue_documents(
             split_by_character, split_by_character_only
         )
@@ -1282,7 +1484,9 @@ class LightRAG:
 
             inserting_chunks: dict[str, Any] = {}
             for index, chunk_text in enumerate(text_chunks):
-                chunk_key = compute_mdhash_id(chunk_text, prefix="chunk-")
+                chunk_key = compute_mdhash_id(
+                    f"{doc_key}:{index}:{chunk_text}", prefix="chunk-"
+                )
                 tokens = len(self.tokenizer.encode(chunk_text))
                 inserting_chunks[chunk_key] = {
                     "content": chunk_text,
@@ -1290,6 +1494,7 @@ class LightRAG:
                     "tokens": tokens,
                     "chunk_order_index": index,
                     "file_path": file_path,
+                    "metadata": {},
                 }
 
             doc_ids = set(inserting_chunks.keys())
@@ -1319,6 +1524,8 @@ class LightRAG:
         ids: list[str] | None = None,
         file_paths: str | list[str] | None = None,
         track_id: str | None = None,
+        metadatas: dict[str, Any] | list[dict[str, Any]] | None = None,
+        segment_docs: dict[str, Any] | list[dict[str, Any]] | None = None,
     ) -> str:
         """
         Pipeline for Processing Documents
@@ -1333,6 +1540,8 @@ class LightRAG:
             ids: list of unique document IDs, if not provided, MD5 hash IDs will be generated
             file_paths: list of file paths corresponding to each document, used for citation
             track_id: tracking ID for monitoring processing status, if not provided, will be generated with "enqueue" prefix
+            metadatas: optional document-level metadata dictionaries
+            segment_docs: optional structured extraction manifests with segments
 
         Returns:
             str: tracking ID for monitoring processing status
@@ -1363,6 +1572,16 @@ class LightRAG:
             # If no file paths provided, use placeholder
             file_paths = ["unknown_source"] * len(input)
 
+        metadata_list = [
+            _metadata_dict(item)
+            for item in _normalize_optional_list(
+                metadatas, len(input), name="metadatas"
+            )
+        ]
+        segment_doc_list = _normalize_optional_list(
+            segment_docs, len(input), name="segment_docs"
+        )
+
         # 1. Validate ids if provided or generate MD5 hash IDs and remove duplicate contents
         if ids is not None:
             # Check if the number of IDs matches the number of documents
@@ -1375,31 +1594,72 @@ class LightRAG:
 
             # Generate contents dict and remove duplicates in one pass
             unique_contents = {}
-            for id_, doc, path in zip(ids, input, file_paths):
+            use_source_identity = metadatas is not None or segment_docs is not None
+            for id_, doc, path, metadata, segment_doc in zip(
+                ids, input, file_paths, metadata_list, segment_doc_list
+            ):
                 cleaned_content = sanitize_text_for_encoding(doc)
-                if cleaned_content not in unique_contents:
-                    unique_contents[cleaned_content] = (id_, path)
+                identity = (
+                    f"{cleaned_content}\n{path}\n{id_}"
+                    if use_source_identity
+                    else cleaned_content
+                )
+                if identity not in unique_contents:
+                    unique_contents[identity] = (
+                        cleaned_content,
+                        id_,
+                        path,
+                        metadata,
+                        segment_doc,
+                    )
 
             # Reconstruct contents with unique content
             contents = {
-                id_: {"content": content, "file_path": file_path}
-                for content, (id_, file_path) in unique_contents.items()
+                id_: {
+                    "content": content,
+                    "file_path": file_path,
+                    "metadata": metadata,
+                    "segment_doc": segment_doc,
+                }
+                for _identity, (
+                    content,
+                    id_,
+                    file_path,
+                    metadata,
+                    segment_doc,
+                ) in unique_contents.items()
             }
         else:
             # Clean input text and remove duplicates in one pass
             unique_content_with_paths = {}
-            for doc, path in zip(input, file_paths):
+            use_source_identity = metadatas is not None or segment_docs is not None
+            for doc, path, metadata, segment_doc in zip(
+                input, file_paths, metadata_list, segment_doc_list
+            ):
                 cleaned_content = sanitize_text_for_encoding(doc)
-                if cleaned_content not in unique_content_with_paths:
-                    unique_content_with_paths[cleaned_content] = path
+                identity = f"{cleaned_content}\n{path}" if use_source_identity else cleaned_content
+                if identity not in unique_content_with_paths:
+                    unique_content_with_paths[identity] = (
+                        cleaned_content,
+                        path,
+                        metadata,
+                        segment_doc,
+                    )
 
             # Generate contents dict of MD5 hash IDs and documents with paths
             contents = {
-                compute_mdhash_id(content, prefix="doc-"): {
+                compute_mdhash_id(identity, prefix="doc-"): {
                     "content": content,
                     "file_path": path,
+                    "metadata": metadata,
+                    "segment_doc": segment_doc,
                 }
-                for content, path in unique_content_with_paths.items()
+                for identity, (
+                    content,
+                    path,
+                    metadata,
+                    segment_doc,
+                ) in unique_content_with_paths.items()
             }
 
         # 2. Generate document initial status (without content)
@@ -1414,6 +1674,7 @@ class LightRAG:
                     "file_path"
                 ],  # Store file path in document status
                 "track_id": track_id,  # Store track_id in document status
+                "metadata": content_data.get("metadata", {}),
             }
             for id_, content_data in contents.items()
         }
@@ -1496,6 +1757,8 @@ class LightRAG:
                 doc_id: {
                     "content": contents[doc_id]["content"],
                     "file_path": contents[doc_id]["file_path"],
+                    "metadata": contents[doc_id].get("metadata", {}),
+                    "segment_doc": contents[doc_id].get("segment_doc"),
                 }
                 for doc_id in new_docs.keys()
             }
@@ -1906,6 +2169,10 @@ class LightRAG:
                         # Initialize to prevent UnboundLocalError in error handling
                         first_stage_tasks = []
                         entity_relation_task = None
+                        processing_start_time = int(time.time())
+                        doc_metadata: dict[str, Any] = _metadata_dict(
+                            getattr(status_doc, "metadata", None)
+                        )
                         try:
                             # Check for cancellation before starting document processing
                             async with pipeline_status_lock:
@@ -1950,31 +2217,61 @@ class LightRAG:
                                     f"Document content not found in full_docs for doc_id: {doc_id}"
                                 )
                             content = content_data["content"]
-
-                            # Call chunking function, supporting both sync and async implementations
-                            chunking_result = self.chunking_func(
-                                self.tokenizer,
-                                content,
-                                split_by_character,
-                                split_by_character_only,
-                                self.chunk_overlap_token_size,
-                                self.chunk_token_size,
+                            doc_metadata = _merge_metadata(
+                                getattr(status_doc, "metadata", None),
+                                content_data.get("metadata")
+                                if isinstance(content_data, dict)
+                                else {},
                             )
-
-                            # If result is awaitable, await to get actual result
-                            if inspect.isawaitable(chunking_result):
-                                chunking_result = await chunking_result
-
-                            # Validate return type
-                            if not isinstance(chunking_result, (list, tuple)):
-                                raise TypeError(
-                                    f"chunking_func must return a list or tuple of dicts, "
-                                    f"got {type(chunking_result)}"
-                                )
+                            segment_doc = (
+                                content_data.get("segment_doc")
+                                if isinstance(content_data, dict)
+                                else None
+                            )
+                            raw_segments = (
+                                segment_doc.get("segments")
+                                if isinstance(segment_doc, dict)
+                                else []
+                            )
+                            segment_count = (
+                                len(raw_segments) if isinstance(raw_segments, list) else 0
+                            )
+                            file_format = str(
+                                doc_metadata.get("file_format") or ""
+                            ).lower()
+                            if file_format == "pdf":
+                                chunking_strategy = "pdf_page_segments"
+                            elif len(self.tokenizer.encode(content)) <= self.chunk_token_size:
+                                chunking_strategy = "single_chunk"
+                            elif segment_count:
+                                chunking_strategy = "structured_segments"
+                            else:
+                                chunking_strategy = "token_window"
+                            doc_metadata = {
+                                **doc_metadata,
+                                "segment_count": segment_count,
+                                "chunking_strategy": chunking_strategy,
+                            }
+                            chunking_result = await _build_chunking_result(
+                                tokenizer=self.tokenizer,
+                                chunking_func=self.chunking_func,
+                                content=content,
+                                doc_metadata=doc_metadata,
+                                segment_doc=segment_doc
+                                if isinstance(segment_doc, dict)
+                                else None,
+                                split_by_character=split_by_character,
+                                split_by_character_only=split_by_character_only,
+                                chunk_overlap_token_size=self.chunk_overlap_token_size,
+                                chunk_token_size=self.chunk_token_size,
+                            )
 
                             # Build chunks dictionary
                             chunks: dict[str, Any] = {
-                                compute_mdhash_id(dp["content"], prefix="chunk-"): {
+                                compute_mdhash_id(
+                                    f"{doc_id}:{dp.get('chunk_order_index', 0)}:{dp['content']}",
+                                    prefix="chunk-",
+                                ): {
                                     **dp,
                                     "full_doc_id": doc_id,
                                     "file_path": file_path,  # Add file path to each chunk
@@ -2014,6 +2311,7 @@ class LightRAG:
                                             "file_path": file_path,
                                             "track_id": status_doc.track_id,  # Preserve existing track_id
                                             "metadata": {
+                                                **doc_metadata,
                                                 "processing_start_time": processing_start_time
                                             },
                                         }
@@ -2112,6 +2410,7 @@ class LightRAG:
                                         "file_path": file_path,
                                         "track_id": status_doc.track_id,  # Preserve existing track_id
                                         "metadata": {
+                                            **doc_metadata,
                                             "processing_start_time": processing_start_time,
                                             "processing_end_time": processing_end_time,
                                         },
@@ -2169,6 +2468,7 @@ class LightRAG:
                                             "file_path": file_path,
                                             "track_id": status_doc.track_id,  # Preserve existing track_id
                                             "metadata": {
+                                                **doc_metadata,
                                                 "processing_start_time": processing_start_time,
                                                 "processing_end_time": processing_end_time,
                                             },
@@ -2242,6 +2542,7 @@ class LightRAG:
                                             "file_path": file_path,
                                             "track_id": status_doc.track_id,  # Preserve existing track_id
                                             "metadata": {
+                                                **doc_metadata,
                                                 "processing_start_time": processing_start_time,
                                                 "processing_end_time": processing_end_time,
                                             },
@@ -2413,8 +2714,12 @@ class LightRAG:
                     if "chunk_order_index" not in chunk_data.keys()
                     else chunk_data["chunk_order_index"]
                 )
-                chunk_id = compute_mdhash_id(chunk_content, prefix="chunk-")
+                chunk_id = compute_mdhash_id(
+                    f"{full_doc_id or source_id}:{chunk_order_index}:{chunk_content}",
+                    prefix="chunk-",
+                )
 
+                chunk_metadata = _metadata_dict(chunk_data.get("metadata"))
                 chunk_entry = {
                     "content": chunk_content,
                     "source_id": source_id,
@@ -2424,6 +2729,7 @@ class LightRAG:
                     if full_doc_id is not None
                     else source_id,
                     "file_path": file_path,
+                    **_chunk_metadata_fields(chunk_metadata),
                     "status": DocStatus.PROCESSED,
                 }
                 all_chunks_data[chunk_id] = chunk_entry

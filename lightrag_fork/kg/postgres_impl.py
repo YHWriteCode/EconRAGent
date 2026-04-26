@@ -995,6 +995,33 @@ class PostgreSQLDB:
                 f"Failed to add llm_cache_list column to LIGHTRAG_DOC_CHUNKS: {e}"
             )
 
+    async def _migrate_chunks_add_metadata(self):
+        """Add metadata JSONB columns to chunk KV/vector tables if missing."""
+        for table_name in ("LIGHTRAG_DOC_CHUNKS", "LIGHTRAG_VDB_CHUNKS"):
+            try:
+                check_column_sql = f"""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = '{table_name.lower()}'
+                AND column_name = 'metadata'
+                """
+                column_info = await self.query(check_column_sql)
+                if column_info:
+                    logger.info("%s metadata column already exists", table_name)
+                    continue
+                logger.info("Adding metadata column to %s", table_name)
+                await self.execute(
+                    f"""
+                    ALTER TABLE {table_name}
+                    ADD COLUMN metadata JSONB NULL DEFAULT '{{}}'::jsonb
+                    """
+                )
+                logger.info("Successfully added metadata column to %s", table_name)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to add metadata column to {table_name}: {e}"
+                )
+
     async def _migrate_doc_status_add_track_id(self):
         """Add track_id column to LIGHTRAG_DOC_STATUS table if it doesn't exist and create index"""
         try:
@@ -1381,6 +1408,12 @@ class PostgreSQLDB:
             logger.error(
                 f"PostgreSQL, Failed to migrate text chunks llm_cache_list field: {e}"
             )
+
+        # Migrate chunk storage to add metadata field if needed
+        try:
+            await self._migrate_chunks_add_metadata()
+        except Exception as e:
+            logger.error(f"PostgreSQL, Failed to migrate chunk metadata fields: {e}")
 
         # Migrate field lengths for entity_name, source_id, target_id, and file_path
         try:
@@ -1930,10 +1963,33 @@ class PGKVStorage(BaseKVStorage):
                 except json.JSONDecodeError:
                     llm_cache_list = []
             response["llm_cache_list"] = llm_cache_list
+            metadata = response.get("metadata", {})
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            response["metadata"] = metadata
             create_time = response.get("create_time", 0)
             update_time = response.get("update_time", 0)
             response["create_time"] = create_time
             response["update_time"] = create_time if update_time == 0 else update_time
+
+        if response and is_namespace(self.namespace, NameSpace.KV_STORE_FULL_DOCS):
+            metadata = response.get("metadata", {})
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            segment_doc = metadata.pop("segment_doc", None)
+            response["metadata"] = metadata
+            if isinstance(segment_doc, dict):
+                response["segment_doc"] = segment_doc
 
         # Special handling for LLM cache to ensure compatibility with _get_cached_extraction_results
         if response and is_namespace(
@@ -2064,10 +2120,34 @@ class PGKVStorage(BaseKVStorage):
                     except json.JSONDecodeError:
                         llm_cache_list = []
                 result["llm_cache_list"] = llm_cache_list
+                metadata = result.get("metadata", {})
+                if isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except json.JSONDecodeError:
+                        metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                result["metadata"] = metadata
                 create_time = result.get("create_time", 0)
                 update_time = result.get("update_time", 0)
                 result["create_time"] = create_time
                 result["update_time"] = create_time if update_time == 0 else update_time
+
+        if results and is_namespace(self.namespace, NameSpace.KV_STORE_FULL_DOCS):
+            for result in results:
+                metadata = result.get("metadata", {})
+                if isinstance(metadata, str):
+                    try:
+                        metadata = json.loads(metadata)
+                    except json.JSONDecodeError:
+                        metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                segment_doc = metadata.pop("segment_doc", None)
+                result["metadata"] = metadata
+                if isinstance(segment_doc, dict):
+                    result["segment_doc"] = segment_doc
 
         # Special handling for LLM cache to ensure compatibility with _get_cached_extraction_results
         if results and is_namespace(
@@ -2201,7 +2281,8 @@ class PGKVStorage(BaseKVStorage):
             current_time = datetime.datetime.now(timezone.utc).replace(tzinfo=None)
             for k, v in data.items():
                 # Tuple order must match SQL: (workspace, id, tokens, chunk_order_index,
-                #   full_doc_id, content, file_path, llm_cache_list, create_time, update_time)
+                #   full_doc_id, content, file_path, metadata, llm_cache_list,
+                #   create_time, update_time)
                 batch_values.append(
                     (
                         self.workspace,
@@ -2211,6 +2292,7 @@ class PGKVStorage(BaseKVStorage):
                         v["full_doc_id"],
                         v["content"],
                         v["file_path"],
+                        json.dumps(v.get("metadata", {})),
                         json.dumps(v.get("llm_cache_list", [])),
                         current_time,
                         current_time,
@@ -2219,9 +2301,18 @@ class PGKVStorage(BaseKVStorage):
         elif is_namespace(self.namespace, NameSpace.KV_STORE_FULL_DOCS):
             upsert_sql = SQL_TEMPLATES["upsert_doc_full"]
             for k, v in data.items():
-                # Tuple order must match SQL: (id, content, doc_name, workspace)
+                # Tuple order must match SQL: (id, content, doc_name, workspace, meta)
+                metadata = dict(v.get("metadata", {}) or {})
+                if v.get("segment_doc") is not None:
+                    metadata["segment_doc"] = v.get("segment_doc")
                 batch_values.append(
-                    (k, v["content"], v.get("file_path", ""), self.workspace)
+                    (
+                        k,
+                        v["content"],
+                        v.get("file_path", ""),
+                        self.workspace,
+                        json.dumps(metadata),
+                    )
                 )
         elif is_namespace(self.namespace, NameSpace.KV_STORE_LLM_RESPONSE_CACHE):
             upsert_sql = SQL_TEMPLATES["upsert_llm_response_cache"]
@@ -2928,8 +3019,9 @@ class PGVectorStorage(BaseVectorStorage):
                 item["content"],  # $6
                 item["__vector__"],  # $7 - numpy array, handled by pgvector codec
                 item["file_path"],  # $8
-                current_time,  # $9
+                json.dumps(item.get("metadata", {})),  # $9
                 current_time,  # $10
+                current_time,  # $11
             )
         except Exception as e:
             logger.error(
@@ -3078,6 +3170,15 @@ class PGVectorStorage(BaseVectorStorage):
             "top_k": top_k,
         }
         results = await self.db.query(sql, params=list(params.values()), multirows=True)
+        for result in results or []:
+            metadata = result.get("metadata")
+            if isinstance(metadata, str):
+                try:
+                    result["metadata"] = json.loads(metadata)
+                except json.JSONDecodeError:
+                    result["metadata"] = {}
+            elif metadata is None:
+                result["metadata"] = {}
         return results
 
     async def index_done_callback(self) -> None:
@@ -5481,6 +5582,7 @@ TABLES = {
                     tokens INTEGER,
                     content TEXT,
                     file_path TEXT NULL,
+                    metadata JSONB NULL DEFAULT '{}'::jsonb,
                     llm_cache_list JSONB NULL DEFAULT '[]'::jsonb,
                     create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
                     update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
@@ -5497,6 +5599,7 @@ TABLES = {
                     content TEXT,
                     content_vector VECTOR(dimension),
                     file_path TEXT NULL,
+                    metadata JSONB NULL DEFAULT '{}'::jsonb,
                     create_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
                     update_time TIMESTAMP(0) DEFAULT CURRENT_TIMESTAMP,
 	                CONSTRAINT LIGHTRAG_VDB_CHUNKS_PK PRIMARY KEY (workspace, id)
@@ -5613,11 +5716,13 @@ TABLES = {
 SQL_TEMPLATES = {
     # SQL for KVStorage
     "get_by_id_full_docs": """SELECT id, COALESCE(content, '') as content,
-                                COALESCE(doc_name, '') as file_path
+                                COALESCE(doc_name, '') as file_path,
+                                COALESCE(meta, '{}'::jsonb) as metadata
                                 FROM LIGHTRAG_DOC_FULL WHERE workspace=$1 AND id=$2
                             """,
     "get_by_id_text_chunks": """SELECT id, tokens, COALESCE(content, '') as content,
                                 chunk_order_index, full_doc_id, file_path,
+                                COALESCE(metadata, '{}'::jsonb) as metadata,
                                 COALESCE(llm_cache_list, '[]'::jsonb) as llm_cache_list,
                                 EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
                                 EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
@@ -5629,11 +5734,13 @@ SQL_TEMPLATES = {
                                 FROM LIGHTRAG_LLM_CACHE WHERE workspace=$1 AND id=$2
                                """,
     "get_by_ids_full_docs": """SELECT id, COALESCE(content, '') as content,
-                                 COALESCE(doc_name, '') as file_path
+                                 COALESCE(doc_name, '') as file_path,
+                                 COALESCE(meta, '{}'::jsonb) as metadata
                                  FROM LIGHTRAG_DOC_FULL WHERE workspace=$1 AND id = ANY($2)
                             """,
     "get_by_ids_text_chunks": """SELECT id, tokens, COALESCE(content, '') as content,
                                   chunk_order_index, full_doc_id, file_path,
+                                  COALESCE(metadata, '{}'::jsonb) as metadata,
                                   COALESCE(llm_cache_list, '[]'::jsonb) as llm_cache_list,
                                   EXTRACT(EPOCH FROM create_time)::BIGINT as create_time,
                                   EXTRACT(EPOCH FROM update_time)::BIGINT as update_time
@@ -5685,11 +5792,12 @@ SQL_TEMPLATES = {
                                  FROM LIGHTRAG_RELATION_CHUNKS WHERE workspace=$1 AND id = ANY($2)
                                 """,
     "filter_keys": "SELECT id FROM {table_name} WHERE workspace=$1 AND id IN ({ids})",
-    "upsert_doc_full": """INSERT INTO LIGHTRAG_DOC_FULL (id, content, doc_name, workspace)
-                        VALUES ($1, $2, $3, $4)
+    "upsert_doc_full": """INSERT INTO LIGHTRAG_DOC_FULL (id, content, doc_name, workspace, meta)
+                        VALUES ($1, $2, $3, $4, $5)
                         ON CONFLICT (workspace,id) DO UPDATE
                            SET content = $2,
                                doc_name = $3,
+                               meta = $5,
                                update_time = CURRENT_TIMESTAMP
                        """,
     "upsert_llm_response_cache": """INSERT INTO LIGHTRAG_LLM_CACHE(workspace,id,original_prompt,return_value,chunk_id,cache_type,queryparam)
@@ -5703,15 +5811,16 @@ SQL_TEMPLATES = {
                                       update_time = CURRENT_TIMESTAMP
                                      """,
     "upsert_text_chunk": """INSERT INTO LIGHTRAG_DOC_CHUNKS (workspace, id, tokens,
-                      chunk_order_index, full_doc_id, content, file_path, llm_cache_list,
-                      create_time, update_time)
-                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                      chunk_order_index, full_doc_id, content, file_path, metadata,
+                      llm_cache_list, create_time, update_time)
+                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                       ON CONFLICT (workspace,id) DO UPDATE
                       SET tokens=EXCLUDED.tokens,
                       chunk_order_index=EXCLUDED.chunk_order_index,
                       full_doc_id=EXCLUDED.full_doc_id,
                       content = EXCLUDED.content,
                       file_path=EXCLUDED.file_path,
+                      metadata=EXCLUDED.metadata,
                       llm_cache_list=EXCLUDED.llm_cache_list,
                       update_time = EXCLUDED.update_time
                      """,
@@ -5750,8 +5859,8 @@ SQL_TEMPLATES = {
     # SQL for VectorStorage
     "upsert_chunk": """INSERT INTO {table_name} (workspace, id, tokens,
                       chunk_order_index, full_doc_id, content, content_vector, file_path,
-                      create_time, update_time)
-                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                      metadata, create_time, update_time)
+                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                       ON CONFLICT (workspace,id) DO UPDATE
                       SET tokens=EXCLUDED.tokens,
                       chunk_order_index=EXCLUDED.chunk_order_index,
@@ -5759,6 +5868,7 @@ SQL_TEMPLATES = {
                       content = EXCLUDED.content,
                       content_vector=EXCLUDED.content_vector,
                       file_path=EXCLUDED.file_path,
+                      metadata=EXCLUDED.metadata,
                       update_time = EXCLUDED.update_time
                      """,
     "upsert_entity": """INSERT INTO {table_name} (workspace, id, entity_name, content,
@@ -5807,6 +5917,7 @@ SQL_TEMPLATES = {
               SELECT c.id,
                      c.content,
                      c.file_path,
+                     COALESCE(c.metadata, '{}'::jsonb) AS metadata,
                      EXTRACT(EPOCH FROM c.create_time)::BIGINT AS created_at
               FROM {table_name} c
               WHERE c.workspace = $1

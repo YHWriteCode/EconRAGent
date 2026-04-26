@@ -50,6 +50,7 @@ INTENT_ROLE_EXPECTATIONS: dict[str, dict[str, set[str]]] = {
         "middle": {
             "intermediate_entity",
             "industry_context",
+            "location_context",
             "country_context",
             "subject_entity",
             "affected_entity",
@@ -70,7 +71,12 @@ INTENT_ROLE_EXPECTATIONS: dict[str, dict[str, set[str]]] = {
     "attribute_trace": {
         "start": {"subject_entity", "member_entity"},
         "middle": {"intermediate_entity", "subject_entity"},
-        "end": {"attribute_value", "attribute_target", "country_context"},
+        "end": {
+            "attribute_value",
+            "attribute_target",
+            "location_context",
+            "country_context",
+        },
     },
     "responsibility_trace": {
         "start": {"subject_entity", "member_entity"},

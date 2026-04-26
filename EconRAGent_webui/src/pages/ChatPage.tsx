@@ -467,11 +467,12 @@ export function ChatPage() {
               }));
             }
             if (event.type === "tool_result" && event.tool_call) {
+              const toolCall = event.tool_call;
               updateMessage(sessionId, assistantMessageId, (message) => {
                 const nextToolCalls = Array.isArray(message.metadata.tool_calls)
                   ? [...(message.metadata.tool_calls as Array<Record<string, unknown>>)]
                   : [];
-                nextToolCalls.push(event.tool_call);
+                nextToolCalls.push(toolCall);
                 return {
                   ...message,
                   metadata: {

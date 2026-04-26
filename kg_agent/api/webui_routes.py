@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field, field_validator
 
+from lightrag_fork.constants import GRAPH_FIELD_SEP
 from lightrag_fork.schema import resolve_domain_schema
 from kg_agent.uploads import UploadStore
 from kg_agent.workspace_registry import (
@@ -19,6 +20,21 @@ from kg_agent.workspace_registry import (
 
 
 GRAPH_TIME_KEYS = ("last_confirmed_at", "updated_at", "created_at", "published_at")
+GRAPH_SOURCE_METADATA_KEYS = (
+    "source_label",
+    "source_filename",
+    "source_url",
+    "file_path",
+    "file_format",
+    "page_number",
+    "page_range",
+    "chapter_title",
+    "section_path",
+    "crawler_source_id",
+    "feed_item_key",
+    "event_cluster_id",
+    "published_at",
+)
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -89,6 +105,72 @@ def _read_time_value(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _split_graph_field(value: Any) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    return [item for item in value.split(GRAPH_FIELD_SEP) if item]
+
+
+def _metadata_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _source_display_name(payload: dict[str, Any]) -> str:
+    filename = str(payload.get("source_filename") or "").strip()
+    if filename:
+        return filename
+    url = str(payload.get("source_url") or "").strip()
+    if url:
+        parsed = urlparse(url)
+        return parsed.netloc or url
+    file_path = str(payload.get("file_path") or "").strip()
+    if not file_path:
+        return ""
+    normalized = file_path.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1] or file_path
+
+
+def _chunk_source_metadata(chunk: dict[str, Any]) -> dict[str, Any]:
+    metadata = _metadata_dict(chunk.get("metadata"))
+    payload: dict[str, Any] = {}
+    for key in GRAPH_SOURCE_METADATA_KEYS:
+        value = chunk.get(key, metadata.get(key))
+        if value is not None and value != "":
+            payload[key] = value
+    display_name = _source_display_name(payload)
+    if display_name:
+        payload["display_name"] = display_name
+    return payload
+
+
+async def _source_metadata_from_chunks(
+    rag: Any,
+    source_id: Any,
+) -> list[dict[str, Any]]:
+    chunk_ids = _split_graph_field(source_id)
+    text_chunks = getattr(rag, "text_chunks", None)
+    if not chunk_ids or text_chunks is None or not hasattr(text_chunks, "get_by_ids"):
+        return []
+    try:
+        chunks = await text_chunks.get_by_ids(chunk_ids)
+    except Exception:
+        return []
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for chunk in chunks or []:
+        if not isinstance(chunk, dict):
+            continue
+        payload = _chunk_source_metadata(chunk)
+        if not payload:
+            continue
+        key = repr(sorted(payload.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(payload)
+    return items
+
+
 def _within_time_window(
     payload: dict[str, Any],
     *,
@@ -140,20 +222,22 @@ def _filter_graph_payload(
     relation_type: str | None,
     time_from: str | None,
     time_to: str | None,
+    schema_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    normalized_entity_type = (entity_type or "").strip().lower()
-    normalized_relation_type = _normalize_graph_filter_value(relation_type)
+    entity_lookup = _schema_type_lookup(schema_payload, "entity_types")
+    relation_lookup = _schema_type_lookup(schema_payload, "relation_types")
+    normalized_entity_type = _canonical_graph_type(entity_type, entity_lookup)
+    normalized_relation_type = _canonical_graph_type(relation_type, relation_lookup)
     nodes = []
     allowed_node_ids: set[tuple[str, str]] = set()
     for node in graph_payload.get("nodes", []):
         if not isinstance(node, dict):
             continue
         properties = node.get("properties") if isinstance(node.get("properties"), dict) else {}
-        current_entity_type = str(
-            properties.get("entity_type")
-            or properties.get("type")
-            or ""
-        ).strip().lower()
+        current_entity_type = _canonical_graph_type(
+            properties.get("entity_type") or properties.get("type"),
+            entity_lookup,
+        )
         if normalized_entity_type and current_entity_type != normalized_entity_type:
             continue
         if not _within_time_window(properties, time_from=time_from, time_to=time_to):
@@ -173,7 +257,10 @@ def _filter_graph_payload(
         properties = edge.get("properties") if isinstance(edge.get("properties"), dict) else {}
         if not _within_time_window(properties, time_from=time_from, time_to=time_to):
             continue
-        if normalized_relation_type and normalized_relation_type not in _edge_relation_tokens(edge):
+        if normalized_relation_type and normalized_relation_type not in _edge_relation_tokens(
+            edge,
+            relation_lookup=relation_lookup,
+        ):
             continue
         edges.append(edge)
         relation_node_ids.add(source_key)
@@ -198,6 +285,39 @@ def _normalize_graph_filter_value(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _schema_type_lookup(
+    schema_payload: dict[str, Any] | None,
+    collection_key: str,
+) -> dict[str, str]:
+    if not isinstance(schema_payload, dict):
+        return {}
+    lookup: dict[str, str] = {}
+    for item in schema_payload.get(collection_key, []):
+        if not isinstance(item, dict):
+            continue
+        canonical = _normalize_graph_filter_value(item.get("name"))
+        if not canonical:
+            continue
+        aliases = item.get("aliases") or []
+        if not isinstance(aliases, (list, tuple, set)):
+            aliases = [aliases]
+        candidates = [
+            item.get("name"),
+            item.get("display_name"),
+            *aliases,
+        ]
+        for candidate in candidates:
+            normalized = _normalize_graph_filter_value(candidate)
+            if normalized:
+                lookup[normalized] = canonical
+    return lookup
+
+
+def _canonical_graph_type(value: Any, lookup: dict[str, str]) -> str:
+    normalized = _normalize_graph_filter_value(value)
+    return lookup.get(normalized, normalized)
+
+
 def _split_graph_type_tokens(value: Any) -> set[str]:
     if value is None:
         return set()
@@ -216,11 +336,17 @@ def _split_graph_type_tokens(value: Any) -> set[str]:
     }
 
 
-def _edge_relation_tokens(edge: dict[str, Any]) -> set[str]:
+def _edge_relation_tokens(
+    edge: dict[str, Any],
+    *,
+    relation_lookup: dict[str, str] | None = None,
+) -> set[str]:
     properties = edge.get("properties") if isinstance(edge.get("properties"), dict) else {}
     tokens = _split_graph_type_tokens(edge.get("type"))
     for key in ("relation_type", "relation", "keywords"):
         tokens.update(_split_graph_type_tokens(properties.get(key)))
+    if relation_lookup:
+        tokens.update(relation_lookup.get(token, token) for token in list(tokens))
     return tokens
 
 
@@ -304,6 +430,7 @@ async def _graph_schema_payload(
         records = await workspace_registry.list_workspaces()
         candidate_workspaces.extend(record.workspace_id for record in records)
 
+    schema_payload: dict[str, Any] | None = None
     for candidate in candidate_workspaces:
         try:
             rag = await agent_core._resolve_rag(candidate)
@@ -317,9 +444,13 @@ async def _graph_schema_payload(
             continue
         runtime_profile = str(runtime_schema.get("profile_name") or "").strip()
         if runtime_profile != "general" or runtime_schema.get("relation_types"):
-            return _schema_payload_from_runtime_schema(runtime_schema)
+            schema_payload = _schema_payload_from_runtime_schema(runtime_schema)
+            break
 
-    return _configured_graph_schema_payload(agent_core)
+    if schema_payload is None:
+        schema_payload = _configured_graph_schema_payload(agent_core)
+
+    return schema_payload
 
 
 def _model_to_dict(value: Any) -> dict[str, Any]:
@@ -400,6 +531,7 @@ async def _drop_workspace_data(rag: Any) -> None:
         getattr(rag, "chunks_vdb", None),
         getattr(rag, "chunk_entity_relation_graph", None),
         getattr(rag, "doc_status", None),
+        getattr(rag, "llm_response_cache", None),
     ]
     for storage in storages:
         drop_func = getattr(storage, "drop", None)
@@ -767,6 +899,11 @@ async def _build_entity_detail(
     node = await graph.get_node(resolved_entity)
     if node is None:
         raise HTTPException(status_code=404, detail="Entity not found")
+    node_payload = dict(node)
+    node_payload["source_metadata"] = await _source_metadata_from_chunks(
+        rag,
+        node_payload.get("source_id"),
+    )
     node_edges = await graph.get_node_edges(resolved_entity) or []
     neighbor_ids = _dedupe_preserve_order(
         [
@@ -783,7 +920,7 @@ async def _build_entity_detail(
     return {
         "workspace": workspace_id,
         "entity_id": resolved_entity,
-        "node": node,
+        "node": node_payload,
         "neighbors": [
             {"entity_id": neighbor_id, "node": payload}
             for neighbor_id, payload in zip(neighbor_ids, neighbor_nodes)
@@ -1023,6 +1160,10 @@ def create_webui_routes(
             track_id = await rag.ainsert(
                 input=text,
                 file_paths=request.source or f"workspace:{workspace_id}:text-import",
+                metadatas={
+                    "source_label": "manual_text",
+                    "file_path": request.source or f"workspace:{workspace_id}:text-import",
+                },
             )
         elif request.kind == "url":
             url = (request.url or "").strip()
@@ -1037,6 +1178,11 @@ def create_webui_routes(
             track_id = await rag.ainsert(
                 input=page.markdown,
                 file_paths=request.source or page.final_url or url,
+                metadatas={
+                    "source_label": "crawler",
+                    "source_url": page.final_url or url,
+                    "file_path": request.source or page.final_url or url,
+                },
             )
         else:
             upload_id = (request.upload_id or "").strip()
@@ -1046,20 +1192,37 @@ def create_webui_routes(
             if upload_record is None:
                 raise HTTPException(status_code=404, detail="Upload not found")
             try:
-                extracted_text = await upload_store.read_extracted_text(upload_id)
+                extracted_document = await upload_store.read_extracted_document(upload_id)
             except Exception as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            if not extracted_text.strip():
+            if not extracted_document.text.strip():
                 raise HTTPException(status_code=400, detail="Upload did not yield importable text")
+            document_metadata = dict(extracted_document.metadata)
+            document_metadata["source_label"] = "file"
+            document_metadata["source_filename"] = upload_record.filename
+            document_metadata.setdefault("file_path", request.source or upload_record.filename)
             track_id = await rag.ainsert(
-                input=extracted_text,
+                input=extracted_document.text,
                 file_paths=request.source or upload_record.filename,
+                metadatas=document_metadata,
+                segment_docs=extracted_document.to_dict(),
             )
 
+        runtime_schema = (
+            getattr(rag, "addon_params", {}).get("domain_schema", {})
+            if isinstance(getattr(rag, "addon_params", None), dict)
+            else {}
+        )
         return {
             "status": "accepted",
             "workspace_id": workspace_id,
             "track_id": track_id,
+            "domain_schema": {
+                "profile_name": runtime_schema.get("profile_name"),
+                "enabled": runtime_schema.get("enabled"),
+                "entity_types": runtime_schema.get("entity_type_names", []),
+                "relation_types": runtime_schema.get("relation_type_names", []),
+            },
         }
 
     @router.get("/agent/imports/{track_id}")
@@ -1105,7 +1268,7 @@ def create_webui_routes(
     @router.get("/agent/graph/overview")
     async def get_graph_overview(
         workspace: str = "all",
-        max_nodes: int = Query(default=800, ge=1, le=800),
+        max_nodes: int = Query(default=400, ge=1, le=400),
     ):
         normalized_workspace = (workspace or "all").strip() or "all"
         if normalized_workspace == "all":
@@ -1156,7 +1319,7 @@ def create_webui_routes(
         workspace: str,
         label: str = "*",
         max_depth: int = Query(default=2, ge=1, le=6),
-        max_nodes: int = Query(default=800, ge=1, le=800),
+        max_nodes: int = Query(default=400, ge=1, le=400),
         entity_type: str | None = None,
         relation_type: str | None = None,
         time_from: str | None = None,
@@ -1192,12 +1355,18 @@ def create_webui_routes(
                 max_depth=max_depth,
                 max_nodes=max_nodes,
             )
+        schema_payload = await _graph_schema_payload(
+            agent_core=agent_core,
+            workspace_registry=workspace_registry,
+            workspace=workspace_id,
+        )
         filtered = _filter_graph_payload(
             payload,
             entity_type=entity_type,
             relation_type=relation_type,
             time_from=time_from,
             time_to=time_to,
+            schema_payload=schema_payload,
         )
         return {
             **filtered,
@@ -1269,6 +1438,11 @@ def create_webui_routes(
         edge = await rag.chunk_entity_relation_graph.get_edge(source, target)
         if edge is None:
             raise HTTPException(status_code=404, detail="Relation not found")
+        edge_payload = dict(edge)
+        edge_payload["source_metadata"] = await _source_metadata_from_chunks(
+            rag,
+            edge_payload.get("source_id"),
+        )
         source_node, target_node = await asyncio.gather(
             rag.chunk_entity_relation_graph.get_node(source),
             rag.chunk_entity_relation_graph.get_node(target),
@@ -1277,7 +1451,7 @@ def create_webui_routes(
             "workspace": workspace_id,
             "source": source,
             "target": target,
-            "edge": edge,
+            "edge": edge_payload,
             "source_node": source_node,
             "target_node": target_node,
         }

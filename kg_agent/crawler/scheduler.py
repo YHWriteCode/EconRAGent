@@ -723,6 +723,17 @@ class IngestScheduler:
                         if resolved_source_type == "feed"
                         else (page.final_url or page.url),
                         doc_id=doc_id,
+                        metadata=self._build_scheduler_document_metadata(
+                            source=source,
+                            page=page,
+                            page_key=page_key,
+                            resolved_source_type=resolved_source_type,
+                            published_at=published_at,
+                            event_cluster_id=item_event_cluster_ids.get(page_key),
+                            content_hash=content_hash,
+                            content_fingerprint=content_fingerprint,
+                            short_term_lifecycle=short_term_lifecycle,
+                        ),
                     )
                     ingested_count += 1
                     if short_term_lifecycle:
@@ -1301,6 +1312,7 @@ class IngestScheduler:
         content: str,
         file_path: str,
         doc_id: str,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         kwargs: dict[str, Any] = {
             "input": content,
@@ -1308,8 +1320,47 @@ class IngestScheduler:
         }
         if self._callable_accepts_keyword(rag.ainsert, "ids"):
             kwargs["ids"] = doc_id
+        if metadata is not None and self._callable_accepts_keyword(
+            rag.ainsert, "metadatas"
+        ):
+            kwargs["metadatas"] = metadata
         await rag.ainsert(**kwargs)
         return doc_id
+
+    @staticmethod
+    def _build_scheduler_document_metadata(
+        *,
+        source: MonitoredSource,
+        page: Any,
+        page_key: str,
+        resolved_source_type: str,
+        published_at: str | None,
+        event_cluster_id: str | None,
+        content_hash: str,
+        content_fingerprint: str,
+        short_term_lifecycle: bool,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "source_label": "crawler",
+            "crawler_source_id": source.source_id,
+            "crawler_source_name": source.name,
+            "crawler_source_type": resolved_source_type,
+            "crawler_category": source.category,
+            "source_url": (getattr(page, "final_url", None) or getattr(page, "url", None) or ""),
+            "feed_item_key": page_key if resolved_source_type == "feed" else "",
+            "content_hash": content_hash,
+            "short_term_lifecycle": bool(short_term_lifecycle),
+        }
+        title = getattr(page, "title", None)
+        if title:
+            metadata["title"] = title
+        if published_at:
+            metadata["published_at"] = published_at
+        if event_cluster_id:
+            metadata["event_cluster_id"] = event_cluster_id
+        if content_fingerprint:
+            metadata["content_fingerprint"] = content_fingerprint
+        return {key: value for key, value in metadata.items() if value not in ("", None)}
 
     async def _delete_documents_by_id(
         self,

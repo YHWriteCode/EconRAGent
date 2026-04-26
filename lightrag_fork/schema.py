@@ -892,6 +892,56 @@ def _runtime_entity_type_lookup(domain_schema: Mapping[str, Any] | None) -> dict
     )
 
 
+def _runtime_entity_type_names(domain_schema: Mapping[str, Any] | None) -> set[str]:
+    if not isinstance(domain_schema, Mapping):
+        return set()
+
+    names = {
+        str(item).strip()
+        for item in domain_schema.get("entity_type_names", [])
+        if str(item).strip()
+    }
+    if names:
+        return names
+
+    return {
+        str(item.get("name") or "").strip()
+        for item in domain_schema.get("entity_types", [])
+        if isinstance(item, Mapping) and str(item.get("name") or "").strip()
+    }
+
+
+def _schema_metadata(domain_schema: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    if not isinstance(domain_schema, Mapping):
+        return {}
+    metadata = domain_schema.get("metadata")
+    return metadata if isinstance(metadata, Mapping) else {}
+
+
+def _strict_entity_type_fallback(domain_schema: Mapping[str, Any] | None) -> str:
+    metadata = _schema_metadata(domain_schema)
+    canonicalization_mode = str(
+        metadata.get("entity_type_canonicalization") or ""
+    ).strip().lower()
+    strict = _coerce_bool(metadata.get("strict_entity_types"), False) or (
+        canonicalization_mode in {"strict", "schema_only", "schema-only"}
+    )
+    if not strict:
+        return ""
+
+    entity_type_names = _runtime_entity_type_names(domain_schema)
+    fallback = str(
+        metadata.get("fallback_entity_type")
+        or metadata.get("unknown_entity_type")
+        or ""
+    ).strip()
+    if fallback in entity_type_names:
+        return fallback
+    if "Other" in entity_type_names:
+        return "Other"
+    return ""
+
+
 def _runtime_relation_type_lookup(
     domain_schema: Mapping[str, Any] | None,
 ) -> dict[str, str]:
@@ -914,7 +964,9 @@ def normalize_extracted_entity_type(
 
     lookup = _runtime_entity_type_lookup(domain_schema)
     normalized = lookup.get(_normalize_schema_match_key(entity_type))
-    return normalized or entity_type
+    if normalized:
+        return normalized
+    return _strict_entity_type_fallback(domain_schema) or entity_type
 
 
 def normalize_extracted_relation_keywords(
