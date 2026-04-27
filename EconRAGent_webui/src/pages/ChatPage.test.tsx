@@ -7,6 +7,7 @@ import { useAppStore } from "../store/useAppStore";
 
 const apiMocks = vi.hoisted(() => ({
   getSessionMessages: vi.fn(),
+  listWorkspaces: vi.fn(),
   readSkillArtifactContent: vi.fn(),
   streamChat: vi.fn(),
   uploadFile: vi.fn(),
@@ -14,14 +15,65 @@ const apiMocks = vi.hoisted(() => ({
 
 vi.mock("../lib/api", () => ({
   getSessionMessages: apiMocks.getSessionMessages,
+  listWorkspaces: apiMocks.listWorkspaces,
   readSkillArtifactContent: apiMocks.readSkillArtifactContent,
   streamChat: apiMocks.streamChat,
   uploadFile: apiMocks.uploadFile,
 }));
 
 describe("ChatPage", () => {
+  it("shows workspace display name instead of internal workspace id in the composer chip", async () => {
+    apiMocks.getSessionMessages.mockResolvedValue({ session_id: "draft", messages: [] });
+    apiMocks.listWorkspaces.mockResolvedValue({
+      workspaces: [
+        {
+          workspace_id: "test__7f3b81",
+          display_name: "test",
+          description: null,
+          created_at: "2026-04-27T10:00:00+08:00",
+          updated_at: "2026-04-27T10:00:00+08:00",
+          document_count: 3,
+          node_count: 12,
+          source_count: 1,
+          last_updated_at: "2026-04-27T10:00:00+08:00",
+          archived: false,
+        },
+      ],
+    });
+
+    useAppStore.setState({
+      ...useAppStore.getState(),
+      currentWorkspaceId: "test__7f3b81",
+      currentSessionId: "draft",
+      messagesBySession: { draft: [] },
+    });
+
+    renderWithProviders(<ChatPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /test/ })).toBeInTheDocument();
+    });
+    expect(screen.queryByText("test__7f3b81")).not.toBeInTheDocument();
+  });
+
   it("renders streaming assistant output and metadata badges", async () => {
     apiMocks.getSessionMessages.mockResolvedValue({ session_id: "draft", messages: [] });
+    apiMocks.listWorkspaces.mockResolvedValue({
+      workspaces: [
+        {
+          workspace_id: "macro",
+          display_name: "宏观研究",
+          description: null,
+          created_at: "2026-04-21T10:00:00+08:00",
+          updated_at: "2026-04-21T10:00:00+08:00",
+          document_count: 1,
+          node_count: 1,
+          source_count: 1,
+          last_updated_at: "2026-04-21T10:00:00+08:00",
+          archived: false,
+        },
+      ],
+    });
     apiMocks.uploadFile.mockResolvedValue({
       upload_id: "upload-1",
       upload: {

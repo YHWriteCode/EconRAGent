@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useShallow } from "zustand/react/shallow";
 
 import {
   getSessionMessages,
+  listWorkspaces,
   readSkillArtifactContent,
   streamChat,
   uploadFile,
@@ -344,11 +345,25 @@ export function ChatPage() {
   const sessionMessages = messagesBySession[currentSessionId] ?? [];
   const isLanding = sessionMessages.length === 0;
 
+  const workspacesQuery = useQuery({
+    queryKey: queryKeys.workspaces,
+    queryFn: listWorkspaces,
+  });
   const messagesQuery = useQuery({
     queryKey: queryKeys.sessionMessages(currentSessionId),
     queryFn: () => getSessionMessages(currentSessionId),
     enabled: Boolean(currentSessionId),
   });
+
+  const currentWorkspaceLabel = useMemo(() => {
+    if (!currentWorkspaceId) {
+      return "所有知识图谱";
+    }
+    const currentWorkspace = (workspacesQuery.data?.workspaces ?? []).find(
+      (workspace) => workspace.workspace_id === currentWorkspaceId,
+    );
+    return currentWorkspace?.display_name || "已选知识库";
+  }, [currentWorkspaceId, workspacesQuery.data?.workspaces]);
 
   useEffect(() => {
     if (!currentSessionId || isSending || !messagesQuery.data) {
@@ -642,7 +657,7 @@ export function ChatPage() {
                 <span className="workspace-chip-icon" aria-hidden="true">
                   ◉
                 </span>
-                {currentWorkspaceId || "所有知识图谱"}
+                {currentWorkspaceLabel}
               </button>
             </div>
             <div className="composer-toolbar-right">

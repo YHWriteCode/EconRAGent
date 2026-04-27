@@ -79,6 +79,7 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 - Keep `chat` and `graph` as fixed-viewport work surfaces. Only nested regions should scroll: chat message feed, graph filter panel, sidebar history, and spaces database list.
 - `discover` is a news/feed page and may use normal page scrolling.
 - Preserve the chat composer contract: attachment/search menu from the `+` button, retrieval mode buttons below the input, and auto-growing textarea with an internal max-height.
+- The chat composer knowledge-base chip should display the workspace `display_name` only. Keep the internal `workspace_id` for API requests and graph/chat filter synchronization, but do not expose uniqueness suffixes or other backend-only identifiers in the visible label.
 - Preserve the graph page contract: Cytoscape canvas as the primary surface, with a collapsible database filter sidebar that allows the canvas to expand.
 - Graph entity and relation filter chips are schema-driven through `GET /agent/graph/schema`; keep them synchronized with `lightrag_fork/schemas` instead of hardcoding template lists in the frontend.
 - Graph filter chips should display only the schema label (`display_name` with `name` fallback); do not prepend generated initials or decorative text that can overflow narrow sidebar cards.
