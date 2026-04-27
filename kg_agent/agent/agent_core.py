@@ -35,6 +35,7 @@ from kg_agent.skills import (
     SkillCommandPlanner,
     SkillExecutor,
     SkillLoader,
+    SkillPlan,
     SkillRegistry,
 )
 from kg_agent.uploads import UploadStore
@@ -58,6 +59,23 @@ CORRECTION_PHRASE_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+ATTACHMENT_REFERENCE_PATTERN = re.compile(
+    r"("
+    r"\u8fd9\u4e2a\u6587\u4ef6|"
+    r"\u8fd9\u4efd\u6587\u4ef6|"
+    r"\u8fd9\u4e2a\u6587\u6863|"
+    r"\u8fd9\u4efd\u6587\u6863|"
+    r"\u9644\u4ef6|"
+    r"\u4e0a\u4f20\u7684\u6587\u4ef6|"
+    r"\u521a\u4e0a\u4f20\u7684\u6587\u4ef6|"
+    r"this\s+file|"
+    r"the\s+attachment|"
+    r"attached\s+file|"
+    r"uploaded\s+file"
+    r")",
+    re.IGNORECASE,
+)
+FILE_ORIENTED_SKILL_NAMES = {"pdf", "xlsx", "pptx"}
 
 
 @dataclass
@@ -862,6 +880,7 @@ class AgentCore:
             query=self._query_for_run(context),
             session_context=session_context,
             user_profile=user_profile,
+            attachments=context.attachments,
             available_capabilities=self._available_capability_names(
                 include_memory=context.use_memory,
                 include_cross_session=bool(context.user_id),
@@ -870,6 +889,7 @@ class AgentCore:
             available_skills=available_skills,
         )
         route = self._apply_route_overrides(route=route, context=context)
+        route = self._bind_skill_plan_attachments(route=route, context=context)
 
         execution_limit = max(
             1,
@@ -1047,6 +1067,108 @@ class AgentCore:
             max_iterations=route.max_iterations,
             skill_plan=skill_plan,
         )
+
+    def _bind_skill_plan_attachments(
+        self,
+        *,
+        route: RouteDecision,
+        context: AgentRunContext,
+    ) -> RouteDecision:
+        skill_plan = getattr(route, "skill_plan", None)
+        if skill_plan is None:
+            return route
+        constraints = (
+            dict(skill_plan.constraints)
+            if isinstance(skill_plan.constraints, dict)
+            else {}
+        )
+        if self._skill_constraints_have_explicit_input(constraints):
+            return route
+        bindable_attachments = self._collect_bindable_attachments(context.attachments)
+        if not bindable_attachments:
+            return route
+        skill_name = str(skill_plan.skill_name or "").strip().lower()
+        if not (
+            ATTACHMENT_REFERENCE_PATTERN.search(context.query or "")
+            or skill_name in FILE_ORIENTED_SKILL_NAMES
+        ):
+            return route
+
+        attachment_paths = [item["stored_path"] for item in bindable_attachments]
+        attachment_ids = [item["upload_id"] for item in bindable_attachments]
+        attachment_names = [item["filename"] for item in bindable_attachments]
+        if len(attachment_paths) == 1:
+            constraints.setdefault("input_path", attachment_paths[0])
+            constraints.setdefault("source_path", attachment_paths[0])
+            constraints.setdefault("upload_id", attachment_ids[0])
+            constraints.setdefault("input_filename", attachment_names[0])
+        else:
+            constraints.setdefault("input_paths", attachment_paths)
+            constraints.setdefault("source_paths", attachment_paths)
+            constraints.setdefault("upload_ids", attachment_ids)
+            constraints.setdefault("input_filenames", attachment_names)
+
+        return RouteDecision(
+            need_tools=route.need_tools,
+            need_memory=route.need_memory,
+            need_web_search=route.need_web_search,
+            need_path_explanation=route.need_path_explanation,
+            strategy=route.strategy,
+            tool_sequence=route.tool_sequence,
+            reason=route.reason,
+            max_iterations=route.max_iterations,
+            skill_plan=SkillPlan(
+                skill_name=skill_plan.skill_name,
+                goal=skill_plan.goal,
+                reason=skill_plan.reason,
+                constraints=constraints,
+            ),
+        )
+
+    @staticmethod
+    def _skill_constraints_have_explicit_input(constraints: dict[str, Any]) -> bool:
+        return any(
+            key in constraints
+            for key in (
+                "input_path",
+                "input_paths",
+                "source_path",
+                "source_paths",
+                "file_path",
+                "file_paths",
+                "upload_id",
+                "upload_ids",
+            )
+        )
+
+    @staticmethod
+    def _collect_bindable_attachments(
+        attachments: list[dict[str, Any]],
+    ) -> list[dict[str, str]]:
+        bindable: list[dict[str, str]] = []
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").strip().lower()
+            status = str(item.get("status") or "").strip().lower()
+            stored_path = str(item.get("stored_path") or "").strip()
+            upload_id = str(item.get("upload_id") or "").strip()
+            filename = str(item.get("filename") or "").strip()
+            if (
+                kind not in {"text", "document"}
+                or status not in {"ready", "empty_text", "uploaded"}
+                or not stored_path
+                or not upload_id
+            ):
+                continue
+            bindable.append(
+                {
+                    "upload_id": upload_id,
+                    "stored_path": stored_path,
+                    "filename": filename or upload_id,
+                }
+            )
+        return bindable
 
     @staticmethod
     def _resolve_effective_query_mode(route: RouteDecision) -> str | None:

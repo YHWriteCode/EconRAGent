@@ -68,6 +68,7 @@ api/
 - Streaming mode is still activated by `stream=true` in the request body and returns `text/event-stream`.
 - The frontend source of truth is `EconRAGent_webui/`; files under `kg_agent/api/webui/` are generated assets that should be refreshed by the frontend build rather than hand-edited.
 - Upload-backed workspace imports depend on `kg_agent.uploads.UploadStore` text and manifest extraction. Keep API behavior aligned with the WebUI import dialog for Word `.docx`, PDF, Markdown `.md`/`.markdown`, and EPUB.
+- `POST /agent/uploads` is shared by workspace import and chat attachments. It may still accept text files and images for other flows, but legacy Word `.doc` should be rejected with a clear 400 because the current extraction/chat path only supports `.docx`.
 - Workspace import routes should keep `file_path` stable for citations while passing document provenance through `metadatas` and structured segments through `segment_docs`; URL imports sourced by Crawl4AI should use `source_label="crawler"`.
 - `build_rag_from_env()` and `EnvLightRAGProvider` should pass `KG_AGENT_DEFAULT_DOMAIN_SCHEMA` / `config.runtime.default_domain_schema` into LightRAG `addon_params`. The project default is `economy`; setting it to `general` is the explicit opt-out path.
 - Agent-managed LightRAG construction defaults extraction/summary language to Chinese through `SUMMARY_LANGUAGE` / `KG_AGENT_SUMMARY_LANGUAGE`; schema canonical names such as `Company` or `policy_supports` remain internal identifiers while WebUI labels should use `display_name`.

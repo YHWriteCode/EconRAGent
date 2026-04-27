@@ -708,11 +708,19 @@ class UploadStore:
             item = {
                 "upload_id": record.upload_id,
                 "filename": record.filename,
+                "stored_path": record.stored_path,
                 "content_type": record.content_type,
                 "kind": record.kind,
                 "size_bytes": record.size_bytes,
+                "created_at": record.created_at,
                 "status": "uploaded",
             }
+            if record.extracted_text_path:
+                item["extracted_text_path"] = record.extracted_text_path
+            if record.extracted_manifest_path:
+                item["extracted_manifest_path"] = record.extracted_manifest_path
+            if record.metadata:
+                item["metadata"] = dict(record.metadata)
 
             if record.kind in {"text", "document"}:
                 resolved = await self.ensure_text_extract(record.upload_id)
@@ -733,6 +741,9 @@ class UploadStore:
             elif record.kind == "image":
                 item["status"] = "unsupported_multimodal"
                 unsupported_multimodal = True
+            else:
+                item["status"] = "unsupported_type"
+                item["error"] = "当前对话附件仅支持可抽取文本的文档和文本文件。"
             attachments.append(item)
 
         prompt = ""

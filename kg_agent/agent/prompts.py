@@ -260,6 +260,7 @@ def build_route_judge_prompt(
     query: str,
     session_context: dict[str, Any] | None,
     current_plan: dict[str, Any],
+    attachments: list[dict[str, Any]] | None = None,
     available_capabilities: list[Any] | None = None,
     available_capability_catalog: list[dict[str, Any]] | None = None,
     available_tools: list[str] | None = None,
@@ -309,9 +310,13 @@ def build_route_judge_prompt(
         f"{json.dumps(resolved_catalog, ensure_ascii=False, indent=2)}\n\n"
         "Available skills:\n"
         f"{json.dumps(available_skills or [], ensure_ascii=False, indent=2)}\n\n"
+        "Uploaded attachments:\n"
+        f"{json.dumps(attachments or [], ensure_ascii=False, indent=2)}\n\n"
         "Current rule-based plan:\n"
         f"{json.dumps(current_plan, ensure_ascii=False, indent=2)}\n\n"
         f"{template.planner_guidance}\n\n"
+        "If uploaded attachments are listed and the user refers to 'this file' or 'attachment' "
+        "without an explicit filesystem path, treat those uploaded attachments as the intended file inputs.\n\n"
         "Return a JSON object with these fields:\n"
         "{"
         '"need_tools": bool, '

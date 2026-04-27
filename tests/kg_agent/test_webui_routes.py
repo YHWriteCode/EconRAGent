@@ -622,6 +622,22 @@ def test_webui_upload_session_and_workspace_routes(tmp_path):
     assert alpha_workspace["last_updated_at"] == "2026-04-05T12:00:00+00:00"
 
 
+def test_webui_upload_rejects_legacy_doc(tmp_path):
+    client, *_ = _build_client(tmp_path)
+
+    upload_response = client.post(
+        "/agent/uploads",
+        files={"file": ("legacy.doc", b"legacy word", "application/msword")},
+    )
+
+    assert upload_response.status_code == 400
+    payload = upload_response.json()
+    message = payload.get("detail")
+    if message is None and isinstance(payload.get("error"), dict):
+        message = payload["error"].get("message")
+    assert message == "Legacy Word .doc is not supported here. Please upload .docx instead."
+
+
 def test_webui_workspace_crud_imports_and_delete(tmp_path):
     client, agent_core, scheduler, registry, upload_store, rag_provider = _build_client(
         tmp_path

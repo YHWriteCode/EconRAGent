@@ -112,6 +112,53 @@ DIRECT_OUTPUT_SKILL_REQUEST_PATTERN = re.compile(
     r")",
     re.IGNORECASE,
 )
+ATTACHMENT_REFERENCE_PATTERN = re.compile(
+    r"("
+    r"\u8fd9\u4e2a\u6587\u4ef6|"
+    r"\u8fd9\u4efd\u6587\u4ef6|"
+    r"\u8fd9\u4e2a\u6587\u6863|"
+    r"\u8fd9\u4efd\u6587\u6863|"
+    r"\u9644\u4ef6|"
+    r"\u4e0a\u4f20\u7684\u6587\u4ef6|"
+    r"\u521a\u4e0a\u4f20\u7684\u6587\u4ef6|"
+    r"this\s+file|"
+    r"the\s+attachment|"
+    r"attached\s+file|"
+    r"uploaded\s+file"
+    r")",
+    re.IGNORECASE,
+)
+ATTACHMENT_READ_PATTERN = re.compile(
+    r"("
+    r"\u8bfb\u53d6|"
+    r"\u8bfb\u4e00\u4e0b|"
+    r"\u8bfb\u4e00\u904d|"
+    r"\u770b\u4e00\u4e0b|"
+    r"\u603b\u7ed3|"
+    r"\u6982\u62ec|"
+    r"\u6458\u8981|"
+    r"\u5206\u6790|"
+    r"\u89e3\u91ca|"
+    r"\u7ffb\u8bd1|"
+    r"read|review|summari[sz]e|analy[sz]e|explain|translate"
+    r")",
+    re.IGNORECASE,
+)
+ATTACHMENT_SPECIALIZED_FILE_OP_PATTERN = re.compile(
+    r"("
+    r"ocr|"
+    r"\u8868\u683c|"
+    r"\u9875\u7801|"
+    r"\u9010\u9875|"
+    r"\u5408\u5e76|"
+    r"\u62c6\u5206|"
+    r"\u65cb\u8f6c|"
+    r"\u6c34\u5370|"
+    r"\u538b\u7f29|"
+    r"merge|split|rotate|watermark|compress|extract\s+table|page\s+number"
+    r")",
+    re.IGNORECASE,
+)
 SIMPLE_PATTERN = re.compile(
     r"^\s*(hi|hello|\u4f60\u597d|\u55e8|\u8c22\u8c22|thanks|thank you)\s*[!?,.\u3002\uff1f\uff01]*\s*$",
     re.IGNORECASE,
@@ -440,6 +487,7 @@ class RouteJudge:
         query: str,
         session_context: dict[str, Any] | None,
         user_profile: dict[str, Any] | None,
+        attachments: list[dict[str, Any]] | None = None,
         available_capabilities: list[Any] | None = None,
         available_capability_catalog: list[dict[str, Any]] | None = None,
         available_tools: list[str] | None = None,
@@ -457,6 +505,7 @@ class RouteJudge:
         base_decision = self._rule_based_fallback(
             query=query,
             session_context=session_context,
+            attachments=attachments,
             available_tools=resolved_capabilities,
             capability_catalog=capability_catalog,
             skill_catalog=skill_catalog,
@@ -472,6 +521,7 @@ class RouteJudge:
             query=query,
             session_context=session_context,
             user_profile=user_profile,
+            attachments=attachments,
             available_tools=resolved_capabilities,
             capability_catalog=capability_catalog,
             skill_catalog=skill_catalog,
@@ -552,11 +602,13 @@ class RouteJudge:
         *,
         query: str,
         session_context: dict[str, Any] | None,
+        attachments: list[dict[str, Any]] | None,
         available_tools: list[str],
         capability_catalog: list[dict[str, Any]],
         skill_catalog: list[dict[str, Any]],
     ) -> RouteDecision:
         normalized_query = (query or "").strip()
+        normalized_attachments = self._normalize_attachments(attachments)
         history = (
             session_context.get("history", []) if isinstance(session_context, dict) else []
         )
@@ -637,6 +689,31 @@ class RouteJudge:
                 strategy=strategy,
                 tool_sequence=[],
                 reason=reason,
+                max_iterations=1,
+            )
+
+        if self._should_answer_from_attachment_context(
+            query=normalized_query,
+            attachments=normalized_attachments,
+        ) and not any(
+            [
+                needs_specialized_external_capability,
+                requests_direct_output_skill,
+                is_ingest,
+                needs_realtime,
+            ]
+        ):
+            return RouteDecision(
+                need_tools=False,
+                need_memory=False,
+                need_web_search=False,
+                need_path_explanation=False,
+                strategy="attachment_context_answer",
+                tool_sequence=[],
+                reason=(
+                    "The user is referring to an uploaded attachment, so answer from the "
+                    "available attachment context instead of routing to a generic file skill."
+                ),
                 max_iterations=1,
             )
 
@@ -889,6 +966,7 @@ class RouteJudge:
         query: str,
         session_context: dict[str, Any] | None,
         user_profile: dict[str, Any] | None,
+        attachments: list[dict[str, Any]] | None,
         available_tools: list[str],
         capability_catalog: list[dict[str, Any]],
         skill_catalog: list[dict[str, Any]],
@@ -918,6 +996,7 @@ class RouteJudge:
         system_prompt, user_prompt = build_route_judge_prompt(
             query=query,
             session_context={**(session_context or {}), "user_profile": user_profile or {}},
+            attachments=self._normalize_attachments(attachments),
             available_capabilities=available_tools,
             available_capability_catalog=capability_catalog,
             available_tools=available_tools,
@@ -1445,7 +1524,7 @@ class RouteJudge:
         base_decision: RouteDecision,
         skill_catalog: list[dict[str, Any]],
     ) -> bool:
-        if base_decision.strategy == "agent_metadata_answer":
+        if base_decision.strategy in {"agent_metadata_answer", "attachment_context_answer"}:
             return True
         if base_decision.skill_plan is None:
             return False
@@ -1834,6 +1913,52 @@ class RouteJudge:
         if skill_name == "pdf":
             return "pdf"
         return None
+
+    @staticmethod
+    def _normalize_attachments(
+        attachments: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in attachments or []:
+            if not isinstance(item, dict):
+                continue
+            normalized.append(
+                {
+                    "upload_id": str(item.get("upload_id") or "").strip(),
+                    "filename": str(item.get("filename") or "").strip(),
+                    "kind": str(item.get("kind") or "").strip().lower(),
+                    "status": str(item.get("status") or "").strip().lower(),
+                    "stored_path": str(item.get("stored_path") or "").strip(),
+                    "text_extract_status": str(item.get("text_extract_status") or "").strip(),
+                }
+            )
+        return normalized
+
+    @classmethod
+    def _should_answer_from_attachment_context(
+        cls,
+        *,
+        query: str,
+        attachments: list[dict[str, Any]],
+    ) -> bool:
+        if not attachments:
+            return False
+        if cls._extract_file_paths(query):
+            return False
+        if not ATTACHMENT_REFERENCE_PATTERN.search(query or ""):
+            return False
+        if ATTACHMENT_SPECIALIZED_FILE_OP_PATTERN.search(query or ""):
+            return False
+        if not any(cls._attachment_has_readable_context(item) for item in attachments):
+            return False
+        return bool(ATTACHMENT_READ_PATTERN.search(query or "")) or len(query.strip()) <= 40
+
+    @staticmethod
+    def _attachment_has_readable_context(item: dict[str, Any]) -> bool:
+        return (
+            str(item.get("kind") or "").strip().lower() in {"text", "document"}
+            and str(item.get("status") or "").strip().lower() == "ready"
+        )
 
     @staticmethod
     def _parse_skill_plan_payload(

@@ -20,6 +20,20 @@ import type {
   WebSearchMode,
 } from "../types";
 
+const CHAT_ATTACHMENT_ACCEPT =
+  ".pdf,.docx,.md,.markdown,.txt,.json,.csv,.tsv,.html,.htm,.xml,.yml,.yaml,.py,.js,.ts,.tsx,.jsx,.sql,.log,.epub";
+const CHAT_ATTACHMENT_HELP_TEXT = "PDF, DOCX, MD, EPUB, TXT";
+const CHAT_ATTACHMENT_ERROR_TEXT =
+  "当前对话附件支持 PDF、DOCX、Markdown、EPUB 和常见文本文件；暂不支持 .doc。";
+const CHAT_ATTACHMENT_EXTENSIONS = new Set(
+  CHAT_ATTACHMENT_ACCEPT.split(",").map((value) => value.trim().toLowerCase()),
+);
+
+function isSupportedChatAttachment(file: File): boolean {
+  const extension = `.${file.name.split(".").pop()?.toLowerCase() || ""}`;
+  return CHAT_ATTACHMENT_EXTENSIONS.has(extension);
+}
+
 function normalizeServerMessage(message: Record<string, unknown>): ChatMessage {
   return {
     clientId:
@@ -397,6 +411,14 @@ export function ChatPage() {
     if (!file) {
       return;
     }
+    if (!isSupportedChatAttachment(file)) {
+      setErrorText(CHAT_ATTACHMENT_ERROR_TEXT);
+      setStatusText("");
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      return;
+    }
     setIsUploading(true);
     setErrorText("");
     try {
@@ -605,8 +627,8 @@ export function ChatPage() {
             ↑
           </span>
           <span>
-            <strong>上传图片和文件</strong>
-            <small>PNG, JPG, PDF, TXT, DOCX</small>
+            <strong>上传文件</strong>
+            <small>{CHAT_ATTACHMENT_HELP_TEXT}</small>
           </span>
         </button>
         <div className="upload-menu-item upload-menu-switch">
@@ -826,6 +848,7 @@ export function ChatPage() {
         )}
 
         <input
+          accept={CHAT_ATTACHMENT_ACCEPT}
           className="hidden"
           onChange={(event) => void handleUpload(event.target.files?.[0] ?? null)}
           ref={fileInputRef}

@@ -83,6 +83,7 @@ kg_agent/
 - Prefer `rag_provider`-based dynamic workspace loading in API-facing flows instead of binding the app to one fixed `LightRAG` instance.
 - Dynamic workspace `LightRAG` instances should receive `config.runtime.default_domain_schema` through `addon_params`; the default is `economy` so WebUI graph filters and extraction prompts share the same schema unless explicitly configured otherwise.
 - Keep workspace upload import format support aligned across `kg_agent/uploads.py`, `kg_agent/api/webui_routes.py`, and the WebUI spaces dialog.
+- Chat attachments are a separate path from workspace import: planner-facing attachment metadata should include enough structure for route selection and skill binding, and unsupported chat binaries should fail clearly instead of being treated like readable documents.
 - Workspace imports should pass provenance metadata into `LightRAG.ainsert()` via `metadatas` and `segment_docs`; preserve `file_path` as the compatibility citation source.
 
 ---

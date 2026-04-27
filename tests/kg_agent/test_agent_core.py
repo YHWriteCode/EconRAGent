@@ -59,9 +59,12 @@ class _TrackingCrossSessionStore:
 class _CapturingRouteJudge:
     route: RouteDecision
     seen_session_context: dict | None = None
+    seen_attachments: list[dict] | None = None
 
     async def plan(self, **kwargs):
         self.seen_session_context = kwargs.get("session_context")
+        attachments = kwargs.get("attachments")
+        self.seen_attachments = list(attachments) if isinstance(attachments, list) else None
         return self.route
 
 
@@ -194,6 +197,7 @@ class _StubUploadStore:
                 {
                     "upload_id": upload_id,
                     "filename": "brief.txt",
+                    "stored_path": f"/tmp/{upload_id}.txt",
                     "kind": "text",
                     "status": "ready",
                 }
@@ -752,6 +756,7 @@ async def test_agent_core_chat_applies_query_mode_web_search_and_attachment_over
     assert response.metadata["attachment_ids"] == ["upload-1"]
     assert response.metadata["unsupported_multimodal"] is True
     assert response.metadata["attachments"][0]["filename"] == "brief.txt"
+    assert response.metadata["attachments"][0]["stored_path"] == "/tmp/upload-1.txt"
 
 
 @pytest.mark.asyncio
@@ -838,6 +843,86 @@ async def test_agent_core_dispatches_skill_plan_to_skill_executor():
     assert skill_executor.calls[0]["skill_name"] == "example-skill"
     assert skill_executor.calls[0]["goal"] == "Use example-skill to create a report"
     assert skill_executor.calls[0]["workspace"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_core_passes_structured_attachments_to_route_judge():
+    route = RouteDecision(
+        need_tools=False,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="attachment_context_answer",
+        tool_sequence=[],
+        reason="attachment context route",
+        max_iterations=1,
+    )
+    capturing_judge = _CapturingRouteJudge(route=route)
+    upload_store = _StubUploadStore()
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        route_judge=capturing_judge,
+        upload_store=upload_store,
+    )
+
+    await agent.chat(
+        query="读取这个文件",
+        session_id="attachment-route-session",
+        use_memory=False,
+        attachment_ids=["upload-1"],
+    )
+
+    assert capturing_judge.seen_attachments is not None
+    assert capturing_judge.seen_attachments[0]["upload_id"] == "upload-1"
+    assert capturing_judge.seen_attachments[0]["stored_path"] == "/tmp/upload-1.txt"
+
+
+@pytest.mark.asyncio
+async def test_agent_core_auto_binds_single_attachment_to_skill_constraints():
+    route = RouteDecision(
+        need_tools=False,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="skill_request",
+        tool_sequence=[],
+        reason="Matched local skill",
+        max_iterations=1,
+        skill_plan=SkillPlan(
+            skill_name="pdf",
+            goal="Use pdf skill to read the attachment",
+            reason="Matched local skill",
+            constraints={},
+        ),
+    )
+    skill_executor = _StubSkillExecutor()
+    agent = AgentCore(
+        rag=_FakeRAG(),
+        config=KGAgentConfig(
+            agent_model=AgentModelConfig(provider="disabled"),
+            tool_config=ToolConfig(enable_memory=False),
+            runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+        ),
+        route_judge=_StubRouteJudge(route=route),
+        skill_executor=skill_executor,
+        upload_store=_StubUploadStore(),
+    )
+
+    await agent.chat(
+        query="读取这个文件",
+        session_id="attachment-skill-bind-session",
+        use_memory=False,
+        attachment_ids=["upload-1"],
+    )
+
+    assert skill_executor.calls[0]["constraints"]["input_path"] == "/tmp/upload-1.txt"
+    assert skill_executor.calls[0]["constraints"]["source_path"] == "/tmp/upload-1.txt"
+    assert skill_executor.calls[0]["constraints"]["upload_id"] == "upload-1"
 
 
 @pytest.mark.asyncio

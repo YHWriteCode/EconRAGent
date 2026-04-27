@@ -1,5 +1,5 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatPage } from "./ChatPage";
 import { renderWithProviders } from "../test/utils";
@@ -22,6 +22,10 @@ vi.mock("../lib/api", () => ({
 }));
 
 describe("ChatPage", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("shows workspace display name instead of internal workspace id in the composer chip", async () => {
     apiMocks.getSessionMessages.mockResolvedValue({ session_id: "draft", messages: [] });
     apiMocks.listWorkspaces.mockResolvedValue({
@@ -147,5 +151,43 @@ describe("ChatPage", () => {
     expect(screen.getByText("联网强制开启")).toBeInTheDocument();
     expect(screen.getByText("工具调用 1 次")).toBeInTheDocument();
     expect(screen.getAllByText("联网搜索").length).toBeGreaterThan(0);
+  });
+
+  it("rejects unsupported .doc chat attachments and keeps the picker limited to supported formats", async () => {
+    apiMocks.getSessionMessages.mockResolvedValue({ session_id: "draft", messages: [] });
+    apiMocks.listWorkspaces.mockResolvedValue({ workspaces: [] });
+
+    useAppStore.setState({
+      ...useAppStore.getState(),
+      currentWorkspaceId: "",
+      currentSessionId: "draft",
+      messagesBySession: { draft: [] },
+    });
+
+    const { container } = renderWithProviders(<ChatPage />);
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement | null;
+    const acceptedTypes = (input?.getAttribute("accept") ?? "")
+      .split(",")
+      .map((value) => value.trim());
+
+    expect(input).not.toBeNull();
+    expect(acceptedTypes).toContain(".docx");
+    expect(acceptedTypes).not.toContain(".doc");
+
+    const legacyDoc = new File(["legacy"], "legacy.doc", {
+      type: "application/msword",
+    });
+    fireEvent.change(input as HTMLInputElement, {
+      target: { files: [legacyDoc] },
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "当前对话附件支持 PDF、DOCX、Markdown、EPUB 和常见文本文件；暂不支持 .doc。",
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(apiMocks.uploadFile).not.toHaveBeenCalled();
   });
 });

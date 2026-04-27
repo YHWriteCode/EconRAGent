@@ -139,6 +139,39 @@ async def test_route_judge_selects_local_skill_from_available_skills():
 
 
 @pytest.mark.asyncio
+async def test_route_judge_prefers_attachment_context_for_uploaded_document_read_request():
+    judge = RouteJudge(default_max_iterations=3)
+
+    route = await judge.plan(
+        query="读取这个文件并总结重点",
+        session_context={"history": []},
+        user_profile={},
+        attachments=[
+            {
+                "upload_id": "upload-1",
+                "filename": "brief.docx",
+                "kind": "document",
+                "status": "ready",
+                "stored_path": "/tmp/brief.docx",
+            }
+        ],
+        available_capabilities=["kg_hybrid_search"],
+        available_skills=[
+            {
+                "name": "pdf",
+                "description": "Read and process pdf documents.",
+                "tags": ["pdf", "document"],
+                "path": "/skills/pdf",
+            }
+        ],
+    )
+
+    assert route.strategy == "attachment_context_answer"
+    assert route.need_tools is False
+    assert route.skill_plan is None
+
+
+@pytest.mark.asyncio
 async def test_route_judge_selects_financial_researching_skill_for_chinese_stock_analysis():
     judge = RouteJudge(default_max_iterations=3)
     skill_registry = SkillRegistry("skills")

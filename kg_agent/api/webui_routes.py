@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -35,6 +36,7 @@ GRAPH_SOURCE_METADATA_KEYS = (
     "event_cluster_id",
     "published_at",
 )
+REJECTED_UPLOAD_EXTENSIONS = {".doc"}
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -1001,6 +1003,12 @@ def create_webui_routes(
 
     @router.post("/agent/uploads")
     async def create_upload(file: UploadFile = File(...)):
+        suffix = Path(file.filename or "").suffix.lower()
+        if suffix in REJECTED_UPLOAD_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail="Legacy Word .doc is not supported here. Please upload .docx instead.",
+            )
         payload = await file.read()
         record = await upload_store.save_upload(
             filename=file.filename or "upload.bin",

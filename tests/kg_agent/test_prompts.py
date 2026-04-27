@@ -65,6 +65,15 @@ def test_build_route_judge_prompt_includes_skills_and_skill_plan_contract():
     system_prompt, user_prompt = build_route_judge_prompt(
         query="clean this spreadsheet",
         session_context={"history": []},
+        attachments=[
+            {
+                "upload_id": "upload-1",
+                "filename": "brief.pdf",
+                "kind": "document",
+                "status": "ready",
+                "stored_path": "/tmp/brief.pdf",
+            }
+        ],
         available_capabilities=["kg_hybrid_search"],
         available_capability_catalog=[
             {
@@ -90,8 +99,11 @@ def test_build_route_judge_prompt_includes_skills_and_skill_plan_contract():
 
     assert "route judge" in system_prompt.lower()
     assert "Available skills:" in user_prompt
+    assert "Uploaded attachments:" in user_prompt
+    assert "brief.pdf" in user_prompt
     assert '"skill_plan": {"skill_name": str, "goal": str, "reason": str, "constraints": dict} | null' in user_prompt
     assert "include structured constraints when they are explicit in the user query" in user_prompt
+    assert "treat those uploaded attachments as the intended file inputs" in user_prompt
 
 
 def test_build_skill_catalog_selector_prompt_uses_skill_metadata_as_primary_surface():
