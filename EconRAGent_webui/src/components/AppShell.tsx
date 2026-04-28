@@ -1,8 +1,9 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useShallow } from "zustand/react/shallow";
 
+import { Modal } from "./Modal";
 import { deleteSession, listSessions, listWorkspaces } from "../lib/api";
 import { truncate } from "../lib/format";
 import { queryKeys } from "../lib/queryKeys";
@@ -11,6 +12,7 @@ import type { SessionSummary } from "../types";
 
 function buildDraftSession(
   currentSessionId: string,
+  userId: string | null,
   messages: ReturnType<typeof useAppStore.getState>["messagesBySession"],
 ): SessionSummary | null {
   if (!currentSessionId) {
@@ -21,6 +23,7 @@ function buildDraftSession(
   const lastMessage = currentMessages[currentMessages.length - 1];
   return {
     session_id: currentSessionId,
+    user_id: userId,
     workspace:
       typeof firstUser?.metadata.workspace === "string"
         ? firstUser.metadata.workspace
@@ -35,37 +38,77 @@ function buildDraftSession(
   };
 }
 
+function resolveActiveUserId(localUserId: string, userAccountId: string): string {
+  return userAccountId.trim() || localUserId;
+}
+
+function resolveAccountLabel(userDisplayName: string, userAccountId: string): string {
+  return userDisplayName.trim() || userAccountId.trim() || "本机用户";
+}
+
+function resolveAccountInitial(label: string): string {
+  return (label.trim().slice(0, 1) || "U").toUpperCase();
+}
+
 export function AppShell() {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
+  const [accountDialogOpen, setAccountDialogOpen] = useState(false);
+  const [draftAccountId, setDraftAccountId] = useState("");
+  const [draftDisplayName, setDraftDisplayName] = useState("");
+  const [accountError, setAccountError] = useState("");
   const {
     currentWorkspaceId,
     currentSessionId,
+    localUserId,
+    userAccountId,
+    userDisplayName,
+    memoryEnabled,
     messagesBySession,
     setCurrentWorkspaceId,
     setCurrentSessionId,
     createDraftSession,
     removeSession,
+    setUserAccount,
+    clearUserAccount,
+    setMemoryEnabled,
   } = useAppStore(
     useShallow((state) => ({
       currentWorkspaceId: state.currentWorkspaceId,
       currentSessionId: state.currentSessionId,
+      localUserId: state.localUserId,
+      userAccountId: state.userAccountId,
+      userDisplayName: state.userDisplayName,
+      memoryEnabled: state.memoryEnabled,
       messagesBySession: state.messagesBySession,
       setCurrentWorkspaceId: state.setCurrentWorkspaceId,
       setCurrentSessionId: state.setCurrentSessionId,
       createDraftSession: state.createDraftSession,
       removeSession: state.removeSession,
+      setUserAccount: state.setUserAccount,
+      clearUserAccount: state.clearUserAccount,
+      setMemoryEnabled: state.setMemoryEnabled,
     })),
   );
+  const activeUserId = resolveActiveUserId(localUserId, userAccountId);
+  const accountLabel = resolveAccountLabel(userDisplayName, userAccountId);
+  const accountInitial = resolveAccountInitial(accountLabel);
 
   const workspacesQuery = useQuery({
     queryKey: queryKeys.workspaces,
     queryFn: listWorkspaces,
   });
   const sessionsQuery = useQuery({
-    queryKey: queryKeys.sessions(currentWorkspaceId),
-    queryFn: () => listSessions(currentWorkspaceId || undefined),
+    queryKey: queryKeys.sessions(
+      currentWorkspaceId,
+      memoryEnabled ? activeUserId : "",
+    ),
+    queryFn: () =>
+      listSessions(
+        currentWorkspaceId || undefined,
+        memoryEnabled ? activeUserId : undefined,
+      ),
   });
 
   const deleteSessionMutation = useMutation({
@@ -73,7 +116,10 @@ export function AppShell() {
     onSuccess: (_, sessionId) => {
       removeSession(sessionId);
       queryClient.invalidateQueries({
-        queryKey: queryKeys.sessions(currentWorkspaceId),
+        queryKey: queryKeys.sessions(
+          currentWorkspaceId,
+          memoryEnabled ? activeUserId : "",
+        ),
       });
       if (currentSessionId === sessionId) {
         const nextSessionId = createDraftSession();
@@ -109,7 +155,11 @@ export function AppShell() {
 
   const sidebarSessions = useMemo(() => {
     const remoteSessions = sessionsQuery.data?.sessions ?? [];
-    const draftSession = buildDraftSession(currentSessionId, messagesBySession);
+    const draftSession = buildDraftSession(
+      currentSessionId,
+      memoryEnabled ? activeUserId : null,
+      messagesBySession,
+    );
     if (!draftSession) {
       return remoteSessions;
     }
@@ -117,8 +167,42 @@ export function AppShell() {
       return remoteSessions;
     }
     return [draftSession, ...remoteSessions];
-  }, [currentSessionId, messagesBySession, sessionsQuery.data?.sessions]);
+  }, [
+    currentSessionId,
+    activeUserId,
+    memoryEnabled,
+    messagesBySession,
+    sessionsQuery.data?.sessions,
+  ]);
   const isSpacesRoute = location.pathname.startsWith("/spaces");
+
+  function openAccountDialog() {
+    setDraftAccountId(userAccountId || activeUserId);
+    setDraftDisplayName(userDisplayName);
+    setAccountError("");
+    setAccountDialogOpen(true);
+  }
+
+  function saveAccountDialog() {
+    const normalizedAccountId = draftAccountId.trim();
+    if (!normalizedAccountId) {
+      setAccountError("账号 ID 不能为空");
+      return;
+    }
+    setUserAccount(normalizedAccountId, draftDisplayName);
+    setAccountError("");
+    setAccountDialogOpen(false);
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  }
+
+  function logoutAccount() {
+    clearUserAccount();
+    setDraftAccountId(localUserId);
+    setDraftDisplayName("");
+    setAccountError("");
+    setAccountDialogOpen(false);
+    queryClient.invalidateQueries({ queryKey: ["sessions"] });
+  }
 
   return (
     <div className="shell">
@@ -207,6 +291,29 @@ export function AppShell() {
             )}
           </div>
         </section>
+
+        <footer className="sidebar-account">
+          <button
+            className="sidebar-account-button"
+            type="button"
+            aria-label="用户登录与记忆设置"
+            onClick={openAccountDialog}
+          >
+            <span className="sidebar-account-avatar">{accountInitial}</span>
+            <span className="sidebar-account-copy">
+              <strong>{accountLabel}</strong>
+              <small>{memoryEnabled ? activeUserId : "记忆关闭"}</small>
+            </span>
+          </button>
+          <button
+            className="ghost-button icon-button sidebar-account-settings"
+            type="button"
+            aria-label="账号设置"
+            onClick={openAccountDialog}
+          >
+            ⚙
+          </button>
+        </footer>
       </aside>
 
       <div className="app-main">
@@ -251,6 +358,72 @@ export function AppShell() {
           <Outlet />
         </main>
       </div>
+
+      <Modal
+        actions={
+          <>
+            {userAccountId ? (
+              <button className="ghost-button" type="button" onClick={logoutAccount}>
+                退出登录
+              </button>
+            ) : null}
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => setAccountDialogOpen(false)}
+            >
+              取消
+            </button>
+            <button className="primary-button" type="button" onClick={saveAccountDialog}>
+              保存
+            </button>
+          </>
+        }
+        description="同一个账号 ID 会复用会话历史、跨会话检索和用户记忆配置。"
+        open={accountDialogOpen}
+        title="用户登录"
+        onClose={() => setAccountDialogOpen(false)}
+      >
+        <div className="account-settings-form">
+          <label className="field">
+            <span className="field-label">账号 ID</span>
+            <input
+              className="input"
+              value={draftAccountId}
+              onChange={(event) => setDraftAccountId(event.target.value)}
+              placeholder="例如 hang-yi"
+            />
+          </label>
+          <label className="field">
+            <span className="field-label">显示名称</span>
+            <input
+              className="input"
+              value={draftDisplayName}
+              onChange={(event) => setDraftDisplayName(event.target.value)}
+              placeholder="例如 hang yi"
+            />
+          </label>
+          <div className="account-memory-row">
+            <span>
+              <strong>记忆系统</strong>
+              <small>开启后，请求会携带当前账号 ID 作为 user_id。</small>
+            </span>
+            <button
+              className={`web-search-switch ${memoryEnabled ? "active" : ""}`}
+              type="button"
+              aria-label={memoryEnabled ? "关闭记忆" : "开启记忆"}
+              aria-pressed={memoryEnabled}
+              onClick={() => setMemoryEnabled(!memoryEnabled)}
+            >
+              {memoryEnabled ? "关闭" : "开启"}
+            </button>
+          </div>
+          <div className="account-id-preview">
+            当前记忆账号：{memoryEnabled ? activeUserId : "记忆关闭"}
+          </div>
+          {accountError ? <div className="error-state inline-error">{accountError}</div> : null}
+        </div>
+      </Modal>
     </div>
   );
 }

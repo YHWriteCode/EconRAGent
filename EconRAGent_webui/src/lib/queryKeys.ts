@@ -1,6 +1,7 @@
 export const queryKeys = {
   workspaces: ["workspaces"] as const,
-  sessions: (workspaceId: string) => ["sessions", workspaceId] as const,
+  sessions: (workspaceId: string, userId = "") =>
+    ["sessions", workspaceId, userId] as const,
   sessionMessages: (sessionId: string) =>
     ["session-messages", sessionId] as const,
   graph: (scope: string) => ["graph", scope] as const,

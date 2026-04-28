@@ -212,6 +212,8 @@ EconRAGent/
 | `CrossSessionStore` | 跨会话检索，同一用户历史语义搜索 | memory / mongo_qdrant |
 | `UserProfileStore` | 用户档案存储 | memory / sqlite / mongo |
 
+默认配置使用 SQLite 保存会话记忆和用户档案（`kg_agent_memory.sqlite3`、`kg_agent_profiles.sqlite3`），因此 WebUI 以同一个账号 ID 访问时，历史会话、跨会话上下文和用户记忆配置会在 `kg_agent` 服务重启后保留。仅在临时调试或测试场景下建议把 `KG_AGENT_MEMORY_BACKEND` / `KG_AGENT_USER_PROFILE_BACKEND` 改回 `memory`。
+
 ---
 
 ## 9. 定时爬虫与摄入调度

@@ -42,6 +42,7 @@ memory/
 ## 3. Canonical Behavior
 
 - Session memory is optimized for context-window assembly, not for long-term archival completeness.
+- API bootstrap defaults conversation memory and user profiles to SQLite files so WebUI account-scoped history and user memory survive process restarts; in-memory storage is for deliberately ephemeral runs.
 - Cross-session retrieval is same-user scoped and is meant to surface relevant prior session snippets into the current run.
 - User profiles are separate from message history and are injected as structured context, not reconstructed ad hoc from the whole conversation log every turn.
 

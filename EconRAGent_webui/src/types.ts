@@ -195,9 +195,11 @@ export interface GraphFilters {
 export interface ChatRequestPayload {
   query: string;
   session_id: string;
+  user_id?: string | null;
   workspace?: string;
   query_mode?: QueryMode;
   force_web_search?: boolean;
+  use_memory?: boolean;
   attachment_ids?: string[];
 }
 

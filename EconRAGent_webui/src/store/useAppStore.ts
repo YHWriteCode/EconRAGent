@@ -12,11 +12,19 @@ export function createSessionId(): string {
   return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function createLocalUserId(): string {
+  return `webui-user-${createSessionId()}`;
+}
+
 type MessageUpdater = (message: ChatMessage) => ChatMessage;
 
 interface AppState {
   currentWorkspaceId: string;
   currentSessionId: string;
+  localUserId: string;
+  userAccountId: string;
+  userDisplayName: string;
+  memoryEnabled: boolean;
   queryMode: QueryMode;
   webSearchMode: WebSearchMode;
   watchlist: string[];
@@ -25,6 +33,9 @@ interface AppState {
   setCurrentWorkspaceId: (workspaceId: string) => void;
   setCurrentSessionId: (sessionId: string) => void;
   createDraftSession: () => string;
+  setUserAccount: (accountId: string, displayName?: string) => void;
+  clearUserAccount: () => void;
+  setMemoryEnabled: (enabled: boolean) => void;
   setQueryMode: (mode: QueryMode) => void;
   setWebSearchMode: (value: WebSearchMode) => void;
   addWatchlistTicker: (ticker: string) => void;
@@ -71,6 +82,10 @@ export const useAppStore = create<AppState>()(
     (set, get) => ({
       currentWorkspaceId: "",
       currentSessionId: "",
+      localUserId: createLocalUserId(),
+      userAccountId: "",
+      userDisplayName: "",
+      memoryEnabled: true,
       queryMode: "hybrid",
       webSearchMode: "auto",
       watchlist: DEFAULT_WATCHLIST,
@@ -108,6 +123,14 @@ export const useAppStore = create<AppState>()(
         }));
         return nextSessionId;
       },
+      setUserAccount: (accountId, displayName = "") => {
+        set({
+          userAccountId: accountId.trim(),
+          userDisplayName: displayName.trim(),
+        });
+      },
+      clearUserAccount: () => set({ userAccountId: "", userDisplayName: "" }),
+      setMemoryEnabled: (enabled) => set({ memoryEnabled: enabled }),
       setQueryMode: (mode) => set({ queryMode: mode }),
       setWebSearchMode: (value) => set({ webSearchMode: value }),
       addWatchlistTicker: (ticker) => {
@@ -186,6 +209,10 @@ export const useAppStore = create<AppState>()(
       partialize: (state) => ({
         currentWorkspaceId: state.currentWorkspaceId,
         currentSessionId: state.currentSessionId,
+        localUserId: state.localUserId,
+        userAccountId: state.userAccountId,
+        userDisplayName: state.userDisplayName,
+        memoryEnabled: state.memoryEnabled,
         queryMode: state.queryMode,
         webSearchMode: state.webSearchMode,
         watchlist: state.watchlist,

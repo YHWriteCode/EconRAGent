@@ -24,6 +24,19 @@ vi.mock("../lib/api", () => ({
 describe("ChatPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useAppStore.setState({
+      ...useAppStore.getState(),
+      currentWorkspaceId: "",
+      currentSessionId: "",
+      localUserId: "webui-user-test",
+      userAccountId: "",
+      userDisplayName: "",
+      memoryEnabled: true,
+      queryMode: "hybrid",
+      webSearchMode: "auto",
+      pendingAttachments: [],
+      messagesBySession: {},
+    });
   });
 
   it("shows workspace display name instead of internal workspace id in the composer chip", async () => {
@@ -76,6 +89,9 @@ describe("ChatPage", () => {
       ...useAppStore.getState(),
       currentWorkspaceId: "",
       currentSessionId: "draft",
+      localUserId: "webui-user-test",
+      userAccountId: "",
+      memoryEnabled: true,
       messagesBySession: { draft: [] },
     });
 
@@ -90,6 +106,91 @@ describe("ChatPage", () => {
       expect(apiMocks.streamChat).toHaveBeenCalledWith(
         expect.objectContaining({
           workspace: "all",
+          user_id: "webui-user-test",
+          use_memory: true,
+        }),
+        expect.any(Object),
+      );
+    });
+  });
+
+  it("lets the user disable memory for a chat request", async () => {
+    apiMocks.getSessionMessages.mockResolvedValue({ session_id: "draft", messages: [] });
+    apiMocks.listWorkspaces.mockResolvedValue({ workspaces: [] });
+    apiMocks.streamChat.mockResolvedValue({
+      answer: "答案",
+      route: {},
+      tool_calls: [],
+      path_explanation: null,
+      metadata: {},
+      streaming_supported: true,
+    });
+
+    useAppStore.setState({
+      ...useAppStore.getState(),
+      currentWorkspaceId: "",
+      currentSessionId: "draft",
+      localUserId: "webui-user-test",
+      userAccountId: "",
+      memoryEnabled: true,
+      messagesBySession: { draft: [] },
+    });
+
+    renderWithProviders(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "打开上传和联网搜索菜单" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭记忆" }));
+    fireEvent.change(screen.getByPlaceholderText("有什么问题尽管问我..."), {
+      target: { value: "继续刚才的问题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => {
+      expect(apiMocks.streamChat).toHaveBeenCalledWith(
+        expect.objectContaining({
+          user_id: undefined,
+          use_memory: false,
+        }),
+        expect.any(Object),
+      );
+    });
+  });
+
+  it("uses the logged-in account id for memory-backed chat requests", async () => {
+    apiMocks.getSessionMessages.mockResolvedValue({ session_id: "draft", messages: [] });
+    apiMocks.listWorkspaces.mockResolvedValue({ workspaces: [] });
+    apiMocks.streamChat.mockResolvedValue({
+      answer: "答案",
+      route: {},
+      tool_calls: [],
+      path_explanation: null,
+      metadata: {},
+      streaming_supported: true,
+    });
+
+    useAppStore.setState({
+      ...useAppStore.getState(),
+      currentWorkspaceId: "",
+      currentSessionId: "draft",
+      localUserId: "webui-user-test",
+      userAccountId: "hang-yi",
+      userDisplayName: "hang yi",
+      memoryEnabled: true,
+      messagesBySession: { draft: [] },
+    });
+
+    renderWithProviders(<ChatPage />);
+
+    fireEvent.change(screen.getByPlaceholderText("有什么问题尽管问我..."), {
+      target: { value: "继续刚才的问题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => {
+      expect(apiMocks.streamChat).toHaveBeenCalledWith(
+        expect.objectContaining({
+          user_id: "hang-yi",
+          use_memory: true,
         }),
         expect.any(Object),
       );

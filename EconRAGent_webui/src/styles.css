@@ -85,7 +85,8 @@ p {
   position: sticky;
   top: 0;
   display: grid;
-  align-content: start;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  align-content: stretch;
   gap: 14px;
   height: 100vh;
   padding: 22px 14px 18px;
@@ -290,14 +291,121 @@ p {
 }
 
 .sidebar-history {
+  align-content: start;
+  align-items: start;
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
+  overflow: hidden;
   padding-top: 10px;
 }
 
 .compact-session-list {
-  max-height: calc(100vh - 280px);
+  align-content: start;
+  align-items: start;
+  gap: 6px;
+  grid-auto-rows: max-content;
+  max-height: none;
+  min-height: 0;
   overflow: auto;
   padding-right: 4px;
+}
+
+.sidebar-account {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-account-button {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 6px;
+  border: 0;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.sidebar-account-button:hover {
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.sidebar-account-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: #c9c5bf;
+  color: #fffaf2;
+  font-weight: 600;
+}
+
+.sidebar-account-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.sidebar-account-copy strong,
+.sidebar-account-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-account-copy strong {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sidebar-account-copy small,
+.account-memory-row small,
+.account-id-preview {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sidebar-account-settings {
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.account-settings-form {
+  display: grid;
+  gap: 14px;
+}
+
+.account-memory-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(49, 41, 33, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.account-memory-row > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.account-id-preview {
+  overflow-wrap: anywhere;
 }
 
 .app-main {
@@ -463,6 +571,11 @@ p {
   background: transparent;
 }
 
+.compact-session-list .session-item {
+  align-self: start;
+  min-height: 34px;
+}
+
 .session-item.active {
   background: rgba(255, 255, 255, 0.68);
 }
@@ -479,6 +592,11 @@ p {
   background: transparent;
   color: inherit;
   text-align: left;
+}
+
+.compact-session-list .session-item-main {
+  min-height: 34px;
+  padding: 7px 8px;
 }
 
 .session-item-title {
@@ -498,6 +616,11 @@ p {
 .session-delete {
   opacity: 0;
   align-self: center;
+}
+
+.compact-session-list .session-delete {
+  min-width: 32px;
+  padding-inline: 6px;
 }
 
 .session-item:hover .session-delete,

@@ -59,6 +59,7 @@ node .\node_modules\vite\bin\vite.js build
 
 - Keep `README.md` aligned with the current developer workflow.
 - Keep `.env.example` aligned with runtime workspace policy, including `KG_AGENT_DEFAULT_WORKSPACE` and `KG_AGENT_NETWORK_INGEST_WORKSPACE`.
+- Keep memory/profile persistence docs aligned with the runtime defaults: WebUI-facing conversation memory and user profiles default to SQLite files, while the `memory` backend is intentionally ephemeral.
 - Keep `scheduler_sources.json` as normal `MonitoredSource` JSON payloads. Recurring network ingest sources should target the dedicated network-ingest workspace unless there is a specific reason to isolate them elsewhere.
 - If you add or move public API routes, update `kg_agent/api/AGENTS.md` and the README API/setup sections.
 - If you add a new top-level subsystem, give it its own `AGENTS.md` instead of overloading unrelated guides.

@@ -1,7 +1,7 @@
 [
   {
     "source_id": "36kr-feed",
-    "last_crawled_at": "2026-04-28T08:08:54.984362+00:00",
+    "last_crawled_at": "2026-04-28T09:39:55.188012+00:00",
     "last_content_hashes": {
       "https://36kr.com/p/3785730095127817?f=rss": "34244d4c469937afb7172d236e39c8c6",
       "https://36kr.com/p/3784480103455748?f=rss": "acfe964c8ab77e22831f0aae22378fe1",
@@ -76,12 +76,12 @@
         "cluster_id": "884713d9b75c228ee2fac72c3d45a806",
         "headline": "",
         "summary": "",
-        "signature_text": "cannes darkened screening rooms the supposed future of cinema flickered into life this week and it was strange first edition world ai film festival waiff showcased visions men with fish scales erupting from their necks seaweed mouths heroine heart beating outside her body so many massed armies generated tanned sweeping across battlefields that david lean would have blushed last",
-        "content_fingerprint": "0ea49a113c766c7cc8482519f3b0358a",
-        "published_at": "2026-04-26T06:00:07+00:00",
-        "updated_at": "2026-04-28T07:56:14.991468+00:00",
+        "signature_text": "rachel goldfinger counter ai zine should be allowed to think is named for song by they might giants photograph he self published has long been central cultural revolutions from queer activism black feminism and the riot grrrl punk movement producing titles such as sniffin glue sweet thangalong way but now traditionally analogue art form faces new shift artificial intelligence may seem incompatible",
+        "content_fingerprint": "1ba1f6136a02aabe58ae591883a2a55f",
+        "published_at": "2026-04-28T09:00:46+00:00",
+        "updated_at": "2026-04-28T09:27:55.996361+00:00",
         "representative_item_key": "https://36kr.com/p/3784879395134465?f=rss",
-        "active_doc_id": "7f216bab1bc77afcacbd9b5db3469b38",
+        "active_doc_id": "bd4566b15b61131f1f30cd36bdb23516",
         "member_item_keys": [
           "https://36kr.com/p/3784879395134465?f=rss"
         ],
@@ -149,17 +149,18 @@
       "e883a2859522639dc36b5d22783fb9c0": "2026-04-28T07:46:41.005039+00:00",
       "26027767eea91f6754f3da4a3332932c": "2026-04-28T07:49:44.400229+00:00",
       "70cb98370711bd0687b26c940752a238": "2026-04-28T07:56:14.991468+00:00",
-      "467032b10468c9d62114342cc603db0a": "2026-04-28T07:56:14.991468+00:00"
+      "467032b10468c9d62114342cc603db0a": "2026-04-28T07:56:14.991468+00:00",
+      "7f216bab1bc77afcacbd9b5db3469b38": "2026-04-28T09:27:55.996361+00:00"
     },
-    "last_status": "failed",
-    "consecutive_failures": 1,
-    "consecutive_no_change": 0,
+    "last_status": "no_change",
+    "consecutive_failures": 0,
+    "consecutive_no_change": 2,
     "total_ingested_count": 6,
-    "last_error": "https://36kr.com/feed: mismatched tag: line 2, column 52"
+    "last_error": null
   },
   {
     "source_id": "36kr-newsflash",
-    "last_crawled_at": "2026-04-28T08:08:55.605444+00:00",
+    "last_crawled_at": "2026-04-28T09:10:14.465930+00:00",
     "last_content_hashes": {},
     "recent_item_keys": [],
     "item_published_at": {},
@@ -168,21 +169,21 @@
     "item_event_cluster_ids": {},
     "event_clusters": {},
     "doc_expires_at": {},
-    "last_status": "failed",
-    "consecutive_failures": 2,
-    "consecutive_no_change": 0,
+    "last_status": "no_change",
+    "consecutive_failures": 0,
+    "consecutive_no_change": 2,
     "total_ingested_count": 0,
-    "last_error": "https://36kr.com/feed-newsflash: mismatched tag: line 2, column 52"
+    "last_error": null
   },
   {
     "source_id": "bbc-business",
-    "last_crawled_at": "2026-04-28T08:10:55.964587+00:00",
+    "last_crawled_at": "2026-04-28T09:42:00.421231+00:00",
     "last_content_hashes": {
-      "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss": "0cce4c8d23489967c5fed8bf94edcf78",
+      "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss": "8ca86e4a7b8bb0445984d162a7f1a8a1",
       "https://www.bbc.com/news/articles/ce3p1nrz5qqo?at_medium=RSS&at_campaign=rss": "290ec234b56ae83e2afec83d78ac916b",
       "https://www.bbc.com/news/articles/c39398j3pjdo?at_medium=RSS&at_campaign=rss": "dca421030597fb7616ac4a0f04e95b83",
       "https://www.bbc.com/news/articles/c86e6g6989qo?at_medium=RSS&at_campaign=rss": "ea2c8556e673c5a14a861a9462633eae",
-      "https://www.bbc.com/news/articles/c30r5z3vdydo?at_medium=RSS&at_campaign=rss": "8ac165634978c198507584ed5d981d9c",
+      "https://www.bbc.com/news/articles/c30r5z3vdydo?at_medium=RSS&at_campaign=rss": "9836094242d33d62127b482d30f1e9bb",
       "https://www.bbc.com/news/articles/cpvxg1vzxzjo?at_medium=RSS&at_campaign=rss": "8d0c72a12c7995c71ef8811966a6c65e",
       "https://www.bbc.com/news/articles/cd7jpg4w181o?at_medium=RSS&at_campaign=rss": "f2830f3c522777e8b3e8c09574378f1a",
       "https://www.bbc.com/news/articles/c15d57pv925o?at_medium=RSS&at_campaign=rss": "f1aff67ea11ffd1a0271eb078f5be1e9",
@@ -206,7 +207,7 @@
       "https://www.bbc.com/news/articles/cly7yevvl2wo?at_medium=RSS&at_campaign=rss"
     ],
     "item_published_at": {
-      "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss": "2026-04-28T07:17:48+00:00",
+      "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss": "2026-04-28T09:28:56+00:00",
       "https://www.bbc.com/news/articles/ce3p1nrz5qqo?at_medium=RSS&at_campaign=rss": "2026-04-28T06:17:03+00:00",
       "https://www.bbc.com/news/articles/c39398j3pjdo?at_medium=RSS&at_campaign=rss": "2026-04-28T05:11:00+00:00",
       "https://www.bbc.com/news/articles/c86e6g6989qo?at_medium=RSS&at_campaign=rss": "2026-04-28T05:07:59+00:00",
@@ -220,7 +221,7 @@
       "https://www.bbc.com/news/articles/cly7yevvl2wo?at_medium=RSS&at_campaign=rss": "2026-04-27T16:25:51+00:00"
     },
     "item_content_fingerprints": {
-      "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss": "8ee944644a3c7c819299e862f8cfd827",
+      "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss": "34a0e68f35c501edce0c0f149e37b04b",
       "https://www.bbc.com/news/articles/ce3p1nrz5qqo?at_medium=RSS&at_campaign=rss": "9021b471cededfaaa90f1922d92084df",
       "https://www.bbc.com/news/articles/c39398j3pjdo?at_medium=RSS&at_campaign=rss": "9f1a7a23a99fa7fc972edd3d537c8cea",
       "https://www.bbc.com/news/articles/c86e6g6989qo?at_medium=RSS&at_campaign=rss": "02e72612f870ad42019da0cf35bc83a0",
@@ -234,10 +235,10 @@
       "https://www.bbc.com/news/articles/cly7yevvl2wo?at_medium=RSS&at_campaign=rss": "f84f35041010ba2d33d028b2d92c1ba8"
     },
     "item_active_doc_ids": {
-      "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss": "89be4e272409c5053fc4f8f9ee295d0a",
+      "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss": "c08ce8f9b2d51eef89dc8ce19804f443",
       "https://www.bbc.com/news/articles/ce3p1nrz5qqo?at_medium=RSS&at_campaign=rss": "f96d3a749c1c3dd9eaf20762157b2616",
       "https://www.bbc.com/news/articles/c86e6g6989qo?at_medium=RSS&at_campaign=rss": "b4742f50c8641782ef6748e80d5f47f1",
-      "https://www.bbc.com/news/articles/c30r5z3vdydo?at_medium=RSS&at_campaign=rss": "4b98c9cae9a455215728315441c7b68b",
+      "https://www.bbc.com/news/articles/c30r5z3vdydo?at_medium=RSS&at_campaign=rss": "ba4c0c87cc15f9b87f4fa1c9e4db6e40",
       "https://www.bbc.com/news/articles/cpvxg1vzxzjo?at_medium=RSS&at_campaign=rss": "e8624882d2b01187983bab68fb450321",
       "https://www.bbc.com/news/articles/c15d57pv925o?at_medium=RSS&at_campaign=rss": "9740ef19c7712e1a9ffc6b56fb513dd4",
       "https://www.bbc.com/news/articles/c3exel4p1yqo?at_medium=RSS&at_campaign=rss": "26027767eea91f6754f3da4a3332932c",
@@ -282,7 +283,7 @@
         "signature_text": "the government of jersey said community costs bonus had previously been paid in autumn but for past couple years moved forward to july help families as soon possible with cost living pressures automatic payments would be made claimants where eligibility already confirmed while others could start applying from 14 these included applicants only being able",
         "content_fingerprint": "9f1a7a23a99fa7fc972edd3d537c8cea",
         "published_at": "2026-04-28T05:11:00+00:00",
-        "updated_at": "2026-04-28T08:10:55.964587+00:00",
+        "updated_at": "2026-04-28T09:42:00.421231+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/c39398j3pjdo?at_medium=RSS&at_campaign=rss",
         "active_doc_id": "9091a9df79a494a713f7476ada7058ff",
         "member_item_keys": [
@@ -298,7 +299,7 @@
         "signature_text": "charlotte seddon pictured with her family says the cost of baby nursery fees will mean it not worth husband working mum two she and might have had more children if wasn for high childcare in wales we would closer together possibly may said from connah quay flintshire but",
         "content_fingerprint": "02e72612f870ad42019da0cf35bc83a0",
         "published_at": "2026-04-28T05:07:59+00:00",
-        "updated_at": "2026-04-28T08:10:55.964587+00:00",
+        "updated_at": "2026-04-28T09:42:00.421231+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/c86e6g6989qo?at_medium=RSS&at_campaign=rss",
         "active_doc_id": "b4742f50c8641782ef6748e80d5f47f1",
         "member_item_keys": [
@@ -314,9 +315,9 @@
         "signature_text": "rongmala 57 eventually sent an eviction notice and began court proceedings but several months later the tenant is around 15 000 in rent arrears refusing to leave some landlords are worried delays like this could become worse under government new renters rights act which comes into force on may england law biggest overhaul of private rented sector generation aims give",
         "content_fingerprint": "b9c17e5c47386b3b203415f1908901d0",
         "published_at": "2026-04-27T23:56:45+00:00",
-        "updated_at": "2026-04-28T08:10:55.964587+00:00",
+        "updated_at": "2026-04-28T09:42:00.421231+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/c30r5z3vdydo?at_medium=RSS&at_campaign=rss",
-        "active_doc_id": "4b98c9cae9a455215728315441c7b68b",
+        "active_doc_id": "ba4c0c87cc15f9b87f4fa1c9e4db6e40",
         "member_item_keys": [
           "https://www.bbc.com/news/articles/c30r5z3vdydo?at_medium=RSS&at_campaign=rss"
         ],
@@ -330,7 +331,7 @@
         "signature_text": "sarah not her real name had 20 000 stolen in an investment fraud so sophisticated it was 17 months before she discovered scam lloyds bank initially told there 13 month time limit on reporting scams would only refund within day of bbc radio money box investigating refunded full national trading standards has called for urgent review the",
         "content_fingerprint": "60445824074893d9be1cbe0853d81b83",
         "published_at": "2026-04-27T23:03:39+00:00",
-        "updated_at": "2026-04-28T08:10:55.964587+00:00",
+        "updated_at": "2026-04-28T09:42:00.421231+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/cpvxg1vzxzjo?at_medium=RSS&at_campaign=rss",
         "active_doc_id": "e8624882d2b01187983bab68fb450321",
         "member_item_keys": [
@@ -346,7 +347,7 @@
         "signature_text": "finding his spotify playlists increasingly sprinkled with tracks he suspected were ai generated the leipzig based software developer built tool to automatically label and block them from listening it filters out growing list of more than 700 artists drawing on already existing community tracking efforts signs like unusually high release volumes style cover art supplemented external detection tools is about choice if you want",
         "content_fingerprint": "4375d60e59ce400c84b455aec8830239",
         "published_at": "2026-04-27T23:03:10+00:00",
-        "updated_at": "2026-04-28T08:10:55.964587+00:00",
+        "updated_at": "2026-04-28T09:42:00.421231+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/cd7jpg4w181o?at_medium=RSS&at_campaign=rss",
         "active_doc_id": "516c34515fe744cafc6560381810e98e",
         "member_item_keys": [
@@ -362,9 +363,9 @@
         "signature_text": "branches in croydon peckham whitechapel and upton park are testing the new format with trials also under way birmingham wilford nottinghamshire move follows official figures showing shoplifting offences england wales year on increase of about 20 prompting concern across high street prime minister sir keir starmer has described wave retail crime as disgraceful said his government would introduce offence for",
         "content_fingerprint": "0858d31c0e309cf3bf1da9bde00b47ae",
         "published_at": "2026-04-27T16:48:46+00:00",
-        "updated_at": "2026-04-28T08:10:55.964587+00:00",
+        "updated_at": "2026-04-28T09:42:00.421231+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/c8dldv4lqygo?at_medium=RSS&at_campaign=rss",
-        "active_doc_id": "f4afcbbe43a102c0da44d591ac8eefe2",
+        "active_doc_id": "e4417b0e90e1628453095b5cbb3f5583",
         "member_item_keys": [
           "https://www.bbc.com/news/articles/c8dldv4lqygo?at_medium=RSS&at_campaign=rss"
         ],
@@ -378,7 +379,7 @@
         "signature_text": "all claire standalone stores in the uk and ireland have stopped trading after accessories chain financial woes saw it fall into administration twice year administrators kroll said 154 shut more than 300 staff been notified of redundancy though its 350concessions will remain open known for colourful shop fronts racks jewellery bracelets ear piercing services brand bright purple branding was familiar",
         "content_fingerprint": "1520c7e1a1aa78ccedeeef83f161b735",
         "published_at": "2026-04-27T16:36:50+00:00",
-        "updated_at": "2026-04-28T08:10:55.964587+00:00",
+        "updated_at": "2026-04-28T09:42:00.421231+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/cg4047qnpk2o?at_medium=RSS&at_campaign=rss",
         "active_doc_id": "79f19e8ea47638498991672b9f7fd560",
         "member_item_keys": [
@@ -394,7 +395,7 @@
         "signature_text": "james holder 54 went back to the woman home after night out in cheltenham gloucestershire 2022 and then fell asleep on her bed gloucester crown court sitting cirencester was told fashion boss woke up beckoned who trying sleep lounge into bedroom raped haskell prosecuting said prosecution case is that sexually assaulted",
         "content_fingerprint": "f84f35041010ba2d33d028b2d92c1ba8",
         "published_at": "2026-04-27T16:25:51+00:00",
-        "updated_at": "2026-04-28T08:10:55.964587+00:00",
+        "updated_at": "2026-04-28T09:42:00.421231+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/cly7yevvl2wo?at_medium=RSS&at_campaign=rss",
         "active_doc_id": "3885afbeec6af1e0728185b26ffef402",
         "member_item_keys": [
@@ -410,9 +411,9 @@
         "signature_text": "oil prices have risen after plans for second round of peace talks between the us and iran stalled again brent crude global benchmark rose over to 109 80 barrel on monday before falling back slightly president donald trump said saturday that washington had cancelled send team pakistan negotiations with their iranian counterparts energy supplies been under intense pressure since",
         "content_fingerprint": "41d27f7a626680725ac7756f88a7d8b6",
         "published_at": "2026-04-27T20:30:52+00:00",
-        "updated_at": "2026-04-28T08:10:55.964587+00:00",
+        "updated_at": "2026-04-28T09:42:00.421231+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/c15d57pv925o?at_medium=RSS&at_campaign=rss",
-        "active_doc_id": "9740ef19c7712e1a9ffc6b56fb513dd4",
+        "active_doc_id": null,
         "member_item_keys": [
           "https://www.bbc.com/news/articles/c15d57pv925o?at_medium=RSS&at_campaign=rss"
         ],
@@ -428,7 +429,7 @@
         "published_at": "2026-04-27T18:44:10+00:00",
         "updated_at": "2026-04-28T08:10:55.964587+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/c3exel4p1yqo?at_medium=RSS&at_campaign=rss",
-        "active_doc_id": "26027767eea91f6754f3da4a3332932c",
+        "active_doc_id": null,
         "member_item_keys": [
           "https://www.bbc.com/news/articles/c3exel4p1yqo?at_medium=RSS&at_campaign=rss"
         ],
@@ -441,25 +442,30 @@
       "f96d3a749c1c3dd9eaf20762157b2616": "2026-05-12T06:17:03+00:00",
       "819f6aa3f6d1d64a00fb25d816d1784a": "2026-04-28T07:49:44.400229+00:00",
       "b4742f50c8641782ef6748e80d5f47f1": "2026-05-12T05:07:59+00:00",
-      "4b98c9cae9a455215728315441c7b68b": "2026-05-11T23:56:45+00:00",
+      "4b98c9cae9a455215728315441c7b68b": "2026-04-28T09:42:00.421231+00:00",
       "e8624882d2b01187983bab68fb450321": "2026-05-11T23:03:39+00:00",
       "79e11f121284789d6d2ab2f51c886150": "2026-04-28T07:46:41.005039+00:00",
       "9740ef19c7712e1a9ffc6b56fb513dd4": "2026-05-11T20:30:52+00:00",
       "26027767eea91f6754f3da4a3332932c": "2026-05-11T18:44:10+00:00",
       "f6e1a08a05a46e21d5f7c8c7fbdd4fc4": "2026-04-28T07:49:44.400229+00:00",
       "79f19e8ea47638498991672b9f7fd560": "2026-05-11T16:36:50+00:00",
-      "3885afbeec6af1e0728185b26ffef402": "2026-05-11T16:25:51+00:00"
+      "3885afbeec6af1e0728185b26ffef402": "2026-05-11T16:25:51+00:00",
+      "02984976ce77740423c36c7cdb224824": "2026-05-12T08:15:28+00:00",
+      "f4afcbbe43a102c0da44d591ac8eefe2": "2026-04-28T09:21:25.874089+00:00",
+      "c08ce8f9b2d51eef89dc8ce19804f443": "2026-05-12T09:28:56+00:00",
+      "ba4c0c87cc15f9b87f4fa1c9e4db6e40": "2026-05-11T23:56:45+00:00"
     },
-    "last_status": "no_change",
+    "last_status": "success",
     "consecutive_failures": 0,
-    "consecutive_no_change": 1,
-    "total_ingested_count": 12,
+    "consecutive_no_change": 0,
+    "total_ingested_count": 15,
     "last_error": null
   },
   {
     "source_id": "bbc-technology",
-    "last_crawled_at": "2026-04-28T07:46:41.005039+00:00",
+    "last_crawled_at": "2026-04-28T09:47:46.279135+00:00",
     "last_content_hashes": {
+      "https://www.bbc.com/news/articles/cp8486w7de8o?at_medium=RSS&at_campaign=rss": "de30248f1a56118ed2bb16ce9969407f",
       "https://www.bbc.com/news/articles/cd7jpg4w181o?at_medium=RSS&at_campaign=rss": "f2830f3c522777e8b3e8c09574378f1a",
       "https://www.bbc.com/news/articles/cj0v0gr2yz7o?at_medium=RSS&at_campaign=rss": "e73a647ba8e06599966c545b627290ef",
       "https://www.bbc.com/news/articles/cm29qj3e294o?at_medium=RSS&at_campaign=rss": "2e50133c1ec33b81ab1a2e7d1d9ec2f8",
@@ -472,6 +478,7 @@
       "https://www.bbc.com/news/articles/cpqxgxx9nrqo?at_medium=RSS&at_campaign=rss": "ce935733c78ed3af8c41a89fb91d7134"
     },
     "recent_item_keys": [
+      "https://www.bbc.com/news/articles/cp8486w7de8o?at_medium=RSS&at_campaign=rss",
       "https://www.bbc.com/news/articles/cd7jpg4w181o?at_medium=RSS&at_campaign=rss",
       "https://www.bbc.com/news/articles/cj0v0gr2yz7o?at_medium=RSS&at_campaign=rss",
       "https://www.bbc.com/news/articles/cm29qj3e294o?at_medium=RSS&at_campaign=rss",
@@ -484,18 +491,20 @@
       "https://www.bbc.com/news/articles/cpqxgxx9nrqo?at_medium=RSS&at_campaign=rss"
     ],
     "item_published_at": {
+      "https://www.bbc.com/news/articles/cp8486w7de8o?at_medium=RSS&at_campaign=rss": "2026-04-28T09:16:12+00:00",
       "https://www.bbc.com/news/articles/cd7jpg4w181o?at_medium=RSS&at_campaign=rss": "2026-04-27T23:03:10+00:00",
       "https://www.bbc.com/news/articles/cj0v0gr2yz7o?at_medium=RSS&at_campaign=rss": "2026-04-27T12:21:42+00:00",
       "https://www.bbc.com/news/articles/cm29qj3e294o?at_medium=RSS&at_campaign=rss": "2026-04-25T23:03:52+00:00",
       "https://www.bbc.com/news/articles/c4gjkj7975po?at_medium=RSS&at_campaign=rss": "2026-04-25T01:18:33+00:00",
+      "https://www.bbc.co.uk/iplayer/episode/m002vtqb/tech-now-25042026?at_medium=RSS&at_campaign=rss": "2026-04-25T01:00:00+00:00",
       "https://www.bbc.com/news/articles/cq6je7e80r7o?at_medium=RSS&at_campaign=rss": "2026-04-24T22:45:28+00:00",
       "https://www.bbc.com/news/articles/cq8wnzly5j5o?at_medium=RSS&at_campaign=rss": "2026-04-24T14:40:23+00:00",
       "https://www.bbc.com/news/articles/clyedyn6pz7o?at_medium=RSS&at_campaign=rss": "2026-04-24T10:00:42+00:00",
       "https://www.bbc.com/news/articles/crm1y89vek8o?at_medium=RSS&at_campaign=rss": "2026-04-24T07:31:35+00:00",
-      "https://www.bbc.com/news/articles/cpqxgxx9nrqo?at_medium=RSS&at_campaign=rss": "2026-04-24T00:58:58+00:00",
-      "https://www.bbc.co.uk/iplayer/episode/m002vtqb/tech-now-25042026?at_medium=RSS&at_campaign=rss": "2026-04-25T01:00:00+00:00"
+      "https://www.bbc.com/news/articles/cpqxgxx9nrqo?at_medium=RSS&at_campaign=rss": "2026-04-24T00:58:58+00:00"
     },
     "item_content_fingerprints": {
+      "https://www.bbc.com/news/articles/cp8486w7de8o?at_medium=RSS&at_campaign=rss": "b8b7de7c463cea8e7fcf5aa2c920a792",
       "https://www.bbc.com/news/articles/cd7jpg4w181o?at_medium=RSS&at_campaign=rss": "4375d60e59ce400c84b455aec8830239",
       "https://www.bbc.com/news/articles/cj0v0gr2yz7o?at_medium=RSS&at_campaign=rss": "fea0c88b859629f89213362d2b323c66",
       "https://www.bbc.com/news/articles/cm29qj3e294o?at_medium=RSS&at_campaign=rss": "ed6307c84cf8814034f48c7dfd3c56e3",
@@ -508,23 +517,22 @@
       "https://www.bbc.com/news/articles/cpqxgxx9nrqo?at_medium=RSS&at_campaign=rss": "5176096841d6dd15face24ea0d921f04"
     },
     "item_active_doc_ids": {
+      "https://www.bbc.com/news/articles/cp8486w7de8o?at_medium=RSS&at_campaign=rss": "f37283d43a1d0a605aba05a1253726c4",
       "https://www.bbc.com/news/articles/cd7jpg4w181o?at_medium=RSS&at_campaign=rss": "516c34515fe744cafc6560381810e98e",
       "https://www.bbc.com/news/articles/cj0v0gr2yz7o?at_medium=RSS&at_campaign=rss": "a49e991fb5bf760dfe178f7c1a98bcea",
       "https://www.bbc.com/news/articles/cm29qj3e294o?at_medium=RSS&at_campaign=rss": "af827838867d04287412a94ff33439d8",
-      "https://www.bbc.com/news/articles/c4gjkj7975po?at_medium=RSS&at_campaign=rss": "a2aa2947add206ddd8c3a6fb47a30a6c",
       "https://www.bbc.co.uk/iplayer/episode/m002vtqb/tech-now-25042026?at_medium=RSS&at_campaign=rss": "e883a2859522639dc36b5d22783fb9c0",
       "https://www.bbc.com/news/articles/cq6je7e80r7o?at_medium=RSS&at_campaign=rss": "99536244e9727397c53e400433fe3de5",
       "https://www.bbc.com/news/articles/cq8wnzly5j5o?at_medium=RSS&at_campaign=rss": "d943dc1894a75d8a7eefd42cb089f438",
-      "https://www.bbc.com/news/articles/clyedyn6pz7o?at_medium=RSS&at_campaign=rss": "d8728dab453f8a916905c882cb3cd5d9",
-      "https://www.bbc.com/news/articles/crm1y89vek8o?at_medium=RSS&at_campaign=rss": "b0d223bf910111ce28ffafab0bd2e60e",
-      "https://www.bbc.com/news/articles/cpqxgxx9nrqo?at_medium=RSS&at_campaign=rss": "b6ba18849ca55da68aa68d171e514959"
+      "https://www.bbc.com/news/articles/clyedyn6pz7o?at_medium=RSS&at_campaign=rss": "d8728dab453f8a916905c882cb3cd5d9"
     },
     "item_event_cluster_ids": {
+      "https://www.bbc.com/news/articles/cp8486w7de8o?at_medium=RSS&at_campaign=rss": "b289703c0143df65cc23badd6ec35632",
       "https://www.bbc.com/news/articles/cd7jpg4w181o?at_medium=RSS&at_campaign=rss": "13a346c0488de7eb6f596c250c9791eb",
       "https://www.bbc.com/news/articles/cj0v0gr2yz7o?at_medium=RSS&at_campaign=rss": "a1c8a908387f0826233c0072b4272365",
       "https://www.bbc.com/news/articles/cm29qj3e294o?at_medium=RSS&at_campaign=rss": "4ba446c92428ceb39f266843949ee2c4",
       "https://www.bbc.com/news/articles/c4gjkj7975po?at_medium=RSS&at_campaign=rss": "5b31526a1def632c76f73a8106952f57",
-      "https://www.bbc.co.uk/iplayer/episode/m002vtqb/tech-now-25042026?at_medium=RSS&at_campaign=rss": "c14d09123ef092397d4a5ddcbfa37dbd",
+      "https://www.bbc.co.uk/iplayer/episode/m002vtqb/tech-now-25042026?at_medium=RSS&at_campaign=rss": "023a14034d0c84c0c4858d45327ace89",
       "https://www.bbc.com/news/articles/cq6je7e80r7o?at_medium=RSS&at_campaign=rss": "dcc96f5b9d8b79240442a5ec905b2de7",
       "https://www.bbc.com/news/articles/cq8wnzly5j5o?at_medium=RSS&at_campaign=rss": "c14d09123ef092397d4a5ddcbfa37dbd",
       "https://www.bbc.com/news/articles/clyedyn6pz7o?at_medium=RSS&at_campaign=rss": "bbc320d2bcd077522c1cd44422e05fdd",
@@ -555,7 +563,7 @@
         "signature_text": "when pam cronrath husband bill died last year after nearly 60 years of marriage she knew what wanted to do but not exactly how didn expect was that keeping the promise would lead her into world holograms technology more commonly associated with celebrities than memorial services in rural america self confessed tech enthusiast says outlook shaped by career stretched back early",
         "content_fingerprint": "ed6307c84cf8814034f48c7dfd3c56e3",
         "published_at": "2026-04-25T23:03:52+00:00",
-        "updated_at": "2026-04-28T07:46:41.005039+00:00",
+        "updated_at": "2026-04-28T09:47:46.279135+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/cm29qj3e294o?at_medium=RSS&at_campaign=rss",
         "active_doc_id": "af827838867d04287412a94ff33439d8",
         "member_item_keys": [
@@ -568,16 +576,14 @@
         "cluster_id": "5b31526a1def632c76f73a8106952f57",
         "headline": "",
         "summary": "",
-        "signature_text": "ames sherwin smith who is aiming to become the first customer be voted onto board of nationwide in nearly 25 years deserves top marks for perseverance year ago his attempt get name on ballot paper was stymied or so it seemed by data protection rules and forth this time he has necessary 250 nominations development welcome there something democracy deficit",
-        "content_fingerprint": "01b514fd87595229344972e0256ba19c",
-        "published_at": "2026-04-27T18:05:17+00:00",
-        "updated_at": "2026-04-28T07:49:44.400229+00:00",
-        "representative_item_key": "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run",
-        "active_doc_id": "c45a5f53f0a0933f398aaa45421ff073",
+        "signature_text": "but the post from palantir 22 point manifesto of sorts currently has over 30 million views on it is work controversial company co founder and chief executive who criticised belief that all cultures are equal called for universal national service alex karp also disarmament germany japan after world war two an overcorrection backed ai weapons condemned ruthless exposure private",
+        "content_fingerprint": "f67d00aa318a2d5a8b759cc35563a753",
+        "published_at": "2026-04-25T01:18:33+00:00",
+        "updated_at": "2026-04-28T09:47:46.279135+00:00",
+        "representative_item_key": "https://www.bbc.com/news/articles/c4gjkj7975po?at_medium=RSS&at_campaign=rss",
+        "active_doc_id": null,
         "member_item_keys": [
-          "https://www.bbc.com/news/articles/c4gjkj7975po?at_medium=RSS&at_campaign=rss",
-          "https://www.theguardian.com/news/audio/2026/apr/28/secretive-billionaire-bankrolling-nigel-farage-podcast",
-          "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run"
+          "https://www.bbc.com/news/articles/c4gjkj7975po?at_medium=RSS&at_campaign=rss"
         ],
         "last_similarity": 1.0,
         "adjudicated_by_llm": false
@@ -589,7 +595,7 @@
         "signature_text": "professor sir rory collins told the bbc that as biobank boss and also participant he is angry upset about data breach of uk has said few bad apples were behind incident datasets containing de identified information its volunteers made available to researchers at three academic institutions found have been posted for sale on alibaba last week government",
         "content_fingerprint": "5bbee278746588afe13fc1ee8ff05fa8",
         "published_at": "2026-04-24T10:00:42+00:00",
-        "updated_at": "2026-04-28T07:46:41.005039+00:00",
+        "updated_at": "2026-04-28T09:47:46.279135+00:00",
         "representative_item_key": "https://www.bbc.com/news/articles/clyedyn6pz7o?at_medium=RSS&at_campaign=rss",
         "active_doc_id": "d8728dab453f8a916905c882cb3cd5d9",
         "member_item_keys": [
@@ -602,15 +608,14 @@
         "cluster_id": "d7f61a4dc81f2a66a4c775df310d5936",
         "headline": "",
         "summary": "",
-        "signature_text": "there is no guaranteed outcome with any job said shola west 25 media consultant working for yourself at least allows you some control over your fate illustration guardian design getty images as ai erases the bottom rungs of corporate ladder gen workers skip entry level to become their own ceos when ashley terrell graduated from university hawaii in 2024 she planned find marketing maybe",
-        "content_fingerprint": "e99368d3cdddda80dc108a68f6ba928b",
-        "published_at": "2026-04-25T12:00:45+00:00",
-        "updated_at": "2026-04-28T07:56:14.991468+00:00",
-        "representative_item_key": "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai",
+        "signature_text": "the company told employees in memo on thursday that it planned to cut 10 of its workforce roughly 000 staff said would also not fill thousands more open jobs had been hiring for key reason layoffs is meta other areas including ai which will this year spend 135bn 100bn equal amount has spent",
+        "content_fingerprint": "56851eee349da3b0ff4a812042cd90a1",
+        "published_at": "2026-04-24T07:31:35+00:00",
+        "updated_at": "2026-04-28T08:17:08.040024+00:00",
+        "representative_item_key": "https://www.bbc.com/news/articles/crm1y89vek8o?at_medium=RSS&at_campaign=rss",
         "active_doc_id": "8dd79efb5ead3abe6a1a3a649565dbba",
         "member_item_keys": [
-          "https://www.bbc.com/news/articles/crm1y89vek8o?at_medium=RSS&at_campaign=rss",
-          "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai"
+          "https://www.bbc.com/news/articles/crm1y89vek8o?at_medium=RSS&at_campaign=rss"
         ],
         "last_similarity": 1.0,
         "adjudicated_by_llm": false
@@ -619,16 +624,46 @@
         "cluster_id": "60206147ff92c9b8621736e095f4b874",
         "headline": "",
         "summary": "",
-        "signature_text": "on april 24 chinese ai firm deepseek released preview of v4 its long awaited new flagship model the can process much longer prompts than last generation thanks to design that helps it handle large amounts text more efficiently like previous models is open source meaning available for anyone download use and modify marks most significant release reasoning launched",
-        "content_fingerprint": "6030fc75a4b32938c29cca7cdaa3f862",
-        "published_at": "2026-04-24T21:40:58+00:00",
-        "updated_at": "2026-04-28T08:01:38.895006+00:00",
-        "representative_item_key": "https://www.technologyreview.com/2026/04/24/1136422/why-deepseeks-v4-matters",
+        "signature_text": "the white house has said it will work more closely with us artificial intelligence ai firms to combat industrial scale campaigns by foreign actors steal advances in technology michael kratsios director of science and policy wrote an internal memo that administration had new information indicating entities principally based china were exploiting american representative embassy washington dc its development was",
+        "content_fingerprint": "5176096841d6dd15face24ea0d921f04",
+        "published_at": "2026-04-24T00:58:58+00:00",
+        "updated_at": "2026-04-28T08:17:08.040024+00:00",
+        "representative_item_key": "https://www.bbc.com/news/articles/cpqxgxx9nrqo?at_medium=RSS&at_campaign=rss",
         "active_doc_id": "7070348176564af2fc4129756a1a2ae3",
         "member_item_keys": [
-          "https://www.bbc.com/news/articles/cpqxgxx9nrqo?at_medium=RSS&at_campaign=rss",
-          "https://www.technologyreview.com/2026/04/27/1136438/the-download-deepseek-v4-ai-world-models",
-          "https://www.technologyreview.com/2026/04/24/1136422/why-deepseeks-v4-matters"
+          "https://www.bbc.com/news/articles/cpqxgxx9nrqo?at_medium=RSS&at_campaign=rss"
+        ],
+        "last_similarity": 1.0,
+        "adjudicated_by_llm": false
+      },
+      "023a14034d0c84c0c4858d45327ace89": {
+        "cluster_id": "023a14034d0c84c0c4858d45327ace89",
+        "headline": "",
+        "summary": "",
+        "signature_text": "it looks like you re outside of the uk bbc iplayer is only available in if are using proxy or vpn please turn off any these services and try again",
+        "content_fingerprint": "1d8f3fdfc6f308cea2dab03a2938248e",
+        "published_at": "2026-04-25T01:00:00+00:00",
+        "updated_at": "2026-04-28T09:47:46.279135+00:00",
+        "representative_item_key": "https://www.bbc.co.uk/iplayer/episode/m002vtqb/tech-now-25042026?at_medium=RSS&at_campaign=rss",
+        "active_doc_id": null,
+        "member_item_keys": [
+          "https://www.bbc.co.uk/iplayer/episode/m002vtqb/tech-now-25042026?at_medium=RSS&at_campaign=rss"
+        ],
+        "last_similarity": 1.0,
+        "adjudicated_by_llm": false
+      },
+      "b289703c0143df65cc23badd6ec35632": {
+        "cluster_id": "b289703c0143df65cc23badd6ec35632",
+        "headline": "",
+        "summary": "",
+        "signature_text": "valve has announced its new steam controller will be available to order from may and cost 85 in the uk 99 us prices that have raised eyebrows among some gamers more expensive than standard controllers nintendo xbox playstation but we do live time where companies including sony microsoft are selling premium for 150 200 said chris scullion",
+        "content_fingerprint": "b8b7de7c463cea8e7fcf5aa2c920a792",
+        "published_at": "2026-04-28T09:16:12+00:00",
+        "updated_at": "2026-04-28T09:17:31.802146+00:00",
+        "representative_item_key": "https://www.bbc.com/news/articles/cp8486w7de8o?at_medium=RSS&at_campaign=rss",
+        "active_doc_id": "f37283d43a1d0a605aba05a1253726c4",
+        "member_item_keys": [
+          "https://www.bbc.com/news/articles/cp8486w7de8o?at_medium=RSS&at_campaign=rss"
         ],
         "last_similarity": 1.0,
         "adjudicated_by_llm": false
@@ -646,17 +681,20 @@
       "b0d223bf910111ce28ffafab0bd2e60e": "2026-04-28T07:56:14.991468+00:00",
       "b6ba18849ca55da68aa68d171e514959": "2026-04-28T08:01:38.895006+00:00",
       "910a39a477facf714b61e36889e4e63c": "2026-04-28T07:49:44.400229+00:00",
-      "25c65b5ce58b2113d1dce4c008ae72ae": "2026-04-28T08:01:38.895006+00:00"
+      "25c65b5ce58b2113d1dce4c008ae72ae": "2026-04-28T08:01:38.895006+00:00",
+      "c45a5f53f0a0933f398aaa45421ff073": "2026-04-28T08:51:19.898249+00:00",
+      "f37283d43a1d0a605aba05a1253726c4": "2026-05-12T09:16:12+00:00",
+      "a7bbf6c84cd16181360c779490f466e8": "2026-04-28T09:21:25.874089+00:00"
     },
-    "last_status": "success",
+    "last_status": "no_change",
     "consecutive_failures": 0,
-    "consecutive_no_change": 0,
-    "total_ingested_count": 10,
+    "consecutive_no_change": 1,
+    "total_ingested_count": 11,
     "last_error": null
   },
   {
     "source_id": "chinanews-finance",
-    "last_crawled_at": "2026-04-28T07:49:33.675829+00:00",
+    "last_crawled_at": "2026-04-28T08:50:06.734893+00:00",
     "last_content_hashes": {},
     "recent_item_keys": [],
     "item_published_at": {},
@@ -667,13 +705,13 @@
     "doc_expires_at": {},
     "last_status": "no_change",
     "consecutive_failures": 0,
-    "consecutive_no_change": 1,
+    "consecutive_no_change": 2,
     "total_ingested_count": 0,
     "last_error": null
   },
   {
     "source_id": "chinanews-scroll-news",
-    "last_crawled_at": "2026-04-28T07:49:38.793045+00:00",
+    "last_crawled_at": "2026-04-28T08:50:14.281161+00:00",
     "last_content_hashes": {},
     "recent_item_keys": [],
     "item_published_at": {},
@@ -684,16 +722,16 @@
     "doc_expires_at": {},
     "last_status": "no_change",
     "consecutive_failures": 0,
-    "consecutive_no_change": 1,
+    "consecutive_no_change": 2,
     "total_ingested_count": 0,
     "last_error": null
   },
   {
     "source_id": "guardian-business",
-    "last_crawled_at": "2026-04-28T07:49:44.400229+00:00",
+    "last_crawled_at": "2026-04-28T09:21:25.874089+00:00",
     "last_content_hashes": {
-      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "3dd9dd11ac3dac0c393bd50d923034a5",
-      "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "eeca48402941d9877ebc6633a5efdac1",
+      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "4fb07f518080672bcb16d063fc0825a0",
+      "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "b2e6cd1d31cddfa296ffb76b84294832",
       "https://www.theguardian.com/money/2026/apr/28/ee-broadband-tv-deal-terminate-contract": "8dd86ffbb237ed6c9b197a639b1f724c",
       "https://www.theguardian.com/business/2026/apr/28/rachel-reevess-fiscal-rules-buffer-should-be-significantly-larger-say-peers": "99235305c11ec9efa17ef1efc782c1c1",
       "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "31b2388e301121ce03d066d1013c3782",
@@ -701,7 +739,7 @@
       "https://www.theguardian.com/money/2026/apr/28/uk-has-wealthy-europes-third-highest-rate-of-18-to-24-year-olds-not-in-work-or-study": "ee1f8e11fae7ebd652e6a6a180ec1320",
       "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit": "151d53a1485b1490e87115068a6769e8",
       "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "dc6c72d6d6b509f4e55fa351076167a2",
-      "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "f1db8f8e4ea9feb52ef4271b0db4d726",
+      "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "a3fb08c421f9efa298838e70b72176f6",
       "https://www.theguardian.com/business/2026/apr/27/spirit-airlines-trump-bailout": "6f6479f6a1b3b14902fd6a176b11cd1d",
       "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "d22121d1b0801260fcadcdb0312a43ac"
     },
@@ -720,7 +758,7 @@
       "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning"
     ],
     "item_published_at": {
-      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "2026-04-28T07:40:35+00:00",
+      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "2026-04-28T08:51:36+00:00",
       "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "2026-04-28T06:00:43+00:00",
       "https://www.theguardian.com/money/2026/apr/28/ee-broadband-tv-deal-terminate-contract": "2026-04-28T06:00:43+00:00",
       "https://www.theguardian.com/business/2026/apr/28/rachel-reevess-fiscal-rules-buffer-should-be-significantly-larger-say-peers": "2026-04-28T04:00:40+00:00",
@@ -748,16 +786,15 @@
       "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "1052aaed924d05936e7dae8e8353a904"
     },
     "item_active_doc_ids": {
-      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "bac09f12fef785d9a69eeaf2db54b0a1",
-      "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "f4afcbbe43a102c0da44d591ac8eefe2",
+      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "042ec6df61f0402a9765865ae7a0e21a",
+      "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "e4417b0e90e1628453095b5cbb3f5583",
       "https://www.theguardian.com/money/2026/apr/28/ee-broadband-tv-deal-terminate-contract": "835ea3a3d01a4fc62d8a6aff3aded401",
       "https://www.theguardian.com/business/2026/apr/28/rachel-reevess-fiscal-rules-buffer-should-be-significantly-larger-say-peers": "9091a9df79a494a713f7476ada7058ff",
       "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "70cb98370711bd0687b26c940752a238",
       "https://www.theguardian.com/news/audio/2026/apr/28/secretive-billionaire-bankrolling-nigel-farage-podcast": "910a39a477facf714b61e36889e4e63c",
       "https://www.theguardian.com/money/2026/apr/28/uk-has-wealthy-europes-third-highest-rate-of-18-to-24-year-olds-not-in-work-or-study": "bebc14ddb3d65b67e03c9202e8ae73cf",
-      "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit": "8ad0b03d77ea244940a867af0b727857",
       "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "c45a5f53f0a0933f398aaa45421ff073",
-      "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "1ae95f902ea1c5eaaeb88765ad3dc39b",
+      "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "7a04b6c4a8a75e9ba05a429154ed1e3d",
       "https://www.theguardian.com/business/2026/apr/27/spirit-airlines-trump-bailout": "5286feedfc5e7ccbae958ea36d0a45db",
       "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "09a4433f2c4f731f25c2a0e9eeefee49"
     },
@@ -766,8 +803,8 @@
       "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "78013e674afb442c9f1aa45be1ff6770",
       "https://www.theguardian.com/money/2026/apr/28/ee-broadband-tv-deal-terminate-contract": "982bca09a07185282f9f2b24acddf22e",
       "https://www.theguardian.com/business/2026/apr/28/rachel-reevess-fiscal-rules-buffer-should-be-significantly-larger-say-peers": "b92361688dda057d3cb57331f21bc751",
-      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "884713d9b75c228ee2fac72c3d45a806",
-      "https://www.theguardian.com/news/audio/2026/apr/28/secretive-billionaire-bankrolling-nigel-farage-podcast": "5b31526a1def632c76f73a8106952f57",
+      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "ea04f1f996bb61d9d3c66253573d678e",
+      "https://www.theguardian.com/news/audio/2026/apr/28/secretive-billionaire-bankrolling-nigel-farage-podcast": "738829d8cb38139b4554a00139eb15f9",
       "https://www.theguardian.com/money/2026/apr/28/uk-has-wealthy-europes-third-highest-rate-of-18-to-24-year-olds-not-in-work-or-study": "6121aa52498924ff89b91f5f0a6d1c37",
       "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit": "6566a3aa57627991585c4b16bdf3dc44",
       "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "5b31526a1def632c76f73a8106952f57",
@@ -780,17 +817,18 @@
         "cluster_id": "6ea4258db347396a184a8028c8e540a0",
         "headline": "",
         "summary": "",
-        "signature_text": "the iran war has helped to double its profits in first quarter of this year latest financial results show oil major just reported that it made profit nearly 2bn three months 2026 on favoured underlying replacement cost earnings measure higher than city analysts had predicted with bp which was giving some credit an exceptional contribution from",
-        "content_fingerprint": "315c5d3665c21470138e3e5c8a24fef3",
-        "published_at": "2026-04-28T07:40:35+00:00",
-        "updated_at": "2026-04-28T07:49:44.400229+00:00",
-        "representative_item_key": "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates",
-        "active_doc_id": "bac09f12fef785d9a69eeaf2db54b0a1",
+        "signature_text": "bp profits for the first three months of year have more than doubled following surge in oil prices since beginning iran war its results conflict broke out energy giant reported 2bn 4bn between january and march after an exceptional performance trading business figure was higher analysts had expected far ahead income same",
+        "content_fingerprint": "34a0e68f35c501edce0c0f149e37b04b",
+        "published_at": "2026-04-28T09:28:56+00:00",
+        "updated_at": "2026-04-28T09:42:00.421231+00:00",
+        "representative_item_key": "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss",
+        "active_doc_id": "c08ce8f9b2d51eef89dc8ce19804f443",
         "member_item_keys": [
-          "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates"
+          "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates",
+          "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss"
         ],
         "last_similarity": 1.0,
-        "adjudicated_by_llm": false
+        "adjudicated_by_llm": true
       },
       "982bca09a07185282f9f2b24acddf22e": {
         "cluster_id": "982bca09a07185282f9f2b24acddf22e",
@@ -799,7 +837,7 @@
         "signature_text": "photograph marek slusarczyk alamy after my husband died suddenly discovered he had been paying 171 month for our broadband and tv contract ee initially offered me monthly deal at 44 99 on the phone there followed two letters one day apart cheerily addressed to late first stated that would have pay 007 terminate his second giving termination fee of 520 persuaded",
         "content_fingerprint": "15fae4431705372e862ba7e0917ec111",
         "published_at": "2026-04-28T06:00:43+00:00",
-        "updated_at": "2026-04-28T07:49:44.400229+00:00",
+        "updated_at": "2026-04-28T09:21:25.874089+00:00",
         "representative_item_key": "https://www.theguardian.com/money/2026/apr/28/ee-broadband-tv-deal-terminate-contract",
         "active_doc_id": "835ea3a3d01a4fc62d8a6aff3aded401",
         "member_item_keys": [
@@ -815,7 +853,7 @@
         "signature_text": "the number of 16 to 24 year olds who are not in education employment or training neets has reached almost million highest level more than decade photograph marcin rogozinski alamy britain third rate young people work among europe richest countries because rising ill health and failing system benefits job support report warned resolution foundation thinktank said",
         "content_fingerprint": "d17545d9a7cbc1f76058c899fb9cba4b",
         "published_at": "2026-04-27T23:01:33+00:00",
-        "updated_at": "2026-04-28T07:49:44.400229+00:00",
+        "updated_at": "2026-04-28T09:21:25.874089+00:00",
         "representative_item_key": "https://www.theguardian.com/money/2026/apr/28/uk-has-wealthy-europes-third-highest-rate-of-18-to-24-year-olds-not-in-work-or-study",
         "active_doc_id": "bebc14ddb3d65b67e03c9202e8ae73cf",
         "member_item_keys": [
@@ -828,16 +866,14 @@
         "cluster_id": "6566a3aa57627991585c4b16bdf3dc44",
         "headline": "",
         "summary": "",
-        "signature_text": "after yearslong legal feud elon musk and openai ceo sam altman are heading to trial this week in northern california case that could have sweeping consequences ahead of highly anticipated ipo the court rule on whether company is allowed exist as for profit enterprise might even oust its current executive leadership including suing alleging president greg brockman deceived",
-        "content_fingerprint": "5c009fe02d242695f904ba952e354fbb",
-        "published_at": "2026-04-27T22:52:57+00:00",
-        "updated_at": "2026-04-28T08:01:38.895006+00:00",
-        "representative_item_key": "https://www.technologyreview.com/2026/04/27/1136466/elon-musk-and-sam-altman-are-going-to-court-over-openais-future",
+        "signature_text": "trialbetween two of silicon valley biggest tycoons kicked off on monday in california the culmination years long bitter feud has accused betraying founding agreement non profit they started together openai by changing it to for enterprise jury selection began at federal courthouse oakland with judge yvonne gonzalez rogers presiding as she assured dozens prospective jurors that this trial wasn going",
+        "content_fingerprint": "08202c3c078afac5d4d4eb2310c0cf20",
+        "published_at": "2026-04-27T20:29:04+00:00",
+        "updated_at": "2026-04-28T08:20:40.075959+00:00",
+        "representative_item_key": "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit",
         "active_doc_id": "253b7ec0d8c46248f0234b6cfa36f933",
         "member_item_keys": [
-          "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit",
-          "https://www.theguardian.com/technology/2026/apr/26/musk-altman-openai-court",
-          "https://www.technologyreview.com/2026/04/27/1136466/elon-musk-and-sam-altman-are-going-to-court-over-openais-future"
+          "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit"
         ],
         "last_similarity": 1.0,
         "adjudicated_by_llm": false
@@ -849,14 +885,14 @@
         "signature_text": "shell said that the deal will boost production growth from year to and add 2bn barrels its proven probable reserves photograph piroschka van de wouw reuters has agreed buy canadian shale producer arc resources for 16 4bn five years after europe biggest gas oil which includes 13 6bn in cash shares taking on 8bn debt would be acquisition since",
         "content_fingerprint": "4f3c8384a4a5ef9e689311e33e052973",
         "published_at": "2026-04-27T17:35:04+00:00",
-        "updated_at": "2026-04-28T07:49:44.400229+00:00",
+        "updated_at": "2026-04-28T08:51:19.898249+00:00",
         "representative_item_key": "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn",
-        "active_doc_id": "1ae95f902ea1c5eaaeb88765ad3dc39b",
+        "active_doc_id": "7a04b6c4a8a75e9ba05a429154ed1e3d",
         "member_item_keys": [
           "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn"
         ],
         "last_similarity": 1.0,
-        "adjudicated_by_llm": false
+        "adjudicated_by_llm": true
       },
       "208b22b519fe92de7ad9fa21fca27fdd": {
         "cluster_id": "208b22b519fe92de7ad9fa21fca27fdd",
@@ -865,7 +901,7 @@
         "signature_text": "officials from the bank of england are expected to join meeting government emergency cobra committee on tuesday photograph tolga akmen epa world most powerful central banks poised hold borrowing costs unchanged this week amid growing concerns over unfolding inflation shock iran war in critical for global economy each g7 issue warnings",
         "content_fingerprint": "1052aaed924d05936e7dae8e8353a904",
         "published_at": "2026-04-27T09:30:55+00:00",
-        "updated_at": "2026-04-28T07:49:44.400229+00:00",
+        "updated_at": "2026-04-28T08:20:40.075959+00:00",
         "representative_item_key": "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning",
         "active_doc_id": "09a4433f2c4f731f25c2a0e9eeefee49",
         "member_item_keys": [
@@ -873,10 +909,42 @@
         ],
         "last_similarity": 1.0,
         "adjudicated_by_llm": false
+      },
+      "ea04f1f996bb61d9d3c66253573d678e": {
+        "cluster_id": "ea04f1f996bb61d9d3c66253573d678e",
+        "headline": "",
+        "summary": "",
+        "signature_text": "robot pushes cargo container during media demonstration at haneda airport in tokyo on monday the chinese made humanoids will move luggage and tarmac trial basis from may photograph kyodo news getty images japan airlines introduce robots for run amid country surge inbound tourism worsening labour shortages famously conscientious but overburdened baggage handlers soon be joined by extra staff",
+        "content_fingerprint": "23e09a91425371200c62f96aba150f97",
+        "published_at": "2026-04-28T03:14:34+00:00",
+        "updated_at": "2026-04-28T08:20:40.075959+00:00",
+        "representative_item_key": "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports",
+        "active_doc_id": null,
+        "member_item_keys": [
+          "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports"
+        ],
+        "last_similarity": 1.0,
+        "adjudicated_by_llm": false
+      },
+      "738829d8cb38139b4554a00139eb15f9": {
+        "cluster_id": "738829d8cb38139b4554a00139eb15f9",
+        "headline": "",
+        "summary": "",
+        "signature_text": "the crypto tycoon has given millions to farage political parties but who is christopher harborne and what does he want in return one balmy evening last year at kamalaya wellness sanctuary thailand resort manager welcomed guests talk on longevity anti ageing medicine first speaker was thai doctor with impeccable credentials second owner chakrit sakunkrit better known as",
+        "content_fingerprint": "182e129c22a946185a7a1db85691cf54",
+        "published_at": "2026-04-28T02:00:36+00:00",
+        "updated_at": "2026-04-28T09:21:25.874089+00:00",
+        "representative_item_key": "https://www.theguardian.com/news/audio/2026/apr/28/secretive-billionaire-bankrolling-nigel-farage-podcast",
+        "active_doc_id": null,
+        "member_item_keys": [
+          "https://www.theguardian.com/news/audio/2026/apr/28/secretive-billionaire-bankrolling-nigel-farage-podcast"
+        ],
+        "last_similarity": 1.0,
+        "adjudicated_by_llm": false
       }
     },
     "doc_expires_at": {
-      "bac09f12fef785d9a69eeaf2db54b0a1": "2026-05-12T07:40:35+00:00",
+      "bac09f12fef785d9a69eeaf2db54b0a1": "2026-04-28T08:20:40.075959+00:00",
       "f4afcbbe43a102c0da44d591ac8eefe2": "2026-05-12T06:00:43+00:00",
       "835ea3a3d01a4fc62d8a6aff3aded401": "2026-05-12T06:00:43+00:00",
       "9091a9df79a494a713f7476ada7058ff": "2026-05-12T04:00:40+00:00",
@@ -885,21 +953,29 @@
       "bebc14ddb3d65b67e03c9202e8ae73cf": "2026-05-11T23:01:33+00:00",
       "8ad0b03d77ea244940a867af0b727857": "2026-04-28T07:56:14.991468+00:00",
       "c45a5f53f0a0933f398aaa45421ff073": "2026-05-11T18:05:17+00:00",
-      "1ae95f902ea1c5eaaeb88765ad3dc39b": "2026-05-11T17:35:04+00:00",
+      "1ae95f902ea1c5eaaeb88765ad3dc39b": "2026-04-28T08:51:19.898249+00:00",
       "5286feedfc5e7ccbae958ea36d0a45db": "2026-05-11T11:00:08+00:00",
       "09a4433f2c4f731f25c2a0e9eeefee49": "2026-05-11T09:30:55+00:00",
       "f58cdc5dd18846f6c705c6f6096c10a1": "2026-04-28T07:56:14.991468+00:00",
-      "8d86da2011c97d07b396e463eba3acd4": "2026-04-28T08:01:38.895006+00:00"
+      "8d86da2011c97d07b396e463eba3acd4": "2026-04-28T08:01:38.895006+00:00",
+      "bba05d5c0158320efc36b424d980be79": "2026-04-28T08:51:19.898249+00:00",
+      "512eb7c111368d738609e35b05a07032": "2026-04-28T09:11:22.170995+00:00",
+      "e124a1d87cc653a316e193fa66d32949": "2026-04-28T09:21:25.874089+00:00",
+      "a7bbf6c84cd16181360c779490f466e8": "2026-05-11T18:05:17+00:00",
+      "7a04b6c4a8a75e9ba05a429154ed1e3d": "2026-05-11T17:35:04+00:00",
+      "02984976ce77740423c36c7cdb224824": "2026-04-28T09:21:25.874089+00:00",
+      "042ec6df61f0402a9765865ae7a0e21a": "2026-04-28T09:42:00.421231+00:00",
+      "e4417b0e90e1628453095b5cbb3f5583": "2026-05-12T06:00:43+00:00"
     },
     "last_status": "success",
     "consecutive_failures": 0,
     "consecutive_no_change": 0,
-    "total_ingested_count": 12,
+    "total_ingested_count": 21,
     "last_error": null
   },
   {
     "source_id": "guardian-technology",
-    "last_crawled_at": "2026-04-28T07:56:14.991468+00:00",
+    "last_crawled_at": "2026-04-28T09:27:55.996361+00:00",
     "last_content_hashes": {
       "https://www.theguardian.com/technology/2026/apr/28/apple-macbook-pro-m5-review-serious-power-still-long-battery-life": "a395f8d82d4f68925a4b9c4a0ddf363e",
       "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit": "151d53a1485b1490e87115068a6769e8",
@@ -908,19 +984,25 @@
       "https://www.theguardian.com/technology/2026/apr/26/musk-altman-openai-court": "220f78313788353008a4c15af335ee2b",
       "https://www.theguardian.com/technology/2026/apr/26/uk-departments-at-odds-over-energy-demands-of-ai-datacentres": "b395ccad6d362f5ba045697c0e407348",
       "https://www.theguardian.com/technology/2026/apr/26/cannes-ai-film-festival-raises-eyebrows-questions-future": "d1d2dd6a5770f25392ea70263c8e54e5",
-      "https://www.theguardian.com/money/2026/apr/26/ghost-mot-drivers-warned-fake-certificates-repair-bills-tests": "979bfb6bd2062d04bb675afb0e25bcdf",
+      "https://www.theguardian.com/money/2026/apr/26/ghost-mot-drivers-warned-fake-certificates-repair-bills-tests": "cc5447a7971fc9b0f638b9b0542fda5b",
       "https://www.theguardian.com/uk-news/2026/apr/25/met-police-investigates-hundreds-officers-palantir-ai-tool": "1507000786917de7e4619551214004d2",
-      "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai": "41250d3106c647402891df882889f0e9"
+      "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai": "41250d3106c647402891df882889f0e9",
+      "https://www.theguardian.com/technology/2026/apr/28/zine-creators-fight-to-resist-ai-influence": "58010617f0ed04b1e56e38ee354aa634",
+      "https://www.theguardian.com/global-development/2026/apr/28/lebanese-women-smatouha-minni-you-heard-it-from-me-feminist-youtube-series-satire": "709fb8eaec55036e698f8292f1044fd9",
+      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "83ac885a95bb9b0ffaec16154f55ee9e"
     },
     "recent_item_keys": [
+      "https://www.theguardian.com/technology/2026/apr/28/zine-creators-fight-to-resist-ai-influence",
+      "https://www.theguardian.com/global-development/2026/apr/28/lebanese-women-smatouha-minni-you-heard-it-from-me-feminist-youtube-series-satire",
       "https://www.theguardian.com/technology/2026/apr/28/apple-macbook-pro-m5-review-serious-power-still-long-battery-life",
+      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports",
       "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit",
       "https://www.theguardian.com/books/2026/apr/27/the-one-change-that-worked-i-swapped-doomscrolling-for-reading-comic-books",
       "https://www.theguardian.com/news/audio/2026/apr/27/inside-chinas-robotics-revolution-podcast",
       "https://www.theguardian.com/technology/2026/apr/26/musk-altman-openai-court",
       "https://www.theguardian.com/technology/2026/apr/26/uk-departments-at-odds-over-energy-demands-of-ai-datacentres",
-      "https://www.theguardian.com/technology/2026/apr/26/cannes-ai-film-festival-raises-eyebrows-questions-future",
       "https://www.theguardian.com/money/2026/apr/26/ghost-mot-drivers-warned-fake-certificates-repair-bills-tests",
+      "https://www.theguardian.com/technology/2026/apr/26/cannes-ai-film-festival-raises-eyebrows-questions-future",
       "https://www.theguardian.com/uk-news/2026/apr/25/met-police-investigates-hundreds-officers-palantir-ai-tool",
       "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai"
     ],
@@ -934,7 +1016,10 @@
       "https://www.theguardian.com/technology/2026/apr/26/cannes-ai-film-festival-raises-eyebrows-questions-future": "2026-04-26T06:00:07+00:00",
       "https://www.theguardian.com/money/2026/apr/26/ghost-mot-drivers-warned-fake-certificates-repair-bills-tests": "2026-04-26T06:00:07+00:00",
       "https://www.theguardian.com/uk-news/2026/apr/25/met-police-investigates-hundreds-officers-palantir-ai-tool": "2026-04-25T15:34:10+00:00",
-      "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai": "2026-04-25T12:00:45+00:00"
+      "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai": "2026-04-25T12:00:45+00:00",
+      "https://www.theguardian.com/technology/2026/apr/28/zine-creators-fight-to-resist-ai-influence": "2026-04-28T09:00:46+00:00",
+      "https://www.theguardian.com/global-development/2026/apr/28/lebanese-women-smatouha-minni-you-heard-it-from-me-feminist-youtube-series-satire": "2026-04-28T08:00:44+00:00",
+      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "2026-04-28T03:14:34+00:00"
     },
     "item_content_fingerprints": {
       "https://www.theguardian.com/technology/2026/apr/28/apple-macbook-pro-m5-review-serious-power-still-long-battery-life": "18f5a0a8218289ede144e87661b19d7b",
@@ -946,7 +1031,10 @@
       "https://www.theguardian.com/technology/2026/apr/26/cannes-ai-film-festival-raises-eyebrows-questions-future": "0ea49a113c766c7cc8482519f3b0358a",
       "https://www.theguardian.com/money/2026/apr/26/ghost-mot-drivers-warned-fake-certificates-repair-bills-tests": "f8c2502e1c6d0c63810eb506b4c92059",
       "https://www.theguardian.com/uk-news/2026/apr/25/met-police-investigates-hundreds-officers-palantir-ai-tool": "d1129155991d6d2df48d3fe9bc362d8d",
-      "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai": "e99368d3cdddda80dc108a68f6ba928b"
+      "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai": "e99368d3cdddda80dc108a68f6ba928b",
+      "https://www.theguardian.com/technology/2026/apr/28/zine-creators-fight-to-resist-ai-influence": "1ba1f6136a02aabe58ae591883a2a55f",
+      "https://www.theguardian.com/global-development/2026/apr/28/lebanese-women-smatouha-minni-you-heard-it-from-me-feminist-youtube-series-satire": "de60d9407bd4e4eae85aa81448734ac7",
+      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "23e09a91425371200c62f96aba150f97"
     },
     "item_active_doc_ids": {
       "https://www.theguardian.com/technology/2026/apr/28/apple-macbook-pro-m5-review-serious-power-still-long-battery-life": "cb4dd0f0d347f7dd847ae81b6925e704",
@@ -956,21 +1044,27 @@
       "https://www.theguardian.com/technology/2026/apr/26/musk-altman-openai-court": "8d86da2011c97d07b396e463eba3acd4",
       "https://www.theguardian.com/technology/2026/apr/26/uk-departments-at-odds-over-energy-demands-of-ai-datacentres": "b55eb1d3e0a68da4a3d81e9acd891140",
       "https://www.theguardian.com/technology/2026/apr/26/cannes-ai-film-festival-raises-eyebrows-questions-future": "7f216bab1bc77afcacbd9b5db3469b38",
-      "https://www.theguardian.com/money/2026/apr/26/ghost-mot-drivers-warned-fake-certificates-repair-bills-tests": "3024e8b4f6257e006d6e17f7fc80a0a8",
+      "https://www.theguardian.com/money/2026/apr/26/ghost-mot-drivers-warned-fake-certificates-repair-bills-tests": "fe86c7e65160b6fd53b196076ee2dbcd",
       "https://www.theguardian.com/uk-news/2026/apr/25/met-police-investigates-hundreds-officers-palantir-ai-tool": "f93d4c26242fe206ef7f84ff0ba07597",
-      "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai": "8dd79efb5ead3abe6a1a3a649565dbba"
+      "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai": "8dd79efb5ead3abe6a1a3a649565dbba",
+      "https://www.theguardian.com/technology/2026/apr/28/zine-creators-fight-to-resist-ai-influence": "bd4566b15b61131f1f30cd36bdb23516",
+      "https://www.theguardian.com/global-development/2026/apr/28/lebanese-women-smatouha-minni-you-heard-it-from-me-feminist-youtube-series-satire": "6c955cfffddad8b2dcc4e5d13a144f67",
+      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "96694ae5c3c52751e093b12970b7be1f"
     },
     "item_event_cluster_ids": {
       "https://www.theguardian.com/technology/2026/apr/28/apple-macbook-pro-m5-review-serious-power-still-long-battery-life": "7a53ef3e28f9ae419a9cc8c600162421",
       "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit": "6566a3aa57627991585c4b16bdf3dc44",
       "https://www.theguardian.com/books/2026/apr/27/the-one-change-that-worked-i-swapped-doomscrolling-for-reading-comic-books": "e2aef9522501f6e9798f299223073bb7",
-      "https://www.theguardian.com/news/audio/2026/apr/27/inside-chinas-robotics-revolution-podcast": "884713d9b75c228ee2fac72c3d45a806",
+      "https://www.theguardian.com/news/audio/2026/apr/27/inside-chinas-robotics-revolution-podcast": "4688c5e603b76736eef9cb87b6ac9eac",
       "https://www.theguardian.com/technology/2026/apr/26/musk-altman-openai-court": "6566a3aa57627991585c4b16bdf3dc44",
       "https://www.theguardian.com/technology/2026/apr/26/uk-departments-at-odds-over-energy-demands-of-ai-datacentres": "7f3fcac6647e712b96967c209c3e9558",
       "https://www.theguardian.com/technology/2026/apr/26/cannes-ai-film-festival-raises-eyebrows-questions-future": "884713d9b75c228ee2fac72c3d45a806",
       "https://www.theguardian.com/money/2026/apr/26/ghost-mot-drivers-warned-fake-certificates-repair-bills-tests": "a31fcd4594d0a4aecf5b006408854e59",
       "https://www.theguardian.com/uk-news/2026/apr/25/met-police-investigates-hundreds-officers-palantir-ai-tool": "49ed87649ed46a07134ed95948ff06f7",
-      "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai": "d7f61a4dc81f2a66a4c775df310d5936"
+      "https://www.theguardian.com/technology/ng-interactive/2026/apr/25/gen-z-entrepreneurs-business-ai": "d7f61a4dc81f2a66a4c775df310d5936",
+      "https://www.theguardian.com/technology/2026/apr/28/zine-creators-fight-to-resist-ai-influence": "884713d9b75c228ee2fac72c3d45a806",
+      "https://www.theguardian.com/global-development/2026/apr/28/lebanese-women-smatouha-minni-you-heard-it-from-me-feminist-youtube-series-satire": "7debc6012c2a582b16c183bbf93a884e",
+      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "3bb4569ea7a1973be9dca45c6e296872"
     },
     "event_clusters": {
       "7a53ef3e28f9ae419a9cc8c600162421": {
@@ -980,7 +1074,7 @@
         "signature_text": "no other laptop can provide this level of performance with long battery life thanks to apple top tier m5 pro and max chips photograph samuel gibbs the guardian sets new bar more storage plenty options but now has two specs depending on processor pple macs have been roll year faster it time for its workhorse",
         "content_fingerprint": "18f5a0a8218289ede144e87661b19d7b",
         "published_at": "2026-04-28T06:00:43+00:00",
-        "updated_at": "2026-04-28T07:56:14.991468+00:00",
+        "updated_at": "2026-04-28T09:27:55.996361+00:00",
         "representative_item_key": "https://www.theguardian.com/technology/2026/apr/28/apple-macbook-pro-m5-review-serious-power-still-long-battery-life",
         "active_doc_id": "cb4dd0f0d347f7dd847ae81b6925e704",
         "member_item_keys": [
@@ -996,7 +1090,7 @@
         "signature_text": "after donald trump second election realised the insidious hold my phone had over life so turned to something loved in childhood better occupy attention fter long day of looking at screens for work used go bed and stare until fell asleep when not doomscrolling news headlines crash out hateful comments on social media or revisit workplace dramas via mobile versions teams",
         "content_fingerprint": "d9b6849538616541e70db8a556a7489c",
         "published_at": "2026-04-27T10:00:07+00:00",
-        "updated_at": "2026-04-28T07:56:14.991468+00:00",
+        "updated_at": "2026-04-28T08:26:47.436668+00:00",
         "representative_item_key": "https://www.theguardian.com/books/2026/apr/27/the-one-change-that-worked-i-swapped-doomscrolling-for-reading-comic-books",
         "active_doc_id": "42e213dea9ad025a0c542acd41faf1a1",
         "member_item_keys": [
@@ -1012,7 +1106,7 @@
         "signature_text": "one vision of the uk future involves decarbonised economy powered by clean renewable energy another making an ai superpower department science innovation and technology dsit thinks datacentres will consume security net zero desnz appears to think they use less than tenth that tim squirrell head strategy for ngo foxglove said government cluelessness over environmental",
         "content_fingerprint": "d55a1ac738ddd2ebeee0e9a5eafe16bc",
         "published_at": "2026-04-26T07:00:08+00:00",
-        "updated_at": "2026-04-28T07:56:14.991468+00:00",
+        "updated_at": "2026-04-28T09:27:55.996361+00:00",
         "representative_item_key": "https://www.theguardian.com/technology/2026/apr/26/uk-departments-at-odds-over-energy-demands-of-ai-datacentres",
         "active_doc_id": "b55eb1d3e0a68da4a3d81e9acd891140",
         "member_item_keys": [
@@ -1028,9 +1122,9 @@
         "signature_text": "you have just bought secondhand car it was older than wanted but were reassured because had recently passed its mot within few days notice problem with the steering and take into garage to be checked as well that issue they find tread depth of tyres is so low should not test been victim ghost although",
         "content_fingerprint": "f8c2502e1c6d0c63810eb506b4c92059",
         "published_at": "2026-04-26T06:00:07+00:00",
-        "updated_at": "2026-04-28T07:56:14.991468+00:00",
+        "updated_at": "2026-04-28T09:27:55.996361+00:00",
         "representative_item_key": "https://www.theguardian.com/money/2026/apr/26/ghost-mot-drivers-warned-fake-certificates-repair-bills-tests",
-        "active_doc_id": "3024e8b4f6257e006d6e17f7fc80a0a8",
+        "active_doc_id": "fe86c7e65160b6fd53b196076ee2dbcd",
         "member_item_keys": [
           "https://www.theguardian.com/money/2026/apr/26/ghost-mot-drivers-warned-fake-certificates-repair-bills-tests"
         ],
@@ -1044,11 +1138,59 @@
         "signature_text": "the met said corruption was most consistent offence detected with misconduct related to abuse of it system that rosters shifts by police officers for personal or financial gain photograph cliff hide general news alamy have launched investigations into hundreds after using an ai tool built controversial tech company palantir root out rogue cops software deployed over course",
         "content_fingerprint": "d1129155991d6d2df48d3fe9bc362d8d",
         "published_at": "2026-04-25T15:34:10+00:00",
-        "updated_at": "2026-04-28T07:56:14.991468+00:00",
+        "updated_at": "2026-04-28T08:26:47.436668+00:00",
         "representative_item_key": "https://www.theguardian.com/uk-news/2026/apr/25/met-police-investigates-hundreds-officers-palantir-ai-tool",
         "active_doc_id": "f93d4c26242fe206ef7f84ff0ba07597",
         "member_item_keys": [
           "https://www.theguardian.com/uk-news/2026/apr/25/met-police-investigates-hundreds-officers-palantir-ai-tool"
+        ],
+        "last_similarity": 1.0,
+        "adjudicated_by_llm": false
+      },
+      "4688c5e603b76736eef9cb87b6ac9eac": {
+        "cluster_id": "4688c5e603b76736eef9cb87b6ac9eac",
+        "headline": "",
+        "summary": "",
+        "signature_text": "how close are we to the sci fi vision of autonomous humanoid robots visited 11 companies in five chinese cities find out",
+        "content_fingerprint": "bd87345de0031c23c547b33a6718eee6",
+        "published_at": "2026-04-27T04:00:33+00:00",
+        "updated_at": "2026-04-28T08:26:47.436668+00:00",
+        "representative_item_key": "https://www.theguardian.com/news/audio/2026/apr/27/inside-chinas-robotics-revolution-podcast",
+        "active_doc_id": null,
+        "member_item_keys": [
+          "https://www.theguardian.com/news/audio/2026/apr/27/inside-chinas-robotics-revolution-podcast"
+        ],
+        "last_similarity": 1.0,
+        "adjudicated_by_llm": false
+      },
+      "7debc6012c2a582b16c183bbf93a884e": {
+        "cluster_id": "7debc6012c2a582b16c183bbf93a884e",
+        "headline": "",
+        "summary": "",
+        "signature_text": "beirut gemmayzeh neighbourhood rented flat has been transformed into film set bright studio lights in cosy living room at its centre is maria elayan though she barely recognisable filming for the third season of smatouha minni you heard it from me feminist series arabic actor padded muscle suit wearing slicked back black wig and beard if your wife asks to change diapers should",
+        "content_fingerprint": "de60d9407bd4e4eae85aa81448734ac7",
+        "published_at": "2026-04-28T08:00:44+00:00",
+        "updated_at": "2026-04-28T09:27:55.996361+00:00",
+        "representative_item_key": "https://www.theguardian.com/global-development/2026/apr/28/lebanese-women-smatouha-minni-you-heard-it-from-me-feminist-youtube-series-satire",
+        "active_doc_id": "6c955cfffddad8b2dcc4e5d13a144f67",
+        "member_item_keys": [
+          "https://www.theguardian.com/global-development/2026/apr/28/lebanese-women-smatouha-minni-you-heard-it-from-me-feminist-youtube-series-satire"
+        ],
+        "last_similarity": 1.0,
+        "adjudicated_by_llm": false
+      },
+      "3bb4569ea7a1973be9dca45c6e296872": {
+        "cluster_id": "3bb4569ea7a1973be9dca45c6e296872",
+        "headline": "",
+        "summary": "",
+        "signature_text": "robot pushes cargo container during media demonstration at haneda airport in tokyo on monday the chinese made humanoids will move luggage and tarmac trial basis from may photograph kyodo news getty images japan airlines introduce robots for run amid country surge inbound tourism worsening labour shortages famously conscientious but overburdened baggage handlers soon be joined by extra staff",
+        "content_fingerprint": "23e09a91425371200c62f96aba150f97",
+        "published_at": "2026-04-28T03:14:34+00:00",
+        "updated_at": "2026-04-28T09:27:55.996361+00:00",
+        "representative_item_key": "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports",
+        "active_doc_id": "96694ae5c3c52751e093b12970b7be1f",
+        "member_item_keys": [
+          "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports"
         ],
         "last_similarity": 1.0,
         "adjudicated_by_llm": false
@@ -1062,19 +1204,23 @@
       "8d86da2011c97d07b396e463eba3acd4": "2026-05-10T10:00:11+00:00",
       "b55eb1d3e0a68da4a3d81e9acd891140": "2026-05-10T07:00:08+00:00",
       "7f216bab1bc77afcacbd9b5db3469b38": "2026-05-10T06:00:07+00:00",
-      "3024e8b4f6257e006d6e17f7fc80a0a8": "2026-05-10T06:00:07+00:00",
+      "3024e8b4f6257e006d6e17f7fc80a0a8": "2026-04-28T08:26:47.436668+00:00",
       "f93d4c26242fe206ef7f84ff0ba07597": "2026-05-09T15:34:10+00:00",
-      "8dd79efb5ead3abe6a1a3a649565dbba": "2026-05-09T12:00:45+00:00"
+      "8dd79efb5ead3abe6a1a3a649565dbba": "2026-05-09T12:00:45+00:00",
+      "fe86c7e65160b6fd53b196076ee2dbcd": "2026-05-10T06:00:07+00:00",
+      "bd4566b15b61131f1f30cd36bdb23516": "2026-05-12T09:00:46+00:00",
+      "6c955cfffddad8b2dcc4e5d13a144f67": "2026-05-12T08:00:44+00:00",
+      "96694ae5c3c52751e093b12970b7be1f": "2026-05-12T03:14:34+00:00"
     },
     "last_status": "success",
     "consecutive_failures": 0,
     "consecutive_no_change": 0,
-    "total_ingested_count": 10,
+    "total_ingested_count": 14,
     "last_error": null
   },
   {
     "source_id": "mit-technology-review",
-    "last_crawled_at": "2026-04-28T08:01:38.895006+00:00",
+    "last_crawled_at": "2026-04-28T09:01:46.148142+00:00",
     "last_content_hashes": {
       "https://www.technologyreview.com/2026/04/27/1136466/elon-musk-and-sam-altman-are-going-to-court-over-openais-future": "457221b482aa2f8fefa22c4091d87d36",
       "https://www.technologyreview.com/2026/04/27/1136456/the-missing-step-between-hype-and-profit": "9bb2d4332123679984fa2e7c885c6609",
@@ -1155,7 +1301,7 @@
         "signature_text": "this story originally appeared in the algorithm our weekly newsletter on ai to get stories like your inbox first february picked up flyer at an can say for sure whether or not its writers meant riff south park underpants gnomes but if they did nailed it step grow digital super mind read produced by pause international activist group that co organized",
         "content_fingerprint": "bf34bab61577a6ec2031947e999e2c5b",
         "published_at": "2026-04-27T16:13:41+00:00",
-        "updated_at": "2026-04-28T08:01:38.895006+00:00",
+        "updated_at": "2026-04-28T09:01:46.148142+00:00",
         "representative_item_key": "https://www.technologyreview.com/2026/04/27/1136456/the-missing-step-between-hype-and-profit",
         "active_doc_id": "96328c748eeb732a5f92e60d50f250dc",
         "member_item_keys": [
@@ -1171,7 +1317,7 @@
         "signature_text": "artificial intelligence may be dominating boardroom agendas but many enterprises are discovering that the biggest obstacle to meaningful adoption is state of their data while consumer facing ai tools have dazzled users with speed and ease enterprise leaders deploying at scale requires something far less glamorous more consequential infrastructure unified governed fit for purpose gap between ambition",
         "content_fingerprint": "ccef15d858fb62a3dd06b8f7386aa2f1",
         "published_at": "2026-04-27T13:00:00+00:00",
-        "updated_at": "2026-04-28T08:01:38.895006+00:00",
+        "updated_at": "2026-04-28T09:01:46.148142+00:00",
         "representative_item_key": "https://www.technologyreview.com/2026/04/27/1136322/rebuilding-the-data-stack-for-ai",
         "active_doc_id": "d955c3846c0c934695b2f3a53089d241",
         "member_item_keys": [
@@ -1203,7 +1349,7 @@
         "signature_text": "or that it is being used increasingly in hospitals doctors are using ai to help them with note taking based tools trawling through patient records flagging people who may require certain support treatments they also interpret medical exam results and rays growing number of studies suggest many these can deliver accurate but there bigger question here does actually translate into",
         "content_fingerprint": "d46a73241de183ae17b4ad2421a2557f",
         "published_at": "2026-04-24T09:00:00+00:00",
-        "updated_at": "2026-04-28T08:01:38.895006+00:00",
+        "updated_at": "2026-04-28T09:01:46.148142+00:00",
         "representative_item_key": "https://www.technologyreview.com/2026/04/24/1136352/health-care-ai-dont-know-actually-helps-patients",
         "active_doc_id": "25cb992b0aeb894d07a1a15a16a5cd65",
         "member_item_keys": [
@@ -1235,7 +1381,7 @@
         "signature_text": "fusion power could provide steady zero emissions source of electricity in the future if companies can get plants built and running but new study suggests that even arrives it might not come cheap technologies tend to less expensive over time lithium ion batteries are now about than they were 2013 historically different go through this curve at rates cost",
         "content_fingerprint": "e8bf7bcee329bac1fd0552afc9ff4003",
         "published_at": "2026-04-23T10:00:00+00:00",
-        "updated_at": "2026-04-28T08:01:38.895006+00:00",
+        "updated_at": "2026-04-28T09:01:46.148142+00:00",
         "representative_item_key": "https://www.technologyreview.com/2026/04/23/1136329/fusion-power-cost",
         "active_doc_id": "b90006bbb14f18468ed8efd72e9e7692",
         "member_item_keys": [
@@ -1273,9 +1419,9 @@
       "b90006bbb14f18468ed8efd72e9e7692": "2026-05-07T10:00:00+00:00",
       "c52801195dbfa2e4f77f1b77c63d3d55": "2026-05-06T12:10:00+00:00"
     },
-    "last_status": "success",
+    "last_status": "no_change",
     "consecutive_failures": 0,
-    "consecutive_no_change": 0,
+    "consecutive_no_change": 1,
     "total_ingested_count": 10,
     "last_error": null
   }

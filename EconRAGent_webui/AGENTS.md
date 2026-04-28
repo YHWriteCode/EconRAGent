@@ -77,9 +77,11 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 - The `spaces` file import dialog should advertise and client-filter the same document formats supported by the API import path: Word `.docx`, PDF, Markdown `.md`/`.markdown`, and EPUB.
 - Avoid using visual-only movement such as `transform` for major layout placement when it affects scroll boundaries; prefer real grid/flex layout space.
 - Keep `chat` and `graph` as fixed-viewport work surfaces. Only nested regions should scroll: chat message feed, graph filter panel, sidebar history, and spaces database list.
+- Keep sidebar history top-aligned with compact one-line rows; do not let grid stretching turn a single session into a tall card.
 - `discover` is a news/feed page and may use normal page scrolling.
 - Discover news cards should render a useful title even when crawler event clustering returns an empty headline; fall back to summary text or source labels rather than showing backend placeholders.
 - Preserve the chat composer contract: attachment/search menu from the `+` button, retrieval mode buttons below the input, and auto-growing textarea with an internal max-height.
+- Preserve the WebUI memory contract: keep a stable browser-local `localUserId`, allow the sidebar account login to set an explicit `userAccountId`, default `memoryEnabled=true`, send the active account id plus `use_memory` on chat requests, and scope session history queries by that user while memory is enabled.
 - Chat attachment picking is narrower than workspace import: the composer should client-filter to the file formats the chat attachment pipeline can actually read today, and it should reject unsupported legacy binaries such as `.doc` before upload.
 - The chat composer knowledge-base chip should display the workspace `display_name` only. Keep the internal `workspace_id` for API requests and graph/chat filter synchronization, but do not expose uniqueness suffixes or other backend-only identifiers in the visible label.
 - Generic chat requests such as “读取这个文件” should stay on the uploaded-attachment context path when a readable attachment is already present; avoid nudging those requests into a PDF-only workflow unless the user explicitly asks for a PDF-specific operation.

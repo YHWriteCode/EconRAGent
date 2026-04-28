@@ -81,6 +81,10 @@ function resolveWebSearchLabel(mode: WebSearchMode) {
   return "自动";
 }
 
+function resolveMemoryLabel(enabled: boolean) {
+  return enabled ? "开启" : "关闭";
+}
+
 function readObject(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object"
     ? (value as Record<string, unknown>)
@@ -314,6 +318,9 @@ export function ChatPage() {
   >({});
   const {
     currentSessionId,
+    localUserId,
+    userAccountId,
+    memoryEnabled,
     currentWorkspaceId,
     queryMode,
     webSearchMode,
@@ -321,6 +328,7 @@ export function ChatPage() {
     messagesBySession,
     setCurrentSessionId,
     createDraftSession,
+    setMemoryEnabled,
     appendMessages,
     updateMessage,
     setSessionMessages,
@@ -332,6 +340,9 @@ export function ChatPage() {
   } = useAppStore(
     useShallow((state) => ({
       currentSessionId: state.currentSessionId,
+      localUserId: state.localUserId,
+      userAccountId: state.userAccountId,
+      memoryEnabled: state.memoryEnabled,
       currentWorkspaceId: state.currentWorkspaceId,
       queryMode: state.queryMode,
       webSearchMode: state.webSearchMode,
@@ -339,6 +350,7 @@ export function ChatPage() {
       messagesBySession: state.messagesBySession,
       setCurrentSessionId: state.setCurrentSessionId,
       createDraftSession: state.createDraftSession,
+      setMemoryEnabled: state.setMemoryEnabled,
       appendMessages: state.appendMessages,
       updateMessage: state.updateMessage,
       setSessionMessages: state.setSessionMessages,
@@ -358,6 +370,7 @@ export function ChatPage() {
 
   const sessionMessages = messagesBySession[currentSessionId] ?? [];
   const isLanding = sessionMessages.length === 0;
+  const activeUserId = userAccountId.trim() || localUserId;
 
   const workspacesQuery = useQuery({
     queryKey: queryKeys.workspaces,
@@ -452,8 +465,11 @@ export function ChatPage() {
       role: "user",
       content: text,
       timestamp: new Date().toISOString(),
+      user_id: memoryEnabled ? activeUserId : null,
       metadata: {
         workspace: currentWorkspaceId || null,
+        memory_enabled: memoryEnabled,
+        memory_user_id: memoryEnabled ? activeUserId : null,
         attachments: pendingAttachments.map((upload) => ({
           upload_id: upload.upload_id,
           filename: upload.filename,
@@ -481,9 +497,11 @@ export function ChatPage() {
         {
           query: text,
           session_id: sessionId,
+          user_id: memoryEnabled ? activeUserId : undefined,
           workspace: currentWorkspaceId || "all",
           query_mode: queryMode,
           force_web_search: resolveWebSearchOverride(webSearchMode),
+          use_memory: memoryEnabled,
           attachment_ids: attachmentIds,
         },
         {
@@ -542,7 +560,10 @@ export function ChatPage() {
         }
       }
       queryClient.invalidateQueries({
-        queryKey: queryKeys.sessions(currentWorkspaceId),
+        queryKey: queryKeys.sessions(
+          currentWorkspaceId,
+          memoryEnabled ? activeUserId : "",
+        ),
       });
       queryClient.invalidateQueries({
         queryKey: queryKeys.sessionMessages(sessionId),
@@ -648,6 +669,24 @@ export function ChatPage() {
             {webSearchEnabled ? "关闭" : "开启"}
           </button>
         </div>
+        <div className="upload-menu-item upload-menu-switch">
+          <span className="menu-item-icon" aria-hidden="true">
+            ◌
+          </span>
+          <span>
+            <strong>记忆</strong>
+            <small>启用会话和跨会话上下文</small>
+          </span>
+          <button
+            className={`web-search-switch ${memoryEnabled ? "active" : ""}`}
+            type="button"
+            aria-label={memoryEnabled ? "关闭记忆" : "开启记忆"}
+            aria-pressed={memoryEnabled}
+            onClick={() => setMemoryEnabled(!memoryEnabled)}
+          >
+            {memoryEnabled ? "关闭" : "开启"}
+          </button>
+        </div>
       </div>
     </div>
   ) : null;
@@ -683,7 +722,9 @@ export function ChatPage() {
               </button>
             </div>
             <div className="composer-toolbar-right">
-              <span className="composer-meta-note">{`联网 ${resolveWebSearchLabel(webSearchMode)}`}</span>
+              <span className="composer-meta-note">
+                {`联网 ${resolveWebSearchLabel(webSearchMode)} · 记忆 ${resolveMemoryLabel(memoryEnabled)}`}
+              </span>
               <button
                 className="composer-send-button"
                 aria-label={isSending ? "发送中" : "发送"}
@@ -782,6 +823,9 @@ export function ChatPage() {
                         ) : null}
                         {cardMetadata.web_search_forced === false ? (
                           <span className="tag">联网强制关闭</span>
+                        ) : null}
+                        {cardMetadata.user_id ? (
+                          <span className="tag">记忆已接入</span>
                         ) : null}
                         {toolCalls.length ? (
                           <span className="tag">工具调用 {toolCalls.length} 次</span>

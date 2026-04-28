@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { Route, Routes } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AppShell } from "./components/AppShell";
 import { renderWithProviders } from "./test/utils";
@@ -19,6 +19,21 @@ vi.mock("./lib/api", () => ({
 }));
 
 describe("AppShell", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useAppStore.setState({
+      ...useAppStore.getState(),
+      currentWorkspaceId: "",
+      currentSessionId: "",
+      localUserId: "webui-user-local",
+      userAccountId: "",
+      userDisplayName: "",
+      memoryEnabled: true,
+      pendingAttachments: [],
+      messagesBySession: {},
+    });
+  });
+
   it("switches routes and highlights the active tab", async () => {
     apiMocks.listWorkspaces.mockResolvedValue({
       workspaces: [
@@ -100,6 +115,40 @@ describe("AppShell", () => {
 
     await waitFor(() => {
       expect(useAppStore.getState().currentSessionId).not.toBe(before);
+    });
+  });
+
+  it("saves a sidebar account id for memory-scoped sessions", async () => {
+    apiMocks.listWorkspaces.mockResolvedValue({ workspaces: [] });
+    apiMocks.listSessions.mockResolvedValue({ sessions: [] });
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/" element={<AppShell />}>
+          <Route path="chat" element={<div>chat page</div>} />
+        </Route>
+      </Routes>,
+      { route: "/chat" },
+    );
+
+    await screen.findByText("chat page");
+    fireEvent.click(screen.getByRole("button", { name: "用户登录与记忆设置" }));
+    fireEvent.change(screen.getByPlaceholderText("例如 hang-yi"), {
+      target: { value: "hang-yi" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("例如 hang yi"), {
+      target: { value: "hang yi" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().userAccountId).toBe("hang-yi");
+    });
+    expect(screen.getByRole("button", { name: "用户登录与记忆设置" })).toHaveTextContent(
+      "hang yi",
+    );
+    await waitFor(() => {
+      expect(apiMocks.listSessions).toHaveBeenLastCalledWith(undefined, "hang-yi");
     });
   });
 });

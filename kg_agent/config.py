@@ -731,10 +731,10 @@ class FreshnessConfig:
 
 @dataclass
 class PersistenceConfig:
-    memory_backend: str = "memory"
+    memory_backend: str = "sqlite"
     memory_sqlite_path: str = "kg_agent_memory.sqlite3"
     memory_mongo_collection: str = "kg_agent_conversation_messages"
-    user_profile_backend: str = "memory"
+    user_profile_backend: str = "sqlite"
     user_profile_sqlite_path: str = "kg_agent_profiles.sqlite3"
     user_profile_mongo_collection: str = "kg_agent_user_profiles"
     scheduler_store_backend: str = "json"
@@ -763,8 +763,8 @@ class PersistenceConfig:
     @classmethod
     def from_env(cls) -> "PersistenceConfig":
         return cls(
-            memory_backend=os.getenv("KG_AGENT_MEMORY_BACKEND", "memory").strip()
-            or "memory",
+            memory_backend=os.getenv("KG_AGENT_MEMORY_BACKEND", "sqlite").strip()
+            or "sqlite",
             memory_sqlite_path=os.getenv(
                 "KG_AGENT_MEMORY_SQLITE_PATH", "kg_agent_memory.sqlite3"
             ).strip()
@@ -775,9 +775,9 @@ class PersistenceConfig:
             ).strip()
             or "kg_agent_conversation_messages",
             user_profile_backend=os.getenv(
-                "KG_AGENT_USER_PROFILE_BACKEND", "memory"
+                "KG_AGENT_USER_PROFILE_BACKEND", "sqlite"
             ).strip()
-            or "memory",
+            or "sqlite",
             user_profile_sqlite_path=os.getenv(
                 "KG_AGENT_USER_PROFILE_SQLITE_PATH", "kg_agent_profiles.sqlite3"
             ).strip()

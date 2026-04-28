@@ -169,12 +169,16 @@ export async function getUpload(uploadId: string): Promise<UploadRecord> {
   return fetchJson(`/agent/uploads/${encodeURIComponent(uploadId)}`);
 }
 
-export async function listSessions(workspaceId?: string): Promise<{
+export async function listSessions(
+  workspaceId?: string,
+  userId?: string,
+): Promise<{
   sessions: SessionSummary[];
 }> {
   return fetchJson(
     `/agent/sessions${buildQuery({
       workspace: workspaceId,
+      user_id: userId,
     })}`,
   );
 }
