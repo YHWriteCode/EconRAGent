@@ -328,14 +328,15 @@
         "cluster_id": "2dafaf4441e3c4b709c1d03d69901282",
         "headline": "",
         "summary": "",
-        "signature_text": "sarah not her real name had 20 000 stolen in an investment fraud so sophisticated it was 17 months before she discovered scam lloyds bank initially told there 13 month time limit on reporting scams would only refund within day of bbc radio money box investigating refunded full national trading standards has called for urgent review the",
-        "content_fingerprint": "60445824074893d9be1cbe0853d81b83",
-        "published_at": "2026-04-27T23:03:39+00:00",
-        "updated_at": "2026-04-28T09:42:00.421231+00:00",
-        "representative_item_key": "https://www.bbc.com/news/articles/cpvxg1vzxzjo?at_medium=RSS&at_campaign=rss",
-        "active_doc_id": "e8624882d2b01187983bab68fb450321",
+        "signature_text": "barclays is pulling back from lending to risky borrowers as its chief executive warned of increasing numbers fraud cases and the bank took 228m hit failure mortgage lender market financial solutions mfs collapsed in february amid allegations uk regulator has since into scandal provided banking services said had pushed total credit impairment",
+        "content_fingerprint": "2a3024849e1cf9aaa648a6a020b2e127",
+        "published_at": "2026-04-28T09:27:50+00:00",
+        "updated_at": "2026-04-28T09:52:05.680945+00:00",
+        "representative_item_key": "https://www.theguardian.com/business/2026/apr/28/barclays-lending-uk-mortgage-firm-mfs-bank-profits-motor-finance",
+        "active_doc_id": "13ead4f4af52021af7bfa9d128b06810",
         "member_item_keys": [
-          "https://www.bbc.com/news/articles/cpvxg1vzxzjo?at_medium=RSS&at_campaign=rss"
+          "https://www.bbc.com/news/articles/cpvxg1vzxzjo?at_medium=RSS&at_campaign=rss",
+          "https://www.theguardian.com/business/2026/apr/28/barclays-lending-uk-mortgage-firm-mfs-bank-profits-motor-finance"
         ],
         "last_similarity": 1.0,
         "adjudicated_by_llm": false
@@ -360,14 +361,15 @@
         "cluster_id": "78013e674afb442c9f1aa45be1ff6770",
         "headline": "",
         "summary": "",
-        "signature_text": "branches in croydon peckham whitechapel and upton park are testing the new format with trials also under way birmingham wilford nottinghamshire move follows official figures showing shoplifting offences england wales year on increase of about 20 prompting concern across high street prime minister sir keir starmer has described wave retail crime as disgraceful said his government would introduce offence for",
-        "content_fingerprint": "0858d31c0e309cf3bf1da9bde00b47ae",
-        "published_at": "2026-04-27T16:48:46+00:00",
-        "updated_at": "2026-04-28T09:42:00.421231+00:00",
-        "representative_item_key": "https://www.bbc.com/news/articles/c8dldv4lqygo?at_medium=RSS&at_campaign=rss",
-        "active_doc_id": "e4417b0e90e1628453095b5cbb3f5583",
+        "signature_text": "price rises in uk shops have slowed as retailers applied heavy discounting to their goods an effort entice shoppers amid weakening consumer confidence the industry trade group said shop inflation rose by year on april slowdown from march and below three month average of according british retail consortium brc made discounts clothing furniture diy its",
+        "content_fingerprint": "2e13a60ba93b303070d88df860e66c25",
+        "published_at": "2026-04-28T06:00:43+00:00",
+        "updated_at": "2026-04-28T09:52:05.680945+00:00",
+        "representative_item_key": "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers",
+        "active_doc_id": "f4afcbbe43a102c0da44d591ac8eefe2",
         "member_item_keys": [
-          "https://www.bbc.com/news/articles/c8dldv4lqygo?at_medium=RSS&at_campaign=rss"
+          "https://www.bbc.com/news/articles/c8dldv4lqygo?at_medium=RSS&at_campaign=rss",
+          "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers"
         ],
         "last_similarity": 1.0,
         "adjudicated_by_llm": false
@@ -443,7 +445,7 @@
       "819f6aa3f6d1d64a00fb25d816d1784a": "2026-04-28T07:49:44.400229+00:00",
       "b4742f50c8641782ef6748e80d5f47f1": "2026-05-12T05:07:59+00:00",
       "4b98c9cae9a455215728315441c7b68b": "2026-04-28T09:42:00.421231+00:00",
-      "e8624882d2b01187983bab68fb450321": "2026-05-11T23:03:39+00:00",
+      "e8624882d2b01187983bab68fb450321": "2026-04-28T09:52:05.680945+00:00",
       "79e11f121284789d6d2ab2f51c886150": "2026-04-28T07:46:41.005039+00:00",
       "9740ef19c7712e1a9ffc6b56fb513dd4": "2026-05-11T20:30:52+00:00",
       "26027767eea91f6754f3da4a3332932c": "2026-05-11T18:44:10+00:00",
@@ -453,7 +455,8 @@
       "02984976ce77740423c36c7cdb224824": "2026-05-12T08:15:28+00:00",
       "f4afcbbe43a102c0da44d591ac8eefe2": "2026-04-28T09:21:25.874089+00:00",
       "c08ce8f9b2d51eef89dc8ce19804f443": "2026-05-12T09:28:56+00:00",
-      "ba4c0c87cc15f9b87f4fa1c9e4db6e40": "2026-05-11T23:56:45+00:00"
+      "ba4c0c87cc15f9b87f4fa1c9e4db6e40": "2026-05-11T23:56:45+00:00",
+      "e4417b0e90e1628453095b5cbb3f5583": "2026-04-28T09:52:05.680945+00:00"
     },
     "last_status": "success",
     "consecutive_failures": 0,
@@ -728,23 +731,25 @@
   },
   {
     "source_id": "guardian-business",
-    "last_crawled_at": "2026-04-28T09:21:25.874089+00:00",
+    "last_crawled_at": "2026-04-28T09:52:05.680945+00:00",
     "last_content_hashes": {
-      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "4fb07f518080672bcb16d063fc0825a0",
-      "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "b2e6cd1d31cddfa296ffb76b84294832",
+      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "32d2657a3861b768c3a55c9b72330898",
+      "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "eeca48402941d9877ebc6633a5efdac1",
       "https://www.theguardian.com/money/2026/apr/28/ee-broadband-tv-deal-terminate-contract": "8dd86ffbb237ed6c9b197a639b1f724c",
       "https://www.theguardian.com/business/2026/apr/28/rachel-reevess-fiscal-rules-buffer-should-be-significantly-larger-say-peers": "99235305c11ec9efa17ef1efc782c1c1",
-      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "31b2388e301121ce03d066d1013c3782",
+      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "83ac885a95bb9b0ffaec16154f55ee9e",
       "https://www.theguardian.com/news/audio/2026/apr/28/secretive-billionaire-bankrolling-nigel-farage-podcast": "050a2dd982434bb15a70ad324d4d773d",
       "https://www.theguardian.com/money/2026/apr/28/uk-has-wealthy-europes-third-highest-rate-of-18-to-24-year-olds-not-in-work-or-study": "ee1f8e11fae7ebd652e6a6a180ec1320",
       "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit": "151d53a1485b1490e87115068a6769e8",
-      "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "dc6c72d6d6b509f4e55fa351076167a2",
-      "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "a3fb08c421f9efa298838e70b72176f6",
+      "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "7941369c7fc1b85c5f22ddd1d247d02c",
+      "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "f1db8f8e4ea9feb52ef4271b0db4d726",
       "https://www.theguardian.com/business/2026/apr/27/spirit-airlines-trump-bailout": "6f6479f6a1b3b14902fd6a176b11cd1d",
-      "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "d22121d1b0801260fcadcdb0312a43ac"
+      "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "60879a24b304f3ccb258ebe2d3b6a91d",
+      "https://www.theguardian.com/business/2026/apr/28/barclays-lending-uk-mortgage-firm-mfs-bank-profits-motor-finance": "bd7d64f926215b09e8c7fa069bed64cd"
     },
     "recent_item_keys": [
       "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates",
+      "https://www.theguardian.com/business/2026/apr/28/barclays-lending-uk-mortgage-firm-mfs-bank-profits-motor-finance",
       "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers",
       "https://www.theguardian.com/money/2026/apr/28/ee-broadband-tv-deal-terminate-contract",
       "https://www.theguardian.com/business/2026/apr/28/rachel-reevess-fiscal-rules-buffer-should-be-significantly-larger-say-peers",
@@ -758,7 +763,7 @@
       "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning"
     ],
     "item_published_at": {
-      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "2026-04-28T08:51:36+00:00",
+      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "2026-04-28T09:29:46+00:00",
       "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "2026-04-28T06:00:43+00:00",
       "https://www.theguardian.com/money/2026/apr/28/ee-broadband-tv-deal-terminate-contract": "2026-04-28T06:00:43+00:00",
       "https://www.theguardian.com/business/2026/apr/28/rachel-reevess-fiscal-rules-buffer-should-be-significantly-larger-say-peers": "2026-04-28T04:00:40+00:00",
@@ -769,7 +774,8 @@
       "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "2026-04-27T18:05:17+00:00",
       "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "2026-04-27T17:35:04+00:00",
       "https://www.theguardian.com/business/2026/apr/27/spirit-airlines-trump-bailout": "2026-04-27T11:00:08+00:00",
-      "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "2026-04-27T09:30:55+00:00"
+      "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "2026-04-27T09:30:55+00:00",
+      "https://www.theguardian.com/business/2026/apr/28/barclays-lending-uk-mortgage-firm-mfs-bank-profits-motor-finance": "2026-04-28T09:27:50+00:00"
     },
     "item_content_fingerprints": {
       "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "315c5d3665c21470138e3e5c8a24fef3",
@@ -783,49 +789,51 @@
       "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "01b514fd87595229344972e0256ba19c",
       "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "4f3c8384a4a5ef9e689311e33e052973",
       "https://www.theguardian.com/business/2026/apr/27/spirit-airlines-trump-bailout": "67e95ec7e18ef6411792b84fa73bb5c8",
-      "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "1052aaed924d05936e7dae8e8353a904"
+      "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "1052aaed924d05936e7dae8e8353a904",
+      "https://www.theguardian.com/business/2026/apr/28/barclays-lending-uk-mortgage-firm-mfs-bank-profits-motor-finance": "2a3024849e1cf9aaa648a6a020b2e127"
     },
     "item_active_doc_ids": {
-      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "042ec6df61f0402a9765865ae7a0e21a",
-      "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "e4417b0e90e1628453095b5cbb3f5583",
+      "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "549b0d767f4ccce559302c950e56c9e1",
+      "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "f4afcbbe43a102c0da44d591ac8eefe2",
       "https://www.theguardian.com/money/2026/apr/28/ee-broadband-tv-deal-terminate-contract": "835ea3a3d01a4fc62d8a6aff3aded401",
       "https://www.theguardian.com/business/2026/apr/28/rachel-reevess-fiscal-rules-buffer-should-be-significantly-larger-say-peers": "9091a9df79a494a713f7476ada7058ff",
-      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "70cb98370711bd0687b26c940752a238",
+      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "7d6e4af68f50fe86a44124b8fec41ca7",
       "https://www.theguardian.com/news/audio/2026/apr/28/secretive-billionaire-bankrolling-nigel-farage-podcast": "910a39a477facf714b61e36889e4e63c",
       "https://www.theguardian.com/money/2026/apr/28/uk-has-wealthy-europes-third-highest-rate-of-18-to-24-year-olds-not-in-work-or-study": "bebc14ddb3d65b67e03c9202e8ae73cf",
-      "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "c45a5f53f0a0933f398aaa45421ff073",
-      "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "7a04b6c4a8a75e9ba05a429154ed1e3d",
+      "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "a7bbf6c84cd16181360c779490f466e8",
+      "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "1ae95f902ea1c5eaaeb88765ad3dc39b",
       "https://www.theguardian.com/business/2026/apr/27/spirit-airlines-trump-bailout": "5286feedfc5e7ccbae958ea36d0a45db",
-      "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "09a4433f2c4f731f25c2a0e9eeefee49"
+      "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "134af3d6779e7d43e0f78a3c5051da8c",
+      "https://www.theguardian.com/business/2026/apr/28/barclays-lending-uk-mortgage-firm-mfs-bank-profits-motor-finance": "13ead4f4af52021af7bfa9d128b06810"
     },
     "item_event_cluster_ids": {
       "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates": "6ea4258db347396a184a8028c8e540a0",
       "https://www.theguardian.com/business/2026/apr/28/price-rises-uk-shops-slow-retailers-apply-heavy-discounts-lure-shoppers": "78013e674afb442c9f1aa45be1ff6770",
       "https://www.theguardian.com/money/2026/apr/28/ee-broadband-tv-deal-terminate-contract": "982bca09a07185282f9f2b24acddf22e",
       "https://www.theguardian.com/business/2026/apr/28/rachel-reevess-fiscal-rules-buffer-should-be-significantly-larger-say-peers": "b92361688dda057d3cb57331f21bc751",
-      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "ea04f1f996bb61d9d3c66253573d678e",
+      "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports": "3bb4569ea7a1973be9dca45c6e296872",
       "https://www.theguardian.com/news/audio/2026/apr/28/secretive-billionaire-bankrolling-nigel-farage-podcast": "738829d8cb38139b4554a00139eb15f9",
       "https://www.theguardian.com/money/2026/apr/28/uk-has-wealthy-europes-third-highest-rate-of-18-to-24-year-olds-not-in-work-or-study": "6121aa52498924ff89b91f5f0a6d1c37",
       "https://www.theguardian.com/technology/2026/apr/27/elon-musk-sam-altman-open-ai-lawsuit": "6566a3aa57627991585c4b16bdf3dc44",
-      "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "5b31526a1def632c76f73a8106952f57",
+      "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run": "fc2b7525bf1e81e797a48411ddba8bbe",
       "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn": "5073503e18e5b4fbf054ecaf3f90a2ae",
       "https://www.theguardian.com/business/2026/apr/27/spirit-airlines-trump-bailout": "77f7e98d31dc72964ed8d9c259522da0",
-      "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "208b22b519fe92de7ad9fa21fca27fdd"
+      "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning": "208b22b519fe92de7ad9fa21fca27fdd",
+      "https://www.theguardian.com/business/2026/apr/28/barclays-lending-uk-mortgage-firm-mfs-bank-profits-motor-finance": "2dafaf4441e3c4b709c1d03d69901282"
     },
     "event_clusters": {
       "6ea4258db347396a184a8028c8e540a0": {
         "cluster_id": "6ea4258db347396a184a8028c8e540a0",
         "headline": "",
         "summary": "",
-        "signature_text": "bp profits for the first three months of year have more than doubled following surge in oil prices since beginning iran war its results conflict broke out energy giant reported 2bn 4bn between january and march after an exceptional performance trading business figure was higher analysts had expected far ahead income same",
-        "content_fingerprint": "34a0e68f35c501edce0c0f149e37b04b",
-        "published_at": "2026-04-28T09:28:56+00:00",
-        "updated_at": "2026-04-28T09:42:00.421231+00:00",
-        "representative_item_key": "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss",
-        "active_doc_id": "c08ce8f9b2d51eef89dc8ce19804f443",
+        "signature_text": "the iran war has helped to double its profits in first quarter of this year latest financial results show oil major just reported that it made profit nearly 2bn three months 2026 on favoured underlying replacement cost earnings measure higher than city analysts had predicted with bp which was giving some credit an exceptional contribution from",
+        "content_fingerprint": "315c5d3665c21470138e3e5c8a24fef3",
+        "published_at": "2026-04-28T09:29:46+00:00",
+        "updated_at": "2026-04-28T09:52:05.680945+00:00",
+        "representative_item_key": "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates",
+        "active_doc_id": "549b0d767f4ccce559302c950e56c9e1",
         "member_item_keys": [
-          "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates",
-          "https://www.bbc.com/news/articles/c2eveyvgn9no?at_medium=RSS&at_campaign=rss"
+          "https://www.theguardian.com/business/live/2026/apr/28/bp-profits-double-iran-war-oil-price-stock-markets-live-updates"
         ],
         "last_similarity": 1.0,
         "adjudicated_by_llm": true
@@ -885,9 +893,9 @@
         "signature_text": "shell said that the deal will boost production growth from year to and add 2bn barrels its proven probable reserves photograph piroschka van de wouw reuters has agreed buy canadian shale producer arc resources for 16 4bn five years after europe biggest gas oil which includes 13 6bn in cash shares taking on 8bn debt would be acquisition since",
         "content_fingerprint": "4f3c8384a4a5ef9e689311e33e052973",
         "published_at": "2026-04-27T17:35:04+00:00",
-        "updated_at": "2026-04-28T08:51:19.898249+00:00",
+        "updated_at": "2026-04-28T09:52:05.680945+00:00",
         "representative_item_key": "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn",
-        "active_doc_id": "7a04b6c4a8a75e9ba05a429154ed1e3d",
+        "active_doc_id": "1ae95f902ea1c5eaaeb88765ad3dc39b",
         "member_item_keys": [
           "https://www.theguardian.com/business/2026/apr/27/shell-to-buy-canadian-shale-producer-arc-resources-for-164bn"
         ],
@@ -901,14 +909,14 @@
         "signature_text": "officials from the bank of england are expected to join meeting government emergency cobra committee on tuesday photograph tolga akmen epa world most powerful central banks poised hold borrowing costs unchanged this week amid growing concerns over unfolding inflation shock iran war in critical for global economy each g7 issue warnings",
         "content_fingerprint": "1052aaed924d05936e7dae8e8353a904",
         "published_at": "2026-04-27T09:30:55+00:00",
-        "updated_at": "2026-04-28T08:20:40.075959+00:00",
+        "updated_at": "2026-04-28T09:52:05.680945+00:00",
         "representative_item_key": "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning",
-        "active_doc_id": "09a4433f2c4f731f25c2a0e9eeefee49",
+        "active_doc_id": "134af3d6779e7d43e0f78a3c5051da8c",
         "member_item_keys": [
           "https://www.theguardian.com/business/2026/apr/27/g7-central-banks-hold-borrowing-costs-global-economy-iran-war-inflation-prices-warning"
         ],
         "last_similarity": 1.0,
-        "adjudicated_by_llm": false
+        "adjudicated_by_llm": true
       },
       "ea04f1f996bb61d9d3c66253573d678e": {
         "cluster_id": "ea04f1f996bb61d9d3c66253573d678e",
@@ -941,6 +949,22 @@
         ],
         "last_similarity": 1.0,
         "adjudicated_by_llm": false
+      },
+      "fc2b7525bf1e81e797a48411ddba8bbe": {
+        "cluster_id": "fc2b7525bf1e81e797a48411ddba8bbe",
+        "headline": "",
+        "summary": "",
+        "signature_text": "ames sherwin smith who is aiming to become the first customer be voted onto board of nationwide in nearly 25 years deserves top marks for perseverance year ago his attempt get name on ballot paper was stymied or so it seemed by data protection rules and forth this time he has necessary 250 nominations development welcome there something democracy deficit",
+        "content_fingerprint": "01b514fd87595229344972e0256ba19c",
+        "published_at": "2026-04-27T18:05:17+00:00",
+        "updated_at": "2026-04-28T09:52:05.680945+00:00",
+        "representative_item_key": "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run",
+        "active_doc_id": "a7bbf6c84cd16181360c779490f466e8",
+        "member_item_keys": [
+          "https://www.theguardian.com/business/nils-pratley-on-finance/2026/apr/27/nationwide-should-give-its-boardroom-challenger-a-fair-run"
+        ],
+        "last_similarity": 1.0,
+        "adjudicated_by_llm": false
       }
     },
     "doc_expires_at": {
@@ -952,25 +976,30 @@
       "910a39a477facf714b61e36889e4e63c": "2026-05-12T02:00:36+00:00",
       "bebc14ddb3d65b67e03c9202e8ae73cf": "2026-05-11T23:01:33+00:00",
       "8ad0b03d77ea244940a867af0b727857": "2026-04-28T07:56:14.991468+00:00",
-      "c45a5f53f0a0933f398aaa45421ff073": "2026-05-11T18:05:17+00:00",
-      "1ae95f902ea1c5eaaeb88765ad3dc39b": "2026-04-28T08:51:19.898249+00:00",
+      "c45a5f53f0a0933f398aaa45421ff073": "2026-04-28T09:52:05.680945+00:00",
+      "1ae95f902ea1c5eaaeb88765ad3dc39b": "2026-05-11T17:35:04+00:00",
       "5286feedfc5e7ccbae958ea36d0a45db": "2026-05-11T11:00:08+00:00",
-      "09a4433f2c4f731f25c2a0e9eeefee49": "2026-05-11T09:30:55+00:00",
+      "09a4433f2c4f731f25c2a0e9eeefee49": "2026-04-28T09:52:05.680945+00:00",
       "f58cdc5dd18846f6c705c6f6096c10a1": "2026-04-28T07:56:14.991468+00:00",
       "8d86da2011c97d07b396e463eba3acd4": "2026-04-28T08:01:38.895006+00:00",
       "bba05d5c0158320efc36b424d980be79": "2026-04-28T08:51:19.898249+00:00",
       "512eb7c111368d738609e35b05a07032": "2026-04-28T09:11:22.170995+00:00",
       "e124a1d87cc653a316e193fa66d32949": "2026-04-28T09:21:25.874089+00:00",
       "a7bbf6c84cd16181360c779490f466e8": "2026-05-11T18:05:17+00:00",
-      "7a04b6c4a8a75e9ba05a429154ed1e3d": "2026-05-11T17:35:04+00:00",
+      "7a04b6c4a8a75e9ba05a429154ed1e3d": "2026-04-28T09:52:05.680945+00:00",
       "02984976ce77740423c36c7cdb224824": "2026-04-28T09:21:25.874089+00:00",
       "042ec6df61f0402a9765865ae7a0e21a": "2026-04-28T09:42:00.421231+00:00",
-      "e4417b0e90e1628453095b5cbb3f5583": "2026-05-12T06:00:43+00:00"
+      "e4417b0e90e1628453095b5cbb3f5583": "2026-05-12T06:00:43+00:00",
+      "c08ce8f9b2d51eef89dc8ce19804f443": "2026-04-28T09:52:05.680945+00:00",
+      "549b0d767f4ccce559302c950e56c9e1": "2026-05-12T09:29:46+00:00",
+      "13ead4f4af52021af7bfa9d128b06810": "2026-05-12T09:27:50+00:00",
+      "7d6e4af68f50fe86a44124b8fec41ca7": "2026-05-12T03:14:34+00:00",
+      "134af3d6779e7d43e0f78a3c5051da8c": "2026-05-11T09:30:55+00:00"
     },
     "last_status": "success",
     "consecutive_failures": 0,
     "consecutive_no_change": 0,
-    "total_ingested_count": 21,
+    "total_ingested_count": 28,
     "last_error": null
   },
   {
@@ -1186,9 +1215,9 @@
         "signature_text": "robot pushes cargo container during media demonstration at haneda airport in tokyo on monday the chinese made humanoids will move luggage and tarmac trial basis from may photograph kyodo news getty images japan airlines introduce robots for run amid country surge inbound tourism worsening labour shortages famously conscientious but overburdened baggage handlers soon be joined by extra staff",
         "content_fingerprint": "23e09a91425371200c62f96aba150f97",
         "published_at": "2026-04-28T03:14:34+00:00",
-        "updated_at": "2026-04-28T09:27:55.996361+00:00",
+        "updated_at": "2026-04-28T09:52:05.680945+00:00",
         "representative_item_key": "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports",
-        "active_doc_id": "96694ae5c3c52751e093b12970b7be1f",
+        "active_doc_id": "7d6e4af68f50fe86a44124b8fec41ca7",
         "member_item_keys": [
           "https://www.theguardian.com/world/2026/apr/28/humanoid-robots-baggage-handlers-japan-airports"
         ],
@@ -1210,7 +1239,7 @@
       "fe86c7e65160b6fd53b196076ee2dbcd": "2026-05-10T06:00:07+00:00",
       "bd4566b15b61131f1f30cd36bdb23516": "2026-05-12T09:00:46+00:00",
       "6c955cfffddad8b2dcc4e5d13a144f67": "2026-05-12T08:00:44+00:00",
-      "96694ae5c3c52751e093b12970b7be1f": "2026-05-12T03:14:34+00:00"
+      "96694ae5c3c52751e093b12970b7be1f": "2026-04-28T09:52:05.680945+00:00"
     },
     "last_status": "success",
     "consecutive_failures": 0,
