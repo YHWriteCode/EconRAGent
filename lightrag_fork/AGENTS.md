@@ -345,7 +345,7 @@ python -m lightrag_fork.api.lightrag_server
 
 - LLM config: `LLM_MODEL`, `LLM_BINDING`, `LLM_BINDING_HOST`
 - Optional utility-summary LLM config: `UTILITY_LLM_MODEL`, `UTILITY_LLM_BINDING_HOST` and optional `UTILITY_LLM_BINDING`, `UTILITY_LLM_BINDING_API_KEY`, `UTILITY_LLM_TIMEOUT`
-- Storage config: `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `QDRANT_URL`, `MONGO_URI`, `MONGO_DATABASE`
+- Storage config: `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `QDRANT_URL`, `QDRANT_COLLECTION_PREFIX`, `MONGO_URI`, `MONGO_DATABASE`
 - Lock config: `LIGHTRAG_LOCK_BACKEND`, `REDIS_URI` (when using Redis locks)
 
 ---

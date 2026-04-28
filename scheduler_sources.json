@@ -1,0 +1,452 @@
+[
+  {
+    "source_id": "36kr-feed",
+    "name": "36氪文章",
+    "urls": [
+      "https://36kr.com/feed"
+    ],
+    "category": "business",
+    "interval_seconds": 1800,
+    "max_pages": 12,
+    "enabled": true,
+    "workspace": "kg_agent_network",
+    "source_type": "auto",
+    "schedule_mode": "auto",
+    "feed_filter": {
+      "include_patterns": [],
+      "exclude_patterns": [],
+      "include_authors": [],
+      "exclude_authors": [],
+      "include_categories": [],
+      "exclude_categories": [],
+      "allowed_domains": [],
+      "blocked_domains": [],
+      "max_age_days": 14.0
+    },
+    "feed_retention": {
+      "mode": "latest",
+      "max_items": 40,
+      "max_age_days": 14.0
+    },
+    "feed_priority": {
+      "mode": "published_desc",
+      "priority_patterns": [],
+      "preferred_domains": [],
+      "preferred_authors": [],
+      "preferred_categories": []
+    },
+    "feed_dedup": {
+      "mode": "content_signature",
+      "signature_token_limit": 120
+    },
+    "content_lifecycle": {
+      "content_class": "short_term_news",
+      "update_mode": "replace_latest",
+      "ttl_days": 14.0,
+      "delete_expired": false,
+      "event_cluster_mode": "auto",
+      "event_cluster_window_days": 3.0,
+      "event_cluster_min_similarity": 0.72
+    }
+  },
+  {
+    "source_id": "36kr-newsflash",
+    "name": "36氪快讯",
+    "urls": [
+      "https://36kr.com/feed-newsflash"
+    ],
+    "category": "business",
+    "interval_seconds": 1200,
+    "max_pages": 12,
+    "enabled": true,
+    "workspace": "kg_agent_network",
+    "source_type": "auto",
+    "schedule_mode": "auto",
+    "feed_filter": {
+      "include_patterns": [],
+      "exclude_patterns": [],
+      "include_authors": [],
+      "exclude_authors": [],
+      "include_categories": [],
+      "exclude_categories": [],
+      "allowed_domains": [],
+      "blocked_domains": [],
+      "max_age_days": 14.0
+    },
+    "feed_retention": {
+      "mode": "latest",
+      "max_items": 50,
+      "max_age_days": 14.0
+    },
+    "feed_priority": {
+      "mode": "published_desc",
+      "priority_patterns": [],
+      "preferred_domains": [],
+      "preferred_authors": [],
+      "preferred_categories": []
+    },
+    "feed_dedup": {
+      "mode": "content_signature",
+      "signature_token_limit": 120
+    },
+    "content_lifecycle": {
+      "content_class": "short_term_news",
+      "update_mode": "replace_latest",
+      "ttl_days": 14.0,
+      "delete_expired": false,
+      "event_cluster_mode": "auto",
+      "event_cluster_window_days": 3.0,
+      "event_cluster_min_similarity": 0.72
+    }
+  },
+  {
+    "source_id": "bbc-business",
+    "name": "BBC Business",
+    "urls": [
+      "https://feeds.bbci.co.uk/news/business/rss.xml"
+    ],
+    "category": "business",
+    "interval_seconds": 1800,
+    "max_pages": 12,
+    "enabled": true,
+    "workspace": "kg_agent_network",
+    "source_type": "auto",
+    "schedule_mode": "auto",
+    "feed_filter": {
+      "include_patterns": [],
+      "exclude_patterns": [],
+      "include_authors": [],
+      "exclude_authors": [],
+      "include_categories": [],
+      "exclude_categories": [],
+      "allowed_domains": [],
+      "blocked_domains": [],
+      "max_age_days": 14.0
+    },
+    "feed_retention": {
+      "mode": "latest",
+      "max_items": 40,
+      "max_age_days": 14.0
+    },
+    "feed_priority": {
+      "mode": "published_desc",
+      "priority_patterns": [],
+      "preferred_domains": [],
+      "preferred_authors": [],
+      "preferred_categories": []
+    },
+    "feed_dedup": {
+      "mode": "content_signature",
+      "signature_token_limit": 120
+    },
+    "content_lifecycle": {
+      "content_class": "short_term_news",
+      "update_mode": "replace_latest",
+      "ttl_days": 14.0,
+      "delete_expired": false,
+      "event_cluster_mode": "auto",
+      "event_cluster_window_days": 3.0,
+      "event_cluster_min_similarity": 0.72
+    }
+  },
+  {
+    "source_id": "bbc-technology",
+    "name": "BBC Technology",
+    "urls": [
+      "https://feeds.bbci.co.uk/news/technology/rss.xml"
+    ],
+    "category": "technology",
+    "interval_seconds": 1800,
+    "max_pages": 10,
+    "enabled": true,
+    "workspace": "kg_agent_network",
+    "source_type": "auto",
+    "schedule_mode": "auto",
+    "feed_filter": {
+      "include_patterns": [],
+      "exclude_patterns": [],
+      "include_authors": [],
+      "exclude_authors": [],
+      "include_categories": [],
+      "exclude_categories": [],
+      "allowed_domains": [],
+      "blocked_domains": [],
+      "max_age_days": 14.0
+    },
+    "feed_retention": {
+      "mode": "latest",
+      "max_items": 35,
+      "max_age_days": 14.0
+    },
+    "feed_priority": {
+      "mode": "published_desc",
+      "priority_patterns": [],
+      "preferred_domains": [],
+      "preferred_authors": [],
+      "preferred_categories": []
+    },
+    "feed_dedup": {
+      "mode": "content_signature",
+      "signature_token_limit": 120
+    },
+    "content_lifecycle": {
+      "content_class": "short_term_news",
+      "update_mode": "replace_latest",
+      "ttl_days": 14.0,
+      "delete_expired": false,
+      "event_cluster_mode": "auto",
+      "event_cluster_window_days": 3.0,
+      "event_cluster_min_similarity": 0.72
+    }
+  },
+  {
+    "source_id": "chinanews-finance",
+    "name": "中国新闻网财经",
+    "urls": [
+      "https://www.chinanews.com.cn/rss/finance.xml"
+    ],
+    "category": "economy",
+    "interval_seconds": 1800,
+    "max_pages": 12,
+    "enabled": true,
+    "workspace": "kg_agent_network",
+    "source_type": "auto",
+    "schedule_mode": "auto",
+    "feed_filter": {
+      "include_patterns": [],
+      "exclude_patterns": [],
+      "include_authors": [],
+      "exclude_authors": [],
+      "include_categories": [],
+      "exclude_categories": [],
+      "allowed_domains": [],
+      "blocked_domains": [],
+      "max_age_days": 14.0
+    },
+    "feed_retention": {
+      "mode": "latest",
+      "max_items": 40,
+      "max_age_days": 14.0
+    },
+    "feed_priority": {
+      "mode": "published_desc",
+      "priority_patterns": [],
+      "preferred_domains": [],
+      "preferred_authors": [],
+      "preferred_categories": []
+    },
+    "feed_dedup": {
+      "mode": "content_signature",
+      "signature_token_limit": 120
+    },
+    "content_lifecycle": {
+      "content_class": "short_term_news",
+      "update_mode": "replace_latest",
+      "ttl_days": 14.0,
+      "delete_expired": false,
+      "event_cluster_mode": "auto",
+      "event_cluster_window_days": 3.0,
+      "event_cluster_min_similarity": 0.72
+    }
+  },
+  {
+    "source_id": "chinanews-scroll-news",
+    "name": "中国新闻网滚动新闻",
+    "urls": [
+      "https://www.chinanews.com.cn/rss/scroll-news.xml"
+    ],
+    "category": "news",
+    "interval_seconds": 1800,
+    "max_pages": 12,
+    "enabled": true,
+    "workspace": "kg_agent_network",
+    "source_type": "auto",
+    "schedule_mode": "auto",
+    "feed_filter": {
+      "include_patterns": [],
+      "exclude_patterns": [],
+      "include_authors": [],
+      "exclude_authors": [],
+      "include_categories": [],
+      "exclude_categories": [],
+      "allowed_domains": [],
+      "blocked_domains": [],
+      "max_age_days": 14.0
+    },
+    "feed_retention": {
+      "mode": "latest",
+      "max_items": 40,
+      "max_age_days": 14.0
+    },
+    "feed_priority": {
+      "mode": "published_desc",
+      "priority_patterns": [],
+      "preferred_domains": [],
+      "preferred_authors": [],
+      "preferred_categories": []
+    },
+    "feed_dedup": {
+      "mode": "content_signature",
+      "signature_token_limit": 120
+    },
+    "content_lifecycle": {
+      "content_class": "short_term_news",
+      "update_mode": "replace_latest",
+      "ttl_days": 14.0,
+      "delete_expired": false,
+      "event_cluster_mode": "auto",
+      "event_cluster_window_days": 3.0,
+      "event_cluster_min_similarity": 0.72
+    }
+  },
+  {
+    "source_id": "guardian-business",
+    "name": "The Guardian Business",
+    "urls": [
+      "https://www.theguardian.com/business/rss"
+    ],
+    "category": "business",
+    "interval_seconds": 1800,
+    "max_pages": 12,
+    "enabled": true,
+    "workspace": "kg_agent_network",
+    "source_type": "auto",
+    "schedule_mode": "auto",
+    "feed_filter": {
+      "include_patterns": [],
+      "exclude_patterns": [],
+      "include_authors": [],
+      "exclude_authors": [],
+      "include_categories": [],
+      "exclude_categories": [],
+      "allowed_domains": [],
+      "blocked_domains": [],
+      "max_age_days": 14.0
+    },
+    "feed_retention": {
+      "mode": "latest",
+      "max_items": 40,
+      "max_age_days": 14.0
+    },
+    "feed_priority": {
+      "mode": "published_desc",
+      "priority_patterns": [],
+      "preferred_domains": [],
+      "preferred_authors": [],
+      "preferred_categories": []
+    },
+    "feed_dedup": {
+      "mode": "content_signature",
+      "signature_token_limit": 120
+    },
+    "content_lifecycle": {
+      "content_class": "short_term_news",
+      "update_mode": "replace_latest",
+      "ttl_days": 14.0,
+      "delete_expired": false,
+      "event_cluster_mode": "auto",
+      "event_cluster_window_days": 3.0,
+      "event_cluster_min_similarity": 0.72
+    }
+  },
+  {
+    "source_id": "guardian-technology",
+    "name": "The Guardian Technology",
+    "urls": [
+      "https://www.theguardian.com/technology/rss"
+    ],
+    "category": "technology",
+    "interval_seconds": 1800,
+    "max_pages": 10,
+    "enabled": true,
+    "workspace": "kg_agent_network",
+    "source_type": "auto",
+    "schedule_mode": "auto",
+    "feed_filter": {
+      "include_patterns": [],
+      "exclude_patterns": [],
+      "include_authors": [],
+      "exclude_authors": [],
+      "include_categories": [],
+      "exclude_categories": [],
+      "allowed_domains": [],
+      "blocked_domains": [],
+      "max_age_days": 14.0
+    },
+    "feed_retention": {
+      "mode": "latest",
+      "max_items": 35,
+      "max_age_days": 14.0
+    },
+    "feed_priority": {
+      "mode": "published_desc",
+      "priority_patterns": [],
+      "preferred_domains": [],
+      "preferred_authors": [],
+      "preferred_categories": []
+    },
+    "feed_dedup": {
+      "mode": "content_signature",
+      "signature_token_limit": 120
+    },
+    "content_lifecycle": {
+      "content_class": "short_term_news",
+      "update_mode": "replace_latest",
+      "ttl_days": 14.0,
+      "delete_expired": false,
+      "event_cluster_mode": "auto",
+      "event_cluster_window_days": 3.0,
+      "event_cluster_min_similarity": 0.72
+    }
+  },
+  {
+    "source_id": "mit-technology-review",
+    "name": "MIT Technology Review",
+    "urls": [
+      "https://www.technologyreview.com/feed/"
+    ],
+    "category": "technology",
+    "interval_seconds": 3600,
+    "max_pages": 10,
+    "enabled": true,
+    "workspace": "kg_agent_network",
+    "source_type": "auto",
+    "schedule_mode": "auto",
+    "feed_filter": {
+      "include_patterns": [],
+      "exclude_patterns": [],
+      "include_authors": [],
+      "exclude_authors": [],
+      "include_categories": [],
+      "exclude_categories": [],
+      "allowed_domains": [],
+      "blocked_domains": [],
+      "max_age_days": 14.0
+    },
+    "feed_retention": {
+      "mode": "latest",
+      "max_items": 30,
+      "max_age_days": 14.0
+    },
+    "feed_priority": {
+      "mode": "published_desc",
+      "priority_patterns": [],
+      "preferred_domains": [],
+      "preferred_authors": [],
+      "preferred_categories": []
+    },
+    "feed_dedup": {
+      "mode": "content_signature",
+      "signature_token_limit": 120
+    },
+    "content_lifecycle": {
+      "content_class": "short_term_news",
+      "update_mode": "replace_latest",
+      "ttl_days": 14.0,
+      "delete_expired": false,
+      "event_cluster_mode": "auto",
+      "event_cluster_window_days": 3.0,
+      "event_cluster_min_similarity": 0.72
+    }
+  }
+]

@@ -230,11 +230,13 @@ class IngestScheduler:
         utility_llm_client: Any | None = None,
         enable_leader_election: bool = False,
         loop_lease_key: str = "scheduler:loop",
+        default_workspace: str | None = None,
     ):
         self._rag_provider = rag_provider
         self.crawler_adapter = crawler_adapter
         self.source_registry = source_registry or JsonSourceRegistry()
         self.state_store = state_store or JsonCrawlStateStore()
+        self.default_workspace = (default_workspace or "").strip() or None
         self.enabled = bool(enabled)
         self.check_interval_seconds = max(1, int(check_interval_seconds))
         self.coordinator = coordinator or LocalSchedulerCoordinator()
@@ -282,6 +284,8 @@ class IngestScheduler:
         return await self.source_registry.list_sources()
 
     async def add_source(self, source: MonitoredSource) -> MonitoredSource:
+        if source.workspace is None and self.default_workspace:
+            source = replace(source, workspace=self.default_workspace)
         stored = await self.source_registry.upsert_source(source)
         existing_record = await self.state_store.get_record(stored.source_id)
         if existing_record is None or existing_record.last_status == "removed":
@@ -663,7 +667,7 @@ class IngestScheduler:
                         )
                     ):
                         if rag is None and workspace_clusters:
-                            rag = await self._resolve_rag(source.workspace)
+                            rag = await self._resolve_source_rag(source)
                         event_cluster_match = await self._match_event_cluster(
                             source=source,
                             page_key=page_key,
@@ -710,7 +714,7 @@ class IngestScheduler:
                         continue
 
                     if rag is None:
-                        rag = await self._resolve_rag(source.workspace)
+                        rag = await self._resolve_source_rag(source)
                     doc_id = self._build_scheduler_doc_id(
                         source=source,
                         page_key=page_key,
@@ -941,7 +945,7 @@ class IngestScheduler:
                             )
                     if expired_doc_ids and source.content_lifecycle.delete_expired:
                         if rag is None:
-                            rag = await self._resolve_rag(source.workspace)
+                            rag = await self._resolve_source_rag(source)
                         deleted_doc_ids = await self._delete_documents_by_id(
                             rag=rag,
                             doc_ids=expired_doc_ids,
@@ -1121,7 +1125,7 @@ class IngestScheduler:
                 if not expired_doc_ids:
                     return 0
 
-                rag = await self._resolve_rag(source.workspace)
+                rag = await self._resolve_source_rag(source)
                 deleted_doc_ids = await self._delete_documents_by_id(
                     rag=rag,
                     doc_ids=expired_doc_ids,
@@ -1196,7 +1200,7 @@ class IngestScheduler:
             return None
 
         now_iso = _utcnow_iso()
-        rag = await self._resolve_rag(source.workspace)
+        rag = await self._resolve_source_rag(source)
         deleted_doc_ids = await self._delete_documents_by_id(
             rag=rag,
             doc_ids=managed_doc_ids,
@@ -1245,6 +1249,14 @@ class IngestScheduler:
         if asyncio.iscoroutine(resolved):
             return await resolved
         return resolved
+
+    def _source_workspace(self, source: MonitoredSource | None) -> str | None:
+        if source is None:
+            return self.default_workspace
+        return source.workspace or self.default_workspace
+
+    async def _resolve_source_rag(self, source: MonitoredSource):
+        return await self._resolve_rag(self._source_workspace(source))
 
     def _is_due(
         self,
@@ -1484,9 +1496,12 @@ class IngestScheduler:
         dict[str, MonitoredSource],
     ]:
         workspace_sources: dict[str, MonitoredSource] = {}
-        target_workspace = self._workspace_key(source.workspace)
+        target_workspace = self._workspace_key(self._source_workspace(source))
         for candidate_source in await self.source_registry.list_sources():
-            if self._workspace_key(candidate_source.workspace) != target_workspace:
+            candidate_workspace = self._workspace_key(
+                self._source_workspace(candidate_source)
+            )
+            if candidate_workspace != target_workspace:
                 continue
             resolved_source_type = candidate_source.resolved_source_type()
             if not candidate_source.content_lifecycle.tracks_short_term_lifecycle(

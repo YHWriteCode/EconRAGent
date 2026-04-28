@@ -284,6 +284,89 @@ async def test_agent_core_auto_ingest_persists_compact_tool_calls_and_injects_re
 
 
 @pytest.mark.asyncio
+async def test_agent_core_auto_ingest_uses_network_ingest_workspace():
+    captured: dict[str, str | None] = {}
+    resolved_workspaces: list[str] = []
+
+    class _WorkspaceRAG:
+        def __init__(self, workspace: str):
+            self.workspace = workspace
+
+    async def _resolve_rag(workspace: str | None):
+        normalized = (workspace or "").strip()
+        resolved_workspaces.append(normalized)
+        return _WorkspaceRAG(normalized)
+
+    async def _capturing_kg_ingest(**kwargs):
+        rag = kwargs.get("rag")
+        captured["workspace"] = getattr(rag, "workspace", None)
+        return ToolResult(
+            tool_name="kg_ingest",
+            success=True,
+            data={
+                "status": "accepted",
+                "summary": "Accepted 1 document(s) for ingestion (track_id=t1)",
+            },
+            metadata={
+                "track_id": "t1",
+                "document_count": 1,
+                "workspace": captured["workspace"],
+            },
+        )
+
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False, enable_kg_ingest=True),
+        freshness=FreshnessConfig(enable_auto_ingest=True, threshold_seconds=60),
+        runtime=AgentRuntimeConfig(
+            default_workspace="manual-default",
+            network_ingest_workspace="network-live",
+            max_iterations=3,
+        ),
+    )
+    route_judge = _CapturingRouteJudge(
+        routes=[
+            RouteDecision(
+                need_tools=True,
+                need_memory=False,
+                need_web_search=True,
+                need_path_explanation=False,
+                strategy="freshness_aware_search",
+                tool_sequence=[
+                    ToolCallPlan(tool="web_search"),
+                    ToolCallPlan(tool="kg_hybrid_search"),
+                ],
+                reason="realtime",
+                max_iterations=2,
+            )
+        ]
+    )
+    agent = AgentCore(
+        rag_provider=_resolve_rag,
+        config=config,
+        tool_registry=_build_registry(
+            ("web_search", _stub_web_search),
+            ("kg_hybrid_search", _stub_stale_kg_search),
+            ("kg_ingest", _capturing_kg_ingest),
+        ),
+        route_judge=route_judge,
+    )
+
+    response = await agent.chat(
+        query="latest tesla deliveries",
+        session_id="s-network-ingest",
+        workspace="analyst-workspace",
+        use_memory=False,
+    )
+
+    assert response.metadata["freshness_action"] == "auto_ingested"
+    assert captured["workspace"] == "network-live"
+    assert "analyst-workspace" in resolved_workspaces
+    assert "network-live" in resolved_workspaces
+    assert response.tool_calls[-1]["metadata"]["workspace"] == "network-live"
+
+
+@pytest.mark.asyncio
 async def test_agent_core_correction_refresh_sets_metadata_and_annotation():
     config = KGAgentConfig(
         agent_model=AgentModelConfig(provider="disabled"),

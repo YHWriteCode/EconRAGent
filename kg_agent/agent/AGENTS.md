@@ -61,6 +61,10 @@ The normal flow is:
 6. Optionally trigger path explanation and dynamic-graph refresh behavior.
 7. Build the final answer prompt and persist compact memory records.
 
+For WebUI all-knowledge-base retrieval, `workspace="all"` is a sentinel handled inside `AgentCore`: KG and graph retrieval tools should fan out through the dynamic workspace provider and merge tool results across registered workspaces. Do not resolve `"all"` as a real `LightRAG.workspace`.
+
+For dynamic-graph freshness/correction auto-ingest, `AgentCore` should write crawled web pages into `config.runtime.network_ingest_workspace` when it is configured. This only applies to automatic network-derived ingestion; explicit user-directed `kg_ingest` calls keep the active chat workspace.
+
 When a runtime-backed skill initially returns `run_status=running`, `AgentCore` now performs a short bounded polling loop through the skill runtime status/logs/artifacts APIs before final answer generation. This is meant to collapse fast durable runs into a terminal result for normal `chat()` flows without turning the agent path into an unbounded job waiter.
 
 Two additional routing expectations now matter:

@@ -109,6 +109,7 @@ class Crawl4AIAdapter:
             result=result,
             max_content_chars=max_content_chars or self.config.max_content_chars,
             prefer_extracted_content=self.config.llm_extraction_prefer_content,
+            prefer_fit_markdown=self.config.prefer_fit_markdown,
         )
 
     async def crawl_urls(
@@ -206,6 +207,7 @@ class Crawl4AIAdapter:
                     result=result,
                     max_content_chars=max_content_chars or self.config.max_content_chars,
                     prefer_extracted_content=self.config.llm_extraction_prefer_content,
+                    prefer_fit_markdown=self.config.prefer_fit_markdown,
                 )
             )
         return pages
@@ -275,9 +277,46 @@ class Crawl4AIAdapter:
             cache_mode=self._resolve_cache_mode(crawl4ai),
             word_count_threshold=self.config.word_count_threshold,
             page_timeout=self.config.page_timeout_ms,
+            markdown_generator=self._build_markdown_generator(crawl4ai),
+            only_text=True,
+            css_selector=(
+                "article, main, [role='main'], .article, .article-content, "
+                ".post-content, #content"
+            ),
+            excluded_selector=(
+                "nav, footer, aside, form, [role='navigation'], "
+                ".nav, .navbar, .menu, .footer, .site-footer, .sidebar, "
+                ".login, .modal, .share, .related, .recommend, .comment, "
+                ".advertisement, .ads, .ad, .breadcrumb"
+            ),
+            remove_forms=True,
+            remove_overlay_elements=True,
+            excluded_tags=[
+                "nav",
+                "footer",
+                "aside",
+                "form",
+                "script",
+                "style",
+                "noscript",
+                "iframe",
+                "svg",
+                "button",
+            ],
             extraction_strategy=extraction_strategy,
             verbose=False,
             log_console=False,
+        )
+
+    def _build_markdown_generator(self, crawl4ai: Any):
+        if not self.config.content_filter_enabled:
+            return crawl4ai.DefaultMarkdownGenerator()
+        return crawl4ai.DefaultMarkdownGenerator(
+            content_filter=crawl4ai.PruningContentFilter(
+                min_word_threshold=self.config.word_count_threshold,
+                threshold_type="fixed",
+                threshold=self.config.content_filter_threshold,
+            )
         )
 
     def _build_extraction_strategy(self, crawl4ai: Any):
@@ -645,6 +684,7 @@ class Crawl4AIAdapter:
         result: Any,
         max_content_chars: int,
         prefer_extracted_content: bool = False,
+        prefer_fit_markdown: bool = True,
     ) -> CrawledPage:
         success = bool(getattr(result, "success", False))
         metadata = getattr(result, "metadata", None)
@@ -652,7 +692,11 @@ class Crawl4AIAdapter:
             metadata = {}
 
         title = metadata.get("title") or getattr(result, "title", None)
-        markdown = extract_markdown_text(getattr(result, "markdown", ""))
+        markdown_payload = getattr(result, "markdown", "")
+        markdown = extract_markdown_text(
+            markdown_payload,
+            prefer_fit_markdown=prefer_fit_markdown,
+        )
         extracted_content = Crawl4AIAdapter._extract_llm_extracted_text(
             getattr(result, "extracted_content", None)
         )

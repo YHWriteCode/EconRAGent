@@ -64,11 +64,21 @@ def test_crawler_adapter_builds_llm_extraction_strategy(monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
+    class _FakePruningContentFilter:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _FakeDefaultMarkdownGenerator:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
     fake_crawl4ai = SimpleNamespace(
         CacheMode=SimpleNamespace(BYPASS="BYPASS"),
         LLMConfig=_FakeLLMConfig,
         LLMExtractionStrategy=_FakeLLMExtractionStrategy,
         CrawlerRunConfig=_FakeCrawlerRunConfig,
+        PruningContentFilter=_FakePruningContentFilter,
+        DefaultMarkdownGenerator=_FakeDefaultMarkdownGenerator,
     )
     adapter = Crawl4AIAdapter(
         config=CrawlerConfig(
@@ -99,6 +109,18 @@ def test_crawler_adapter_builds_llm_extraction_strategy(monkeypatch):
         "api_token": "test-token",
         "base_url": "https://example.com/v1",
     }
+    assert captured["only_text"] is True
+    assert "article" in captured["css_selector"]
+    assert ".related" in captured["excluded_selector"]
+    assert captured["remove_forms"] is True
+    assert captured["remove_overlay_elements"] is True
+    assert "nav" in captured["excluded_tags"]
+    assert (
+        captured["markdown_generator"]
+        .kwargs["content_filter"]
+        .kwargs["threshold"]
+        == pytest.approx(0.48)
+    )
 
 
 def test_crawler_adapter_prefers_llm_extracted_content_when_configured():
@@ -121,6 +143,31 @@ def test_crawler_adapter_prefers_llm_extracted_content_when_configured():
     assert page.markdown == "Structured title\n\nStructured summary"
     assert page.metadata["content_source"] == "crawl4ai_llm_extraction"
     assert page.metadata["llm_extraction_applied"] is True
+
+
+def test_crawler_adapter_prefers_fit_markdown_for_article_content():
+    markdown = SimpleNamespace(
+        raw_markdown="首页\n直播\n活动\n具体新闻正文不应该被导航淹没",
+        fit_markdown="具体新闻标题\n\n具体新闻正文。",
+    )
+
+    page = Crawl4AIAdapter._normalize_result(
+        url="https://example.com/a",
+        result=SimpleNamespace(
+            success=True,
+            metadata={},
+            title="Example",
+            markdown=markdown,
+            extracted_content="",
+            links=[],
+            redirected_url="https://example.com/a",
+        ),
+        max_content_chars=4000,
+        prefer_fit_markdown=True,
+    )
+
+    assert page.markdown == "具体新闻标题\n\n具体新闻正文。"
+    assert "直播" not in page.markdown
 
 
 def test_extract_search_results_from_duckduckgo_markdown():

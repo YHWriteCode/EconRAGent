@@ -591,6 +591,87 @@ async def test_agent_core_chat_passes_workspace_to_rag_provider():
 
 
 @pytest.mark.asyncio
+async def test_agent_core_chat_all_workspace_fans_out_retrieval():
+    seen_workspaces: list[str] = []
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False),
+        runtime=AgentRuntimeConfig(default_workspace="", max_iterations=3),
+    )
+    route = RouteDecision(
+        need_tools=True,
+        need_memory=False,
+        need_web_search=False,
+        need_path_explanation=False,
+        strategy="factual_qa",
+        tool_sequence=[ToolCallPlan(tool="kg_hybrid_search")],
+        reason="search knowledge",
+        max_iterations=1,
+    )
+
+    class _SearchRAG:
+        def __init__(self, workspace: str):
+            self.workspace = workspace
+
+        async def aquery_data(self, query, param=None):
+            if self.workspace == "macro":
+                return {
+                    "status": "success",
+                    "data": {
+                        "entities": [{"entity": "规模经济"}],
+                        "relationships": [],
+                        "chunks": [
+                            {
+                                "content": "规模经济描述了产量扩大时平均成本下降。",
+                                "file_path": "macro.md",
+                            }
+                        ],
+                        "references": [],
+                    },
+                }
+            return {
+                "status": "no_result",
+                "message": "No query context could be built.",
+                "data": {
+                    "entities": [],
+                    "relationships": [],
+                    "chunks": [],
+                    "references": [],
+                },
+            }
+
+    async def rag_provider(workspace: str):
+        seen_workspaces.append(workspace)
+        return _SearchRAG(workspace)
+
+    async def workspace_lister():
+        return ["empty-default", "macro"]
+
+    agent = AgentCore(
+        rag_provider=rag_provider,
+        workspace_lister=workspace_lister,
+        config=config,
+        route_judge=_StubRouteJudge(route=route),
+    )
+
+    response = await agent.chat(
+        query="规模经济是什么？",
+        session_id="session-all-workspaces",
+        workspace="all",
+        use_memory=False,
+        debug=True,
+    )
+
+    tool_call = response.tool_calls[0]
+    payload = tool_call["data"]["data"]
+    assert response.metadata["workspace"] == "all"
+    assert seen_workspaces == ["empty-default", "macro"]
+    assert tool_call["success"] is True
+    assert payload["entities"][0]["workspace_id"] == "macro"
+    assert payload["chunks"][0]["workspace_id"] == "macro"
+
+
+@pytest.mark.asyncio
 async def test_agent_core_preview_route_uses_smart_memory_window():
     memory = ConversationMemoryStore()
     await memory.append_message(

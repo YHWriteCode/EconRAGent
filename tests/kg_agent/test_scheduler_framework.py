@@ -449,6 +449,42 @@ async def test_scheduler_only_ingests_changed_pages(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_scheduler_uses_default_workspace_for_unscoped_sources(tmp_path: Path):
+    rag = _FakeRAG()
+    resolved_workspaces: list[str | None] = []
+
+    async def _resolve_rag(workspace: str | None):
+        resolved_workspaces.append(workspace)
+        return rag
+
+    scheduler = IngestScheduler(
+        rag_provider=_resolve_rag,
+        crawler_adapter=_FakeCrawlerAdapter([[_page("network content")]]),
+        source_registry=JsonSourceRegistry(str(tmp_path / "sources.json")),
+        state_store=JsonCrawlStateStore(str(tmp_path / "state.json")),
+        enabled=False,
+        default_workspace="network-live",
+    )
+
+    source = await scheduler.add_source(
+        MonitoredSource(
+            source_id="source-network",
+            name="Network Feed",
+            urls=["https://example.com/feed.xml"],
+            interval_seconds=60,
+            max_pages=1,
+        )
+    )
+
+    result = await scheduler.trigger_now(source.source_id)
+
+    assert source.workspace == "network-live"
+    assert result["ingested_count"] == 1
+    assert resolved_workspaces == ["network-live"]
+    assert len(rag.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_sqlite_source_and_state_stores_persist_records(tmp_path: Path):
     db_path = tmp_path / "scheduler.sqlite3"
     registry = SqliteSourceRegistry(str(db_path))

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import re
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -79,6 +81,13 @@ class GraphPathExplainRequest(BaseModel):
 def _normalize_workspace(value: str | None) -> str | None:
     normalized = (value or "").strip()
     return normalized or None
+
+
+def _effective_source_workspace(scheduler: Any, source: Any) -> str | None:
+    explicit_workspace = _normalize_workspace(getattr(source, "workspace", None))
+    if explicit_workspace is not None:
+        return explicit_workspace
+    return _normalize_workspace(getattr(scheduler, "default_workspace", None))
 
 
 def _parse_iso8601(value: str | None) -> datetime | None:
@@ -512,6 +521,48 @@ def _source_entry_from_url(url: str) -> dict[str, Any]:
     }
 
 
+def _event_id_for_feed_item(source_id: str, item_key: str) -> str:
+    digest = hashlib.md5(item_key.encode("utf-8")).hexdigest()[:16]
+    return f"{source_id}:feed-{digest}"
+
+
+def _headline_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    path = parsed.path.strip("/")
+    if path:
+        leaf = path.rsplit("/", 1)[-1]
+        cleaned = leaf.replace("-", " ").replace("_", " ").strip()
+        if cleaned:
+            return cleaned[:120]
+    return parsed.netloc or url
+
+
+def _headline_from_summary(summary: str) -> str:
+    normalized = " ".join((summary or "").strip().split())
+    if not normalized:
+        return ""
+    sentence_match = re.match(r"^.{1,120}?[。！？.!?]", normalized)
+    headline = sentence_match.group(0) if sentence_match else normalized
+    return headline[:120]
+
+
+def _read_doc_status_field(doc_status: Any, key: str) -> Any:
+    if isinstance(doc_status, dict):
+        return doc_status.get(key)
+    return getattr(doc_status, key, None)
+
+
+async def _resolve_doc_status(agent_core: Any, workspace_id: str | None, doc_id: str):
+    workspace_key = _normalize_workspace(workspace_id)
+    if not workspace_key or not doc_id:
+        return None
+    try:
+        rag = await agent_core._resolve_rag(workspace_key)
+        return await rag.doc_status.get_by_id(doc_id)
+    except Exception:
+        return None
+
+
 def _is_expired_at(value: str | None) -> bool:
     expires_at = _parse_iso8601(value)
     expires_ts = _to_timestamp(expires_at)
@@ -572,7 +623,7 @@ async def _build_workspace_stats(
         filtered_sources = [
             source
             for source in sources
-            if _normalize_workspace(getattr(source, "workspace", None)) == workspace_id
+            if _effective_source_workspace(scheduler, source) == workspace_id
         ]
         source_count = len(filtered_sources)
         for source in filtered_sources:
@@ -761,23 +812,100 @@ async def _resolve_event_summary(
         return summary
 
     active_doc_id = str(getattr(cluster_record, "active_doc_id", "") or "").strip()
-    workspace_key = _normalize_workspace(workspace_id)
-    if active_doc_id and workspace_key:
-        try:
-            rag = await agent_core._resolve_rag(workspace_key)
-            doc_status = await rag.doc_status.get_by_id(active_doc_id)
-        except Exception:
-            doc_status = None
-        if isinstance(doc_status, dict):
-            content_summary = str(doc_status.get("content_summary") or "").strip()
-            if content_summary:
-                return content_summary
-        elif doc_status is not None:
-            content_summary = str(getattr(doc_status, "content_summary", "") or "").strip()
-            if content_summary:
-                return content_summary
+    doc_status = await _resolve_doc_status(agent_core, workspace_id, active_doc_id)
+    content_summary = str(_read_doc_status_field(doc_status, "content_summary") or "").strip()
+    if content_summary:
+        return content_summary
     headline = str(getattr(cluster_record, "headline", "") or "").strip()
     return headline
+
+
+async def _resolve_event_headline(
+    *,
+    agent_core: Any,
+    workspace_id: str | None,
+    cluster_record: Any,
+    source_urls: list[str],
+    summary: str,
+) -> str:
+    headline = str(getattr(cluster_record, "headline", "") or "").strip()
+    if headline:
+        return headline
+
+    active_doc_id = str(getattr(cluster_record, "active_doc_id", "") or "").strip()
+    doc_status = await _resolve_doc_status(agent_core, workspace_id, active_doc_id)
+    metadata = _read_doc_status_field(doc_status, "metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    metadata_title = str(
+        metadata.get("title")
+        or metadata.get("source_title")
+        or metadata.get("headline")
+        or ""
+    ).strip()
+    if metadata_title:
+        return metadata_title
+
+    summary_headline = _headline_from_summary(summary)
+    if summary_headline:
+        return summary_headline
+
+    for url in source_urls:
+        fallback = _headline_from_url(url)
+        if fallback:
+            return fallback
+    return "未命名事件"
+
+
+async def _build_feed_item_event_card(
+    *,
+    agent_core: Any,
+    source: Any,
+    workspace_id: str | None,
+    record: Any,
+    item_key: str,
+    expired_doc_ids: set[str],
+) -> dict[str, Any] | None:
+    active_doc_id = str(
+        getattr(record, "item_active_doc_ids", {}).get(item_key) or ""
+    ).strip()
+    if active_doc_id and active_doc_id in expired_doc_ids:
+        return None
+
+    doc_status = await _resolve_doc_status(agent_core, workspace_id, active_doc_id)
+    metadata = _read_doc_status_field(doc_status, "metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    summary = str(_read_doc_status_field(doc_status, "content_summary") or "").strip()
+    headline = (
+        str(metadata.get("title") or metadata.get("source_title") or "").strip()
+        or _headline_from_summary(summary)
+        or _headline_from_url(item_key)
+    )
+    if not summary:
+        summary = headline
+    published_at = (
+        str(getattr(record, "item_published_at", {}).get(item_key) or "").strip()
+        or None
+    )
+    updated_at = str(getattr(record, "last_crawled_at", "") or "").strip() or published_at
+    source_entries = [_source_entry_from_url(item_key)]
+    return {
+        "event_id": _event_id_for_feed_item(source.source_id, item_key),
+        "workspace": workspace_id,
+        "source_id": source.source_id,
+        "cluster_id": "",
+        "category": getattr(source, "category", None),
+        "headline": headline,
+        "summary": summary,
+        "published_at": published_at,
+        "updated_at": updated_at,
+        "sort_time": published_at or updated_at or "",
+        "source_count": len(
+            _dedupe_preserve_order(
+                [str(item.get("domain") or "") for item in source_entries if item.get("domain")]
+            )
+        ),
+        "sources": source_entries,
+    }
 
 
 async def _build_event_cards(
@@ -795,15 +923,17 @@ async def _build_event_cards(
     sources = await scheduler.list_sources()
     filtered_sources = []
     for source in sources:
-        source_workspace = _normalize_workspace(getattr(source, "workspace", None))
+        source_workspace = _effective_source_workspace(scheduler, source)
         if normalized_workspace is not None and source_workspace != normalized_workspace:
             continue
-        if normalized_category and str(getattr(source, "category", "")).strip().lower() != normalized_category:
+        source_category = str(getattr(source, "category", "")).strip().lower()
+        if normalized_category and source_category != normalized_category:
             continue
         filtered_sources.append(source)
 
     events: list[dict[str, Any]] = []
     for source in filtered_sources:
+        source_workspace = _effective_source_workspace(scheduler, source)
         record = await scheduler.state_store.get_record(source.source_id)
         if record is None:
             continue
@@ -830,17 +960,24 @@ async def _build_event_cards(
             )
             summary = await _resolve_event_summary(
                 agent_core=agent_core,
-                workspace_id=getattr(source, "workspace", None),
+                workspace_id=source_workspace,
                 cluster_record=cluster_record,
+            )
+            headline = await _resolve_event_headline(
+                agent_core=agent_core,
+                workspace_id=source_workspace,
+                cluster_record=cluster_record,
+                source_urls=urls,
+                summary=summary,
             )
             events.append(
                 {
                     "event_id": f"{source.source_id}:{cluster_id}",
-                    "workspace": _normalize_workspace(getattr(source, "workspace", None)),
+                    "workspace": source_workspace,
                     "source_id": source.source_id,
                     "cluster_id": cluster_id,
                     "category": getattr(source, "category", None),
-                    "headline": str(getattr(cluster_record, "headline", "") or "").strip(),
+                    "headline": headline,
                     "summary": summary,
                     "published_at": getattr(cluster_record, "published_at", None),
                     "updated_at": getattr(cluster_record, "updated_at", None),
@@ -849,6 +986,27 @@ async def _build_event_cards(
                     "sources": source_entries,
                 }
             )
+        clustered_item_keys = {
+            key
+            for cluster_record in getattr(record, "event_clusters", {}).values()
+            for key in list(getattr(cluster_record, "member_item_keys", []) or [])
+            + [str(getattr(cluster_record, "representative_item_key", "") or "").strip()]
+            if key
+        }
+        for item_key in getattr(record, "recent_item_keys", []) or []:
+            normalized_item_key = str(item_key or "").strip()
+            if not normalized_item_key or normalized_item_key in clustered_item_keys:
+                continue
+            fallback_event = await _build_feed_item_event_card(
+                agent_core=agent_core,
+                source=source,
+                workspace_id=source_workspace,
+                record=record,
+                item_key=normalized_item_key,
+                expired_doc_ids=expired_doc_ids,
+            )
+            if fallback_event is not None:
+                events.append(fallback_event)
 
     events.sort(key=_event_sort_key, reverse=True)
     return events
@@ -870,17 +1028,17 @@ async def _find_event_by_id(
     if record is None:
         return None
     cluster_record = getattr(record, "event_clusters", {}).get(cluster_id)
-    if cluster_record is None:
-        return None
     events = await _build_event_cards(
         agent_core=agent_core,
         scheduler=scheduler,
-        workspace=getattr(source, "workspace", None),
+        workspace=_effective_source_workspace(scheduler, source),
         category=None,
     )
     for item in events:
         if item.get("event_id") == event_id:
             return item
+    if cluster_record is None:
+        return None
     return None
 
 
@@ -1136,7 +1294,7 @@ def create_webui_routes(
         if scheduler is not None:
             sources = await scheduler.list_sources()
             for source in sources:
-                if _normalize_workspace(getattr(source, "workspace", None)) != workspace_id:
+                if _effective_source_workspace(scheduler, source) != workspace_id:
                     continue
                 await scheduler.remove_source(source.source_id)
 
@@ -1548,7 +1706,7 @@ def create_webui_routes(
         sources = await scheduler.list_sources()
         items = []
         for source in sources:
-            source_workspace = _normalize_workspace(getattr(source, "workspace", None))
+            source_workspace = _effective_source_workspace(scheduler, source)
             if normalized_workspace is not None and source_workspace != normalized_workspace:
                 continue
             items.append(

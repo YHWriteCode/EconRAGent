@@ -1,2 +1,0 @@
-有效面板个体数不足 2，无法稳定执行固定效应 PanelOLS；回退为仅使用单标的因子/动量信号，不输出显著因子。
-entity_count=0, observation_count=0

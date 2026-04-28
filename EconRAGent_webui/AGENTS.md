@@ -78,6 +78,7 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 - Avoid using visual-only movement such as `transform` for major layout placement when it affects scroll boundaries; prefer real grid/flex layout space.
 - Keep `chat` and `graph` as fixed-viewport work surfaces. Only nested regions should scroll: chat message feed, graph filter panel, sidebar history, and spaces database list.
 - `discover` is a news/feed page and may use normal page scrolling.
+- Discover news cards should render a useful title even when crawler event clustering returns an empty headline; fall back to summary text or source labels rather than showing backend placeholders.
 - Preserve the chat composer contract: attachment/search menu from the `+` button, retrieval mode buttons below the input, and auto-growing textarea with an internal max-height.
 - Chat attachment picking is narrower than workspace import: the composer should client-filter to the file formats the chat attachment pipeline can actually read today, and it should reject unsupported legacy binaries such as `.doc` before upload.
 - The chat composer knowledge-base chip should display the workspace `display_name` only. Keep the internal `workspace_id` for API requests and graph/chat filter synchronization, but do not expose uniqueness suffixes or other backend-only identifiers in the visible label.
@@ -89,4 +90,5 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 - Graph edges should render as lines without inline relation text; clicking a node or edge may open an over-canvas detail panel for descriptions, source/type, timestamps, and relation names.
 - Graph page defaults currently start from `workspace="all"` and `maxNodes=400`; if you change these defaults, keep `src/pages/GraphPage.tsx`, the graph route tests, and the API-side limits in sync.
 - Applying a graph database filter writes the selected workspace into the shared Zustand app state so the chat page uses the same database for retrieval; `workspace="all"` maps to an empty shared workspace id.
+- When the shared workspace id is empty, the chat request must still send `workspace="all"` so backend retrieval fans out across registered knowledge-base workspaces instead of falling back to the default workspace.
 - `chat`, `graph`, and `discover` remain route-level chunks, but the app preloads these page modules and the Cytoscape renderer after boot so first navigation does not start from a cold dynamic import.

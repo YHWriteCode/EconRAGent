@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -35,7 +36,7 @@ from kg_agent.config import KGAgentConfig, load_project_dotenv, resolve_project_
 from kg_agent.crawler.crawler_adapter import Crawl4AIAdapter
 from kg_agent.crawler.crawl_state_store import build_crawl_state_store
 from kg_agent.crawler.scheduler import IngestScheduler, build_scheduler_coordinator
-from kg_agent.crawler.source_registry import build_source_registry
+from kg_agent.crawler.source_registry import MonitoredSource, build_source_registry
 from kg_agent.mcp.adapter import MCPAdapter
 from kg_agent.memory.conversation_memory import ConversationMemoryStore
 from kg_agent.memory.cross_session_store import CrossSessionStore
@@ -45,6 +46,58 @@ from kg_agent.workspace_registry import WorkspaceRecord, build_workspace_registr
 
 load_project_dotenv(override=False)
 logger = logging.getLogger(__name__)
+
+
+def _normalize_scheduler_bootstrap_sources(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, dict):
+        payload = payload.get("sources", [])
+    if not isinstance(payload, list):
+        return []
+    return [dict(item) for item in payload if isinstance(item, dict)]
+
+
+def _load_scheduler_bootstrap_sources(config: KGAgentConfig) -> list[dict[str, Any]]:
+    sources = _normalize_scheduler_bootstrap_sources(
+        config.scheduler.bootstrap_sources_json
+    )
+    source_file = (config.scheduler.bootstrap_sources_file or "").strip()
+    if not source_file:
+        return sources
+
+    path = resolve_project_path(source_file)
+    try:
+        file_payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        logger.warning("Scheduler bootstrap sources file does not exist: %s", path)
+        return sources
+    except json.JSONDecodeError as exc:
+        logger.warning("Scheduler bootstrap sources file is invalid JSON: %s (%s)", path, exc)
+        return sources
+    except OSError as exc:
+        logger.warning("Failed to read scheduler bootstrap sources file: %s (%s)", path, exc)
+        return sources
+    sources.extend(_normalize_scheduler_bootstrap_sources(file_payload))
+    return sources
+
+
+async def _bootstrap_scheduler_sources(
+    scheduler: IngestScheduler | None,
+    config: KGAgentConfig,
+) -> int:
+    if scheduler is None:
+        return 0
+    bootstrapped = 0
+    for payload in _load_scheduler_bootstrap_sources(config):
+        try:
+            source = MonitoredSource.from_dict(payload)
+        except (TypeError, ValueError) as exc:
+            logger.warning("Skipping invalid scheduler bootstrap source: %s", exc)
+            continue
+        await scheduler.add_source(source)
+        bootstrapped += 1
+    if bootstrapped:
+        logger.info("Bootstrapped %d scheduler source(s).", bootstrapped)
+    return bootstrapped
 
 
 class EnvLightRAGProvider:
@@ -621,6 +674,7 @@ def build_agent_core_from_env(
     *,
     rag: LightRAG | None = None,
     rag_provider=None,
+    workspace_lister=None,
     crawler_adapter: Crawl4AIAdapter | None = None,
 ) -> AgentCore:
     config = KGAgentConfig.from_env()
@@ -643,6 +697,7 @@ def build_agent_core_from_env(
     if rag_provider is not None:
         return AgentCore(
             rag_provider=rag_provider,
+            workspace_lister=workspace_lister,
             config=config,
             mcp_adapter=mcp_adapter,
             crawler_adapter=crawler_adapter,
@@ -702,6 +757,14 @@ def create_app(
     )
     upload_store = UploadStore(config_obj.persistence.uploads_dir)
 
+    async def list_registered_workspace_ids() -> list[str]:
+        records = await workspace_registry.list_workspaces()
+        return [
+            record.workspace_id
+            for record in records
+            if record.workspace_id and not record.archived
+        ]
+
     if agent_core is None:
         crawler_adapter = build_crawler_adapter_from_env(config=config_obj)
         mcp_adapter = build_mcp_adapter_from_env(config=config_obj)
@@ -724,6 +787,7 @@ def create_app(
             manage_rag_lifecycle = True
             agent_core = AgentCore(
                 rag_provider=rag_provider.get,
+                workspace_lister=list_registered_workspace_ids,
                 config=config_obj,
                 mcp_adapter=mcp_adapter,
                 crawler_adapter=crawler_adapter,
@@ -775,6 +839,7 @@ def create_app(
             utility_llm_client=getattr(agent_core, "utility_llm_client", None),
             enable_leader_election=config_obj.scheduler.enable_leader_election,
             loop_lease_key=config_obj.scheduler.loop_lease_key,
+            default_workspace=config_obj.runtime.network_ingest_workspace,
         )
         agent_core.crawl_state_store = scheduler.state_store
 
@@ -782,19 +847,31 @@ def create_app(
     async def lifespan(app: FastAPI):
         try:
             default_workspace = (config_obj.runtime.default_workspace or "").strip()
-            if default_workspace:
-                existing_workspace = await workspace_registry.get_workspace(default_workspace)
+            network_workspace = (
+                config_obj.runtime.network_ingest_workspace or ""
+            ).strip()
+            workspace_bootstrap_records = [
+                (default_workspace, "Default workspace"),
+                (network_workspace, "Network ingest workspace"),
+            ]
+            seen_bootstrap_workspaces: set[str] = set()
+            for workspace_id, description in workspace_bootstrap_records:
+                if not workspace_id or workspace_id in seen_bootstrap_workspaces:
+                    continue
+                seen_bootstrap_workspaces.add(workspace_id)
+                existing_workspace = await workspace_registry.get_workspace(workspace_id)
                 if existing_workspace is None:
                     await workspace_registry.upsert_workspace(
                         WorkspaceRecord(
-                            workspace_id=default_workspace,
-                            display_name=default_workspace,
-                            description="Default workspace",
+                            workspace_id=workspace_id,
+                            display_name=workspace_id,
+                            description=description,
                             created_at=datetime.now().astimezone().isoformat(),
                             updated_at=datetime.now().astimezone().isoformat(),
                         )
                     )
             if scheduler is not None:
+                await _bootstrap_scheduler_sources(scheduler, config_obj)
                 await scheduler.start()
             if agent_core is not None:
                 initialize_external = getattr(

@@ -81,6 +81,8 @@ kg_agent/
 - Prefer schema-bounded LLM normalization for fuzzy skill parameters when a utility model is available; keep regex and hardcoded parsing as validation/fallback layers rather than the primary reasoning path.
 - Do not hardcode domain-specific placeholder tools into the native built-in registry; specialized integrations belong behind MCP or the skill runtime.
 - Prefer `rag_provider`-based dynamic workspace loading in API-facing flows instead of binding the app to one fixed `LightRAG` instance.
+- Network-origin automatic ingestion should use `config.runtime.network_ingest_workspace` when set. This covers crawler/scheduler ingest and AgentCore freshness/correction auto-ingest, while manual workspace imports and explicit `kg_ingest` calls should keep using the caller-selected workspace.
+- Scheduler default source bootstrapping should remain config-driven and use normal `MonitoredSource` records, not hardcoded crawl targets inside code.
 - Dynamic workspace `LightRAG` instances should receive `config.runtime.default_domain_schema` through `addon_params`; the default is `economy` so WebUI graph filters and extraction prompts share the same schema unless explicitly configured otherwise.
 - Keep workspace upload import format support aligned across `kg_agent/uploads.py`, `kg_agent/api/webui_routes.py`, and the WebUI spaces dialog.
 - Chat attachments are a separate path from workspace import: planner-facing attachment metadata should include enough structure for route selection and skill binding, and unsupported chat binaries should fail clearly instead of being treated like readable documents.

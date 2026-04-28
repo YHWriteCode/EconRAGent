@@ -18,6 +18,7 @@ This file is the top-level guide for AI coding assistants and contributors worki
 EconRAGent repo root
 |-- AGENTS.md             # This file
 |-- README.md             # Human-facing project overview and setup
+|-- scheduler_sources.json # Local JSON scheduler source registry
 |-- lightrag_fork/        # Graph/vector backend layer
 |-- kg_agent/             # Agent orchestration and unified API layer
 |-- EconRAGent_webui/     # React + TypeScript + Vite frontend source
@@ -57,5 +58,7 @@ node .\node_modules\vite\bin\vite.js build
 ## 4. Documentation Hygiene
 
 - Keep `README.md` aligned with the current developer workflow.
+- Keep `.env.example` aligned with runtime workspace policy, including `KG_AGENT_DEFAULT_WORKSPACE` and `KG_AGENT_NETWORK_INGEST_WORKSPACE`.
+- Keep `scheduler_sources.json` as normal `MonitoredSource` JSON payloads. Recurring network ingest sources should target the dedicated network-ingest workspace unless there is a specific reason to isolate them elsewhere.
 - If you add or move public API routes, update `kg_agent/api/AGENTS.md` and the README API/setup sections.
 - If you add a new top-level subsystem, give it its own `AGENTS.md` instead of overloading unrelated guides.

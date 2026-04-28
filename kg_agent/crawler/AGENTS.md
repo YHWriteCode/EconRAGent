@@ -41,6 +41,8 @@ crawler/
 - `CrawlStateRecord` tracks content hashes, retained feed items, active doc IDs, expiry markers, and event-cluster bookkeeping.
 - `IngestScheduler` coordinates recurring polling and bridges crawler output into `rag.ainsert()` or deletion/supersession flows when the active backend supports them.
 - Scheduler ingest passes crawler provenance through `rag.ainsert(metadatas=...)`; keep `source_label="crawler"` while leaving `file_path` as the URL or feed item key for citation compatibility.
+- `IngestScheduler.default_workspace` is the fallback workspace for sources that do not explicitly set `MonitoredSource.workspace`. App bootstrap wires it from `config.runtime.network_ingest_workspace` so recurring network ingest can be isolated in a dedicated knowledge base.
+- Default monitored sources may be bootstrapped at app startup from scheduler config JSON/file inputs. They should still be normal `MonitoredSource` payloads and should flow through `scheduler.add_source()` so validation, workspace fallback, and persistence stay centralized.
 
 ---
 
@@ -51,7 +53,9 @@ crawler/
 - Direct URL mode crawls user-provided URLs.
 - Discovery mode crawls a DuckDuckGo results page, extracts candidate URLs, ranks them, and then crawls the selected pages.
 - Feed-aware scheduling adds source typing, canonical URL tracking, retention windows, dedup, and optional short-term news lifecycle behavior.
+- Crawl4AI page results should prefer filtered article/body markdown (`fit_markdown`) when available so recurring news ingest stores concrete article content instead of site navigation, home-page chrome, or listing widgets.
 - Scheduler coordination supports local leases and optional Redis leases so multiple workers do not process the same source loop blindly.
+- Sources with an explicit `workspace` still target that workspace. Unscoped sources should resolve to the configured network-ingest workspace before falling back through the RAG provider.
 
 This layer is also where short-term news handling lives:
 

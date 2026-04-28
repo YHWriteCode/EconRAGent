@@ -59,15 +59,38 @@ function sourceTitle(source: DiscoverSourceEntry) {
   return source.domain || source.label || source.url;
 }
 
+function headlineFromSummary(summary: string) {
+  const normalized = summary.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    return "";
+  }
+  const firstSentence = normalized.match(/^.{1,120}?[。！？.!?]/)?.[0] ?? normalized;
+  return firstSentence.slice(0, 120);
+}
+
+function eventHeadline(event: DiscoverEvent) {
+  const headline = event.headline?.trim();
+  if (headline) {
+    return headline;
+  }
+  const summaryHeadline = headlineFromSummary(event.summary || "");
+  if (summaryHeadline) {
+    return summaryHeadline;
+  }
+  const firstSource = event.sources[0];
+  return firstSource ? sourceTitle(firstSource) : "未命名事件";
+}
+
 function NewsVisual({ event, index }: { event: DiscoverEvent; index: number }) {
-  const category = (event.category || event.headline || "market")
+  const headline = eventHeadline(event);
+  const category = (event.category || headline || "market")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-");
 
   return (
     <div
       className={`news-visual news-visual-${index % 6}`}
-      aria-label={`${event.headline || "新闻"} 配图`}
+      aria-label={`${headline || "新闻"} 配图`}
       role="img"
     >
       <span>{event.category || "Market"}</span>
@@ -184,7 +207,7 @@ export function DiscoverPage() {
           <article className="news-card featured-news-card">
             <div className="featured-news-copy">
               <span className="news-kicker">焦点新闻</span>
-              <h1>{featuredEvent.headline || "未命名事件"}</h1>
+              <h1>{eventHeadline(featuredEvent)}</h1>
               <p>{featuredEvent.summary || "暂无摘要"}</p>
               <div className="featured-news-meta">
                 <span>{formatTime(featuredEvent.updated_at || featuredEvent.published_at)}</span>
@@ -205,7 +228,7 @@ export function DiscoverPage() {
               <article className="news-card compact-news-card" key={event.event_id}>
                 <NewsVisual event={event} index={index + 1} />
                 <div className="compact-news-copy">
-                  <h2>{event.headline || "未命名事件"}</h2>
+                  <h2>{eventHeadline(event)}</h2>
                   <p>{event.summary || "暂无摘要"}</p>
                 </div>
                 <footer className="compact-news-footer">

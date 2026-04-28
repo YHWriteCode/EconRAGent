@@ -980,3 +980,48 @@ def test_webui_discover_routes_paginate_and_fallback_to_doc_summary(tmp_path):
             "urls": ["https://alpha.example/feed"],
         }
     ]
+
+
+def test_webui_discover_routes_include_recent_feed_items_without_clusters(tmp_path):
+    client, agent_core, scheduler, *_ = _build_client(tmp_path)
+    record = scheduler.state_store._records["source-alpha"]
+    item_key = "https://alpha.example/articles/fallback-news"
+    record.recent_item_keys.append(item_key)
+    record.item_active_doc_ids[item_key] = "doc-alpha-feed"
+    record.item_published_at[item_key] = "2026-04-06T08:00:00+00:00"
+    rag = asyncio.run(agent_core._resolve_rag("ws-alpha"))
+    rag.doc_status.by_id["doc-alpha-feed"] = {
+        "content_summary": "LLM 生成的单条 Feed 摘要",
+        "metadata": {"title": "Alpha Feed 单条新闻"},
+    }
+
+    response = client.get(
+        "/agent/discover/events",
+        params={"workspace": "ws-alpha", "limit": 10},
+    )
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    fallback = next(item for item in items if item["headline"] == "Alpha Feed 单条新闻")
+    assert fallback["summary"] == "LLM 生成的单条 Feed 摘要"
+    assert fallback["source_count"] == 1
+    assert fallback["sources"][0]["url"] == item_key
+
+
+def test_webui_discover_routes_fallback_to_summary_for_empty_cluster_headline(tmp_path):
+    client, _agent_core, scheduler, *_ = _build_client(tmp_path)
+    record = scheduler.state_store._records["source-alpha"]
+    record.event_clusters["cluster-new"].headline = ""
+
+    response = client.get(
+        "/agent/discover/events",
+        params={"workspace": "ws-alpha", "limit": 10},
+    )
+
+    assert response.status_code == 200
+    cluster = next(
+        item
+        for item in response.json()["items"]
+        if item["event_id"] == "source-alpha:cluster-new"
+    )
+    assert cluster["headline"] == "由文档状态回退生成的事件摘要"

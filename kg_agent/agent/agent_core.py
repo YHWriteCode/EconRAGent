@@ -4,7 +4,7 @@ import asyncio
 import inspect
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable
@@ -38,6 +38,7 @@ from kg_agent.skills import (
     SkillPlan,
     SkillRegistry,
 )
+from kg_agent.tools.base import ToolResult
 from kg_agent.uploads import UploadStore
 
 
@@ -76,6 +77,13 @@ ATTACHMENT_REFERENCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 FILE_ORIENTED_SKILL_NAMES = {"pdf", "xlsx", "pptx"}
+ALL_WORKSPACES_SENTINEL = "all"
+MULTI_WORKSPACE_TOOL_NAMES = {
+    "kg_hybrid_search",
+    "kg_naive_search",
+    "graph_entity_lookup",
+    "graph_relation_trace",
+}
 
 
 @dataclass
@@ -168,7 +176,7 @@ class PreparedAgentRun:
 @dataclass
 class PlannedAgentRun:
     context: AgentRunContext
-    rag: LightRAG
+    rag: LightRAG | None
     session_context: dict[str, Any]
     user_profile: dict[str, Any] | None
     route: RouteDecision
@@ -178,6 +186,7 @@ class PlannedAgentRun:
 
 
 RagProvider = Callable[[str | None], LightRAG | Awaitable[LightRAG]]
+WorkspaceLister = Callable[[], list[str] | Awaitable[list[str]]]
 
 
 class AgentCore:
@@ -201,9 +210,11 @@ class AgentCore:
         skill_loader: SkillLoader | None = None,
         skill_executor: SkillExecutor | None = None,
         upload_store: UploadStore | None = None,
+        workspace_lister: WorkspaceLister | None = None,
     ):
         self._rag = rag
         self._rag_provider = rag_provider
+        self._workspace_lister = workspace_lister
         self.config = config or KGAgentConfig.from_env()
         self.llm_client = AgentLLMClient(self.config.agent_model)
         utility_model_config = getattr(self.config, "utility_model", None)
@@ -718,6 +729,14 @@ class AgentCore:
             )
         return self._rag
 
+    def _network_ingest_workspace(self) -> str | None:
+        workspace = (self.config.runtime.network_ingest_workspace or "").strip()
+        return workspace or None
+
+    @staticmethod
+    def _is_all_workspace(workspace: str | None) -> bool:
+        return str(workspace or "").strip().lower() == ALL_WORKSPACES_SENTINEL
+
     async def _prepare_agent_run(
         self,
         *,
@@ -863,7 +882,13 @@ class AgentCore:
                 attachment_context.get("unsupported_multimodal", False)
             ),
         )
-        rag = await self._resolve_rag(context.workspace)
+        rag = (
+            None
+            if self._can_fan_out_all_workspaces(context.workspace)
+            else await self._resolve_rag(
+                None if self._is_all_workspace(context.workspace) else context.workspace
+            )
+        )
         session_context = await self._build_session_context(
             query=self._query_for_run(context),
             session_id=context.session_id,
@@ -1419,11 +1444,13 @@ class AgentCore:
         *,
         context: AgentRunContext,
         route: RouteDecision,
-        rag: LightRAG,
+        rag: LightRAG | None,
         session_context: dict[str, Any],
         user_profile: dict[str, Any] | None,
         raw_tool_calls: list[dict[str, Any]],
     ) -> DynamicGraphUpdateResult:
+        if rag is None:
+            return DynamicGraphUpdateResult()
         if route.strategy == "freshness_aware_search":
             return await self._handle_freshness_aware_search(
                 context=context,
@@ -1564,6 +1591,14 @@ class AgentCore:
         if not pages:
             return DynamicGraphUpdateResult()
 
+        ingest_context = context
+        ingest_rag = rag
+        ingest_workspace = self._network_ingest_workspace()
+        if ingest_workspace and ingest_workspace != (context.workspace or ""):
+            if self._rag_provider is not None:
+                ingest_context = replace(context, workspace=ingest_workspace)
+                ingest_rag = await self._resolve_rag(ingest_workspace)
+
         plan = type("ToolPlanLike", (), {})()
         plan.tool = "kg_ingest"
         plan.args = {}
@@ -1579,8 +1614,8 @@ class AgentCore:
             },
         }
         result = await self._execute_tool_plan(
-            context=context,
-            rag=rag,
+            context=ingest_context,
+            rag=ingest_rag,
             session_context=session_context,
             user_profile=user_profile,
             tool_plan=plan,
@@ -1595,13 +1630,22 @@ class AgentCore:
         self,
         *,
         context: AgentRunContext,
-        rag: LightRAG,
+        rag: LightRAG | None,
         session_context: dict[str, Any],
         user_profile: dict[str, Any] | None,
         tool_plan: Any,
         raw_tool_calls: list[dict[str, Any]],
         query_override: str | None = None,
     ):
+        if self._should_fan_out_workspace_tool(context=context, tool_plan=tool_plan):
+            return await self._execute_multi_workspace_tool_plan(
+                context=context,
+                session_context=session_context,
+                user_profile=user_profile,
+                tool_plan=tool_plan,
+                raw_tool_calls=raw_tool_calls,
+                query_override=query_override,
+            )
         return await self._execute_capability(
             capability_name=tool_plan.tool,
             context=context,
@@ -1612,6 +1656,271 @@ class AgentCore:
             raw_tool_calls=raw_tool_calls,
             query_override=query_override,
             input_bindings=getattr(tool_plan, "input_bindings", {}) or {},
+        )
+
+    def _should_fan_out_workspace_tool(
+        self,
+        *,
+        context: AgentRunContext,
+        tool_plan: Any,
+    ) -> bool:
+        return (
+            self._can_fan_out_all_workspaces(context.workspace)
+            and getattr(tool_plan, "tool", None) in MULTI_WORKSPACE_TOOL_NAMES
+        )
+
+    def _can_fan_out_all_workspaces(self, workspace: str | None) -> bool:
+        return (
+            self._is_all_workspace(workspace)
+            and self._rag_provider is not None
+            and self._workspace_lister is not None
+        )
+
+    async def _execute_multi_workspace_tool_plan(
+        self,
+        *,
+        context: AgentRunContext,
+        session_context: dict[str, Any],
+        user_profile: dict[str, Any] | None,
+        tool_plan: Any,
+        raw_tool_calls: list[dict[str, Any]],
+        query_override: str | None = None,
+    ):
+        workspace_ids = await self._list_all_workspace_ids()
+        if not workspace_ids:
+            return self._build_empty_multi_workspace_result(tool_plan.tool)
+
+        results: list[tuple[str, ToolResult]] = []
+        input_bindings = getattr(tool_plan, "input_bindings", {}) or {}
+        for workspace_id in workspace_ids:
+            per_workspace_context = replace(context, workspace=workspace_id)
+            rag = await self._resolve_rag(workspace_id)
+            result = await self._execute_capability(
+                capability_name=tool_plan.tool,
+                context=per_workspace_context,
+                rag=rag,
+                session_context=session_context,
+                user_profile=user_profile,
+                capability_args=getattr(tool_plan, "args", None),
+                raw_tool_calls=raw_tool_calls,
+                query_override=query_override,
+                input_bindings=input_bindings,
+            )
+            results.append((workspace_id, result))
+
+        return self._merge_multi_workspace_results(tool_plan.tool, results)
+
+    async def _list_all_workspace_ids(self) -> list[str]:
+        if self._workspace_lister is None:
+            return []
+        result = self._workspace_lister()
+        if inspect.isawaitable(result):
+            result = await result
+        workspace_ids: list[str] = []
+        seen: set[str] = set()
+        for item in result or []:
+            workspace_id = str(item or "").strip()
+            if (
+                not workspace_id
+                or workspace_id.lower() == ALL_WORKSPACES_SENTINEL
+                or workspace_id in seen
+            ):
+                continue
+            workspace_ids.append(workspace_id)
+            seen.add(workspace_id)
+        return workspace_ids
+
+    @staticmethod
+    def _build_empty_multi_workspace_result(tool_name: str):
+        return ToolResult(
+            tool_name=tool_name,
+            success=False,
+            data={
+                "status": "no_result",
+                "summary": "No workspaces are registered for all-workspace retrieval.",
+                "data": {
+                    "entities": [],
+                    "relationships": [],
+                    "chunks": [],
+                    "references": [],
+                },
+            },
+            error="No workspaces are registered for all-workspace retrieval.",
+            metadata={
+                "workspace": ALL_WORKSPACES_SENTINEL,
+                "queried_workspaces": [],
+                "successful_workspaces": [],
+                "failed_workspaces": [],
+            },
+        )
+
+    @classmethod
+    def _merge_multi_workspace_results(
+        cls,
+        tool_name: str,
+        results: list[tuple[str, ToolResult]],
+    ):
+        if tool_name in {"kg_hybrid_search", "kg_naive_search"}:
+            return cls._merge_multi_workspace_retrieval_results(tool_name, results)
+        return cls._merge_multi_workspace_graph_results(tool_name, results)
+
+    @staticmethod
+    def _workspace_tagged_item(item: Any, workspace_id: str) -> Any:
+        if not isinstance(item, dict):
+            return item
+        tagged = dict(item)
+        tagged.setdefault("workspace", workspace_id)
+        tagged.setdefault("workspace_id", workspace_id)
+        return tagged
+
+    @classmethod
+    def _merge_multi_workspace_retrieval_results(
+        cls,
+        tool_name: str,
+        results: list[tuple[str, ToolResult]],
+    ):
+        merged_payload: dict[str, list[Any]] = {
+            "entities": [],
+            "relationships": [],
+            "chunks": [],
+            "references": [],
+        }
+        workspace_summaries: list[dict[str, Any]] = []
+        successful_workspaces: list[str] = []
+        failed_workspaces: list[dict[str, str | None]] = []
+
+        for workspace_id, result in results:
+            data = result.data if isinstance(result.data, dict) else {}
+            payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+            counts = {
+                key: len(value)
+                for key, value in payload.items()
+                if key in merged_payload and isinstance(value, list)
+            }
+            workspace_summaries.append(
+                {
+                    "workspace": workspace_id,
+                    "success": result.success,
+                    "summary": result.summary(),
+                    "counts": counts,
+                }
+            )
+            if result.success:
+                successful_workspaces.append(workspace_id)
+            else:
+                failed_workspaces.append(
+                    {"workspace": workspace_id, "error": result.error}
+                )
+            for key in merged_payload:
+                values = payload.get(key)
+                if isinstance(values, list):
+                    merged_payload[key].extend(
+                        cls._workspace_tagged_item(item, workspace_id)
+                        for item in values
+                    )
+
+        total_entities = len(merged_payload["entities"])
+        total_relationships = len(merged_payload["relationships"])
+        total_chunks = len(merged_payload["chunks"])
+        success = bool(successful_workspaces) and (
+            total_entities > 0 or total_relationships > 0 or total_chunks > 0
+        )
+        summary = (
+            f"Retrieved {total_entities} entities, {total_relationships} relationships, "
+            f"and {total_chunks} chunks across {len(results)} workspaces"
+        )
+        return ToolResult(
+            tool_name=tool_name,
+            success=success,
+            data={
+                "status": "success" if success else "no_result",
+                "summary": summary,
+                "data": merged_payload,
+                "workspace_results": workspace_summaries,
+            },
+            error=None if success else "No query context could be built from any workspace.",
+            metadata={
+                "workspace": ALL_WORKSPACES_SENTINEL,
+                "queried_workspaces": [workspace for workspace, _ in results],
+                "successful_workspaces": successful_workspaces,
+                "failed_workspaces": failed_workspaces,
+            },
+        )
+
+    @classmethod
+    def _merge_multi_workspace_graph_results(
+        cls,
+        tool_name: str,
+        results: list[tuple[str, ToolResult]],
+    ):
+        successful_workspaces = [
+            workspace_id for workspace_id, result in results if result.success
+        ]
+        failed_workspaces = [
+            {"workspace": workspace_id, "error": result.error}
+            for workspace_id, result in results
+            if not result.success
+        ]
+        workspace_results: list[dict[str, Any]] = []
+        paths: list[Any] = []
+        candidate_labels: list[Any] = []
+        nodes: list[Any] = []
+        edges: list[Any] = []
+
+        for workspace_id, result in results:
+            data = result.data if isinstance(result.data, dict) else {}
+            workspace_results.append(
+                {
+                    "workspace": workspace_id,
+                    "success": result.success,
+                    "summary": result.summary(),
+                }
+            )
+            paths_payload = (
+                data.get("paths", []) if isinstance(data.get("paths"), list) else []
+            )
+            for path in paths_payload:
+                paths.append(cls._workspace_tagged_item(path, workspace_id))
+            for label in (
+                data.get("candidate_labels", [])
+                if isinstance(data.get("candidate_labels"), list)
+                else []
+            ):
+                candidate_labels.append({"workspace": workspace_id, "label": label})
+            graph = data.get("graph") if isinstance(data.get("graph"), dict) else {}
+            graph_nodes = (
+                graph.get("nodes", []) if isinstance(graph.get("nodes"), list) else []
+            )
+            for node in graph_nodes:
+                nodes.append(cls._workspace_tagged_item(node, workspace_id))
+            graph_edges = (
+                graph.get("edges", []) if isinstance(graph.get("edges"), list) else []
+            )
+            for edge in graph_edges:
+                edges.append(cls._workspace_tagged_item(edge, workspace_id))
+
+        success = bool(successful_workspaces)
+        summary = (
+            f"Found graph results in {len(successful_workspaces)} of {len(results)} workspaces"
+        )
+        return ToolResult(
+            tool_name=tool_name,
+            success=success,
+            data={
+                "status": "success" if success else "no_result",
+                "summary": summary,
+                "workspace_results": workspace_results,
+                "paths": paths,
+                "candidate_labels": candidate_labels,
+                "graph": {"nodes": nodes, "edges": edges},
+            },
+            error=None if success else "No graph results were found in any workspace.",
+            metadata={
+                "workspace": ALL_WORKSPACES_SENTINEL,
+                "queried_workspaces": [workspace for workspace, _ in results],
+                "successful_workspaces": successful_workspaces,
+                "failed_workspaces": failed_workspaces,
+            },
         )
 
     async def _execute_skill_plan(

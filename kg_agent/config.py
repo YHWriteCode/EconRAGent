@@ -571,6 +571,9 @@ class CrawlerConfig:
     max_content_chars: int = 4000
     word_count_threshold: int = 20
     page_timeout_ms: int = 30000
+    content_filter_enabled: bool = True
+    content_filter_threshold: float = 0.48
+    prefer_fit_markdown: bool = True
     llm_extraction_enabled: bool = False
     llm_extraction_provider: str = ""
     llm_extraction_api_token: str = ""
@@ -600,6 +603,15 @@ class CrawlerConfig:
             ),
             page_timeout_ms=_env_int(
                 "KG_AGENT_WEB_CRAWLER_PAGE_TIMEOUT_MS", 30000
+            ),
+            content_filter_enabled=_env_bool(
+                "KG_AGENT_WEB_CRAWLER_CONTENT_FILTER_ENABLED", True
+            ),
+            content_filter_threshold=_env_float(
+                "KG_AGENT_WEB_CRAWLER_CONTENT_FILTER_THRESHOLD", 0.48
+            ),
+            prefer_fit_markdown=_env_bool(
+                "KG_AGENT_WEB_CRAWLER_PREFER_FIT_MARKDOWN", True
             ),
             llm_extraction_enabled=_env_bool(
                 "KG_AGENT_WEB_CRAWLER_LLM_EXTRACTION_ENABLED", False
@@ -647,6 +659,8 @@ class SchedulerConfig:
     check_interval_seconds: int = 60
     sources_file: str = ""
     state_file: str = "scheduler_state.json"
+    bootstrap_sources_json: Any = field(default_factory=list)
+    bootstrap_sources_file: str = ""
     coordination_backend: str = "auto"
     coordination_redis_url: str = ""
     coordination_ttl_seconds: int = 120
@@ -665,6 +679,12 @@ class SchedulerConfig:
                 "KG_AGENT_SCHEDULER_STATE_FILE", "scheduler_state.json"
             ).strip()
             or "scheduler_state.json",
+            bootstrap_sources_json=_env_json(
+                "KG_AGENT_SCHEDULER_BOOTSTRAP_SOURCES_JSON", []
+            ),
+            bootstrap_sources_file=os.getenv(
+                "KG_AGENT_SCHEDULER_BOOTSTRAP_SOURCES_FILE", ""
+            ).strip(),
             coordination_backend=os.getenv(
                 "KG_AGENT_SCHEDULER_COORDINATION_BACKEND", "auto"
             ).strip()
@@ -869,6 +889,7 @@ class APIConfig:
 @dataclass
 class AgentRuntimeConfig:
     default_workspace: str = ""
+    network_ingest_workspace: str = ""
     default_domain_schema: str = "economy"
     skills_dir: str = "skills"
     max_iterations: int = 3
@@ -880,9 +901,14 @@ class AgentRuntimeConfig:
 
     @classmethod
     def from_env(cls) -> "AgentRuntimeConfig":
+        default_workspace = os.getenv(
+            "KG_AGENT_DEFAULT_WORKSPACE", os.getenv("WORKSPACE", "")
+        ).strip()
         return cls(
-            default_workspace=os.getenv(
-                "KG_AGENT_DEFAULT_WORKSPACE", os.getenv("WORKSPACE", "")
+            default_workspace=default_workspace,
+            network_ingest_workspace=_first_env_value(
+                "KG_AGENT_NETWORK_INGEST_WORKSPACE",
+                "KG_AGENT_CRAWLER_WORKSPACE",
             ),
             default_domain_schema=(
                 os.getenv("KG_AGENT_DEFAULT_DOMAIN_SCHEMA", "economy").strip()

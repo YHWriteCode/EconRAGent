@@ -14,9 +14,20 @@ from urllib.parse import (
 )
 
 
-def extract_markdown_text(markdown_payload: Any) -> str:
+def extract_markdown_text(
+    markdown_payload: Any,
+    *,
+    prefer_fit_markdown: bool = True,
+) -> str:
     if markdown_payload is None:
         return ""
+    fit_markdown = (
+        getattr(markdown_payload, "fit_markdown", None)
+        if prefer_fit_markdown
+        else None
+    )
+    if isinstance(fit_markdown, str) and fit_markdown.strip():
+        return fit_markdown.strip()
     if isinstance(markdown_payload, str):
         return markdown_payload.strip()
     raw_markdown = getattr(markdown_payload, "raw_markdown", None)

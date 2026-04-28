@@ -60,6 +60,42 @@ describe("ChatPage", () => {
     expect(screen.queryByText("test__7f3b81")).not.toBeInTheDocument();
   });
 
+  it("sends the all-workspaces sentinel when no single workspace is selected", async () => {
+    apiMocks.getSessionMessages.mockResolvedValue({ session_id: "draft", messages: [] });
+    apiMocks.listWorkspaces.mockResolvedValue({ workspaces: [] });
+    apiMocks.streamChat.mockResolvedValue({
+      answer: "答案",
+      route: {},
+      tool_calls: [],
+      path_explanation: null,
+      metadata: {},
+      streaming_supported: true,
+    });
+
+    useAppStore.setState({
+      ...useAppStore.getState(),
+      currentWorkspaceId: "",
+      currentSessionId: "draft",
+      messagesBySession: { draft: [] },
+    });
+
+    renderWithProviders(<ChatPage />);
+
+    fireEvent.change(screen.getByPlaceholderText("有什么问题尽管问我..."), {
+      target: { value: "规模经济是什么？" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => {
+      expect(apiMocks.streamChat).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspace: "all",
+        }),
+        expect.any(Object),
+      );
+    });
+  });
+
   it("renders streaming assistant output and metadata badges", async () => {
     apiMocks.getSessionMessages.mockResolvedValue({ session_id: "draft", messages: [] });
     apiMocks.listWorkspaces.mockResolvedValue({

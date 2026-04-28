@@ -23,6 +23,7 @@ from kg_agent.config import (
     KGAgentConfig,
     MCPConfig,
     MCPServerConfig,
+    SchedulerConfig,
     SkillRuntimeConfig,
     ToolConfig,
 )
@@ -678,3 +679,73 @@ def test_create_app_starts_cross_session_background_maintenance():
     assert payload["cross_session_maintenance_running"] is True
     assert agent_core.cross_session_store.start_calls == 1
     assert agent_core.cross_session_store.close_calls == 1
+
+
+def test_create_app_bootstraps_scheduler_sources_from_file(tmp_path):
+    class _StubCrawlerAdapter:
+        async def close(self):
+            return None
+
+    class _StubAgentCore:
+        def __init__(self):
+            self.crawler_adapter = _StubCrawlerAdapter()
+            self.crawl_state_store = None
+            self.utility_llm_client = None
+
+        async def _resolve_rag(self, workspace=None):
+            return _FakeRAG()
+
+        async def chat(self, **kwargs):
+            return None
+
+        async def chat_stream(self, **kwargs):
+            if False:
+                yield None
+
+    sources_file = tmp_path / "sources.json"
+    state_file = tmp_path / "state.json"
+    bootstrap_file = tmp_path / "bootstrap_sources.json"
+    bootstrap_file.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {
+                        "source_id": "default-feed",
+                        "name": "Default Feed",
+                        "urls": ["https://example.com/feed.xml"],
+                        "category": "economy",
+                        "source_type": "auto",
+                        "max_pages": 5,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = KGAgentConfig(
+        agent_model=AgentModelConfig(provider="disabled"),
+        tool_config=ToolConfig(enable_memory=False, enable_web_search=True),
+        scheduler=SchedulerConfig(
+            enable_scheduler=False,
+            sources_file=str(sources_file),
+            state_file=str(state_file),
+            bootstrap_sources_file=str(bootstrap_file),
+        ),
+        runtime=AgentRuntimeConfig(
+            default_workspace="manual-default",
+            network_ingest_workspace="kg_agent_network",
+            max_iterations=1,
+        ),
+    )
+    app = create_app(agent_core=_StubAgentCore(), config=config)
+
+    with TestClient(app) as client:
+        response = client.get("/agent/sources")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["source_id"] for item in payload["sources"]] == ["default-feed"]
+    source = payload["sources"][0]
+    assert source["workspace"] == "kg_agent_network"
+    assert source["resolved_source_type"] == "feed"
+    assert source["resolved_schedule_mode"] == "adaptive_feed"

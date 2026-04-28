@@ -481,7 +481,7 @@ export function ChatPage() {
         {
           query: text,
           session_id: sessionId,
-          workspace: currentWorkspaceId || undefined,
+          workspace: currentWorkspaceId || "all",
           query_mode: queryMode,
           force_web_search: resolveWebSearchOverride(webSearchMode),
           attachment_ids: attachmentIds,
