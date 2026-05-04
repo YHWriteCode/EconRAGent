@@ -1,0 +1,27 @@
+{
+  "code": "002594",
+  "overall_window": {
+    "start": "2026-04-01",
+    "end": "2026-04-29"
+  },
+  "trend_window": {
+    "start": "2026-04-29",
+    "end": "2026-05-29"
+  },
+  "volatility": {
+    "annualized": 0.2905523537469527,
+    "trend_window_annualized": 0.0,
+    "max_drawdown": -0.057608489672162366
+  },
+  "trend": {
+    "label": "not_uptrend",
+    "is_uptrend": false,
+    "trend_window_return": 0.0,
+    "full_window_return": 0.011203117389186446,
+    "price_slope": null,
+    "last_close": 103.8,
+    "sma20": 101.8375,
+    "sma60": 101.8375
+  },
+  "summary": "标的 002594 在 2026-04-01 至 2026-04-29 的区间内，年化波动率约为 29.06%，最大回撤约为 5.76%。在 2026-04-29 至 2026-05-29 的趋势窗口内，区间收益率约为 0.00%，判断结果为：未形成明确上涨趋势。"
+}
