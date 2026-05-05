@@ -238,12 +238,12 @@ describe("ChatPage", () => {
       });
       handlers.onEvent?.({
         type: "tool_result",
-        tool_call: { name: "web_search" },
+        tool_call: { tool: "web_search", success: true },
       });
       return {
         answer: "第一段\n最终答案",
         route: {},
-        tool_calls: [{ name: "web_search" }],
+        tool_calls: [{ tool: "web_search", success: true }],
         path_explanation: null,
         metadata: {
           effective_query_mode: "hybrid",
@@ -285,9 +285,49 @@ describe("ChatPage", () => {
       ).toBeInTheDocument();
     });
     expect(screen.getByText("检索模式 hybrid")).toBeInTheDocument();
-    expect(screen.getByText("联网强制开启")).toBeInTheDocument();
+    expect(screen.getByText("联网")).toBeInTheDocument();
+    expect(screen.queryByText("联网强制开启")).not.toBeInTheDocument();
+    expect(screen.queryByText("联网强制关闭")).not.toBeInTheDocument();
     expect(screen.getByText("工具调用 1 次")).toBeInTheDocument();
     expect(screen.getAllByText("联网搜索").length).toBeGreaterThan(0);
+  });
+
+  it("does not show a web-search badge for forced or failed web search", async () => {
+    apiMocks.getSessionMessages.mockResolvedValue({ session_id: "draft", messages: [] });
+    apiMocks.listWorkspaces.mockResolvedValue({ workspaces: [] });
+    apiMocks.streamChat.mockResolvedValue({
+      answer: "搜索工具没有返回可用结果。",
+      route: {},
+      tool_calls: [{ tool: "web_search", success: false }],
+      path_explanation: null,
+      metadata: {
+        effective_query_mode: "hybrid",
+        web_search_forced: true,
+      },
+      streaming_supported: true,
+    });
+
+    useAppStore.setState({
+      ...useAppStore.getState(),
+      currentWorkspaceId: "",
+      currentSessionId: "draft",
+      messagesBySession: { draft: [] },
+    });
+
+    renderWithProviders(<ChatPage />);
+
+    fireEvent.change(screen.getByPlaceholderText("有什么问题尽管问我..."), {
+      target: { value: "查询最新新闻" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("搜索工具没有返回可用结果。")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("联网")).not.toBeInTheDocument();
+    expect(screen.queryByText("联网强制开启")).not.toBeInTheDocument();
+    expect(screen.queryByText("联网强制关闭")).not.toBeInTheDocument();
+    expect(screen.getByText("工具调用 1 次")).toBeInTheDocument();
   });
 
   it("rejects unsupported .doc chat attachments and keeps the picker limited to supported formats", async () => {

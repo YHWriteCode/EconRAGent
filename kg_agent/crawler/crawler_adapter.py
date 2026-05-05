@@ -100,9 +100,10 @@ class Crawl4AIAdapter:
         url: str,
         *,
         max_content_chars: int | None = None,
+        article_selectors: bool = True,
     ) -> CrawledPage:
         await self.start()
-        run_config = self._build_run_config()
+        run_config = self._build_run_config(article_selectors=article_selectors)
         result = await self._crawler.arun(url=url, config=run_config)
         return self._normalize_result(
             url=url,
@@ -222,6 +223,7 @@ class Crawl4AIAdapter:
         search_page = await self.crawl_url(
             search_url,
             max_content_chars=max(self.config.max_content_chars, 8000),
+            article_selectors=False,
         )
         if not search_page.success:
             return []
@@ -270,19 +272,22 @@ class Crawl4AIAdapter:
             return cache_mode
         return getattr(crawl4ai.CacheMode, "BYPASS")
 
-    def _build_run_config(self):
+    def _build_run_config(self, *, article_selectors: bool = True):
         crawl4ai = self._import_crawl4ai()
         extraction_strategy = self._build_extraction_strategy(crawl4ai)
+        css_selector = None
+        if article_selectors:
+            css_selector = (
+                "article, main, [role='main'], .article, .article-content, "
+                ".post-content, #content"
+            )
         return crawl4ai.CrawlerRunConfig(
             cache_mode=self._resolve_cache_mode(crawl4ai),
             word_count_threshold=self.config.word_count_threshold,
             page_timeout=self.config.page_timeout_ms,
             markdown_generator=self._build_markdown_generator(crawl4ai),
             only_text=True,
-            css_selector=(
-                "article, main, [role='main'], .article, .article-content, "
-                ".post-content, #content"
-            ),
+            css_selector=css_selector,
             excluded_selector=(
                 "nav, footer, aside, form, [role='navigation'], "
                 ".nav, .navbar, .menu, .footer, .site-footer, .sidebar, "

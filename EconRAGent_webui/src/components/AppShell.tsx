@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useShallow } from "zustand/react/shallow";
 
+import { Icon } from "./Icons";
 import { Modal } from "./Modal";
 import { deleteSession, listSessions, listWorkspaces } from "../lib/api";
 import { truncate } from "../lib/format";
@@ -241,9 +242,7 @@ export function AppShell() {
             type="button"
             onClick={() => navigate("/spaces")}
           >
-            <span className="sidebar-space-icon" aria-hidden="true">
-              ◇
-            </span>
+            <Icon className="sidebar-space-icon" name="database" />
             <span>空间</span>
           </button>
           <div className="sidebar-subtitle">
@@ -311,7 +310,7 @@ export function AppShell() {
             aria-label="账号设置"
             onClick={openAccountDialog}
           >
-            ⚙
+            <Icon name="settings" />
           </button>
         </footer>
       </aside>
@@ -326,7 +325,7 @@ export function AppShell() {
                 }
                 to="/graph"
               >
-                <span className="nav-icon" aria-hidden="true">⌘</span>
+                <Icon className="nav-icon" name="graph" />
                 知识图谱
               </NavLink>
               <NavLink
@@ -335,7 +334,7 @@ export function AppShell() {
                 }
                 to="/chat"
               >
-                <span className="nav-icon" aria-hidden="true">○</span>
+                <Icon className="nav-icon" name="chat" />
                 对话
               </NavLink>
               <NavLink
@@ -344,13 +343,10 @@ export function AppShell() {
                 }
                 to="/discover"
               >
-                <span className="nav-icon" aria-hidden="true">◎</span>
+                <Icon className="nav-icon" name="discover" />
                 发现
               </NavLink>
             </nav>
-            <button className="notification-button" type="button" aria-label="通知">
-              ♢
-            </button>
           </header>
         ) : null}
 

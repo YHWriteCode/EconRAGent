@@ -123,6 +123,34 @@ def test_crawler_adapter_builds_llm_extraction_strategy(monkeypatch):
     )
 
 
+def test_crawler_adapter_can_disable_article_selectors_for_search_pages(monkeypatch):
+    captured = {}
+
+    class _FakeCrawlerRunConfig:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    class _FakeDefaultMarkdownGenerator:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    fake_crawl4ai = SimpleNamespace(
+        CacheMode=SimpleNamespace(BYPASS="BYPASS"),
+        CrawlerRunConfig=_FakeCrawlerRunConfig,
+        PruningContentFilter=lambda **kwargs: SimpleNamespace(kwargs=kwargs),
+        DefaultMarkdownGenerator=_FakeDefaultMarkdownGenerator,
+    )
+    adapter = Crawl4AIAdapter(config=CrawlerConfig())
+
+    monkeypatch.setattr(adapter, "_import_crawl4ai", lambda: fake_crawl4ai)
+
+    adapter._build_run_config(article_selectors=False)
+
+    assert captured["css_selector"] is None
+    assert captured["only_text"] is True
+    assert ".related" in captured["excluded_selector"]
+
+
 def test_crawler_adapter_prefers_llm_extracted_content_when_configured():
     page = Crawl4AIAdapter._normalize_result(
         url="https://example.com/a",

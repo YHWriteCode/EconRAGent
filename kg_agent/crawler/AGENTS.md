@@ -52,6 +52,7 @@ crawler/
 
 - Direct URL mode crawls user-provided URLs.
 - Discovery mode crawls a DuckDuckGo results page, extracts candidate URLs, ranks them, and then crawls the selected pages.
+- Search-result discovery pages should not use the article-only CSS selector set (`article`, `main`, `[role=main]`, etc.); those selectors are for final article pages and can filter search results down to an empty payload.
 - Feed-aware scheduling adds source typing, canonical URL tracking, retention windows, dedup, and optional short-term news lifecycle behavior.
 - Crawl4AI page results should prefer filtered article/body markdown (`fit_markdown`) when available so recurring news ingest stores concrete article content instead of site navigation, home-page chrome, or listing widgets.
 - Scheduler coordination supports local leases and optional Redis leases so multiple workers do not process the same source loop blindly.

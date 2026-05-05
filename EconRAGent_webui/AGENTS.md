@@ -73,6 +73,7 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 ## 6. Current WebUI Layout Conventions
 
 - `AppShell` owns the shared left sidebar and top navigation for `chat`, `graph`, and `discover`.
+- Reuse `src/components/Icons.tsx` for shared line icons in navigation, composer controls, and compact action buttons; avoid bare Unicode glyphs for primary controls when a stable SVG icon exists.
 - The `spaces` route is a standalone management page: keep the left sidebar, hide the top navigation, and provide its own close/create controls.
 - The `spaces` file import dialog should advertise and client-filter the same document formats supported by the API import path: Word `.docx`, PDF, Markdown `.md`/`.markdown`, and EPUB.
 - Avoid using visual-only movement such as `transform` for major layout placement when it affects scroll boundaries; prefer real grid/flex layout space.
@@ -81,6 +82,7 @@ If frontend source changes, make sure the build step refreshes `kg_agent/api/web
 - `discover` is a news/feed page and may use normal page scrolling.
 - Discover news cards should render a useful title even when crawler event clustering returns an empty headline; fall back to summary text or source labels rather than showing backend placeholders.
 - Preserve the chat composer contract: attachment/search menu from the `+` button, retrieval mode buttons below the input, and auto-growing textarea with an internal max-height.
+- Chat answer badges should describe actual backend outcomes. Show `联网` only when a `web_search` tool call succeeded; do not render the `force_web_search` request override as “强制开启/关闭”.
 - Preserve the WebUI memory contract: keep a stable browser-local `localUserId`, allow the sidebar account login to set an explicit `userAccountId`, default `memoryEnabled=true`, send the active account id plus `use_memory` on chat requests, and scope session history queries by that user while memory is enabled.
 - Chat attachment picking is narrower than workspace import: the composer should client-filter to the file formats the chat attachment pipeline can actually read today, and it should reject unsupported legacy binaries such as `.doc` before upload.
 - The chat composer knowledge-base chip should display the workspace `display_name` only. Keep the internal `workspace_id` for API requests and graph/chat filter synchronization, but do not expose uniqueness suffixes or other backend-only identifiers in the visible label.

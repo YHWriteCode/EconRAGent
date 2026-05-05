@@ -13,6 +13,7 @@ import type { Core } from "cytoscape";
 import { useSearchParams } from "react-router-dom";
 import { useShallow } from "zustand/react/shallow";
 
+import { Icon } from "../components/Icons";
 import {
   getGraphData,
   getGraphEntityDetail,
@@ -515,7 +516,7 @@ export function GraphPage() {
               aria-label="定位节点"
               onClick={requestGraphFocus}
             >
-              ⌘
+              <Icon name="search" />
             </button>
             {filterCollapsed ? (
               <button

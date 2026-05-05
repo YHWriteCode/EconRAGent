@@ -202,6 +202,14 @@ EconRAGent/
 - 通过 `mcp-server/` 容器化运行时实现隔离执行、可持久化队列（SQLite）、工件追踪
 - 内置技能示例：`skills/financial-researching/`（面板数据建模、AKShare/yfinance 行情获取、本地回测）
 
+#### **执行链路（基于 MCP 与 Docker 容器化）：**
+1. **任务分发**：用户任务触发 Agent，Agent 从 `SkillRegistry` 选中目标技能并读取 `SKILL.md` 配置。
+2. **生成计划**：LLM 推断参数、输入/输出路径，将自然语言转换为结构化执行计划（支持保守执行或自由 Shell）。
+3. **MCP 通信传输**：宿主机通过 MCP 协议将计划发送至 `mcp-server`。
+4. **容器沙箱运行**：
+   - Bootstrap 按需挂载并预热运行环境（依赖 Hash 隔离）。
+   - 在独立的 `/workspace` 目录下执行金融组件（如 AKShare/yfinance）。
+5. **持久化与返回**：基于 SQLite 队列管理状态，运行日志与产物通过共享挂载（`skill_output/`）返回给宿主 Agent 生成最终响应。
 ---
 
 ## 8. 记忆系统

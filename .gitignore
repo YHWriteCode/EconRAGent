@@ -215,3 +215,7 @@ EconRAGent_webui/.vite/
 !EconRAGent_webui/src/lib/
 !EconRAGent_webui/src/lib/**
 npm-debug.log*
+/scheduler_state.json
+/skill_output/
+/rag_storage/
+/runs/

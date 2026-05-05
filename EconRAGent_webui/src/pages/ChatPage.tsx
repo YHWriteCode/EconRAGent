@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useShallow } from "zustand/react/shallow";
 
+import { Icon } from "../components/Icons";
 import {
   getSessionMessages,
   listWorkspaces,
@@ -301,6 +302,22 @@ function resolveToolCalls(metadata: Record<string, unknown>): unknown[] {
     return metadata.compact_tool_calls;
   }
   return [];
+}
+
+function readToolName(toolCall: unknown): string {
+  const typed = readObject(toolCall);
+  const value = typed?.tool ?? typed?.name;
+  return typeof value === "string" ? value : "";
+}
+
+function hasSuccessfulWebSearch(toolCalls: unknown[]): boolean {
+  return toolCalls.some((toolCall) => {
+    const typed = readObject(toolCall);
+    if (!typed || readToolName(typed) !== "web_search") {
+      return false;
+    }
+    return typed.success === true;
+  });
 }
 
 export function ChatPage() {
@@ -644,18 +661,14 @@ export function ChatPage() {
           type="button"
           onClick={() => fileInputRef.current?.click()}
         >
-          <span className="menu-item-icon" aria-hidden="true">
-            ↑
-          </span>
+          <Icon className="menu-item-icon" name="upload" />
           <span>
             <strong>上传文件</strong>
             <small>{CHAT_ATTACHMENT_HELP_TEXT}</small>
           </span>
         </button>
         <div className="upload-menu-item upload-menu-switch">
-          <span className="menu-item-icon" aria-hidden="true">
-            ◎
-          </span>
+          <Icon className="menu-item-icon" name="globe" />
           <span>
             <strong>联网搜索</strong>
             <small>手动控制联网搜索</small>
@@ -670,9 +683,7 @@ export function ChatPage() {
           </button>
         </div>
         <div className="upload-menu-item upload-menu-switch">
-          <span className="menu-item-icon" aria-hidden="true">
-            ◌
-          </span>
+          <Icon className="menu-item-icon" name="memory" />
           <span>
             <strong>记忆</strong>
             <small>启用会话和跨会话上下文</small>
@@ -715,9 +726,7 @@ export function ChatPage() {
                 +
               </button>
               <button className="workspace-chip" type="button">
-                <span className="workspace-chip-icon" aria-hidden="true">
-                  ◉
-                </span>
+                <Icon className="workspace-chip-icon" name="database" />
                 {currentWorkspaceLabel}
               </button>
             </div>
@@ -732,7 +741,7 @@ export function ChatPage() {
                 type="button"
                 onClick={() => handleSend()}
               >
-                {isSending ? "..." : ">"}
+                {isSending ? "..." : <Icon name="chevronRight" />}
               </button>
             </div>
           </div>
@@ -776,6 +785,7 @@ export function ChatPage() {
               {sessionMessages.map((message) => {
                 const cardMetadata = readObject(message.metadata.response_metadata);
                 const toolCalls = resolveToolCalls(message.metadata);
+                const showWebSearchBadge = hasSuccessfulWebSearch(toolCalls);
                 const skillArtifacts =
                   message.role === "assistant" ? collectSkillArtifacts(toolCalls) : [];
                 const attachments = Array.isArray(message.metadata.attachments)
@@ -818,11 +828,8 @@ export function ChatPage() {
                             检索模式 {String(cardMetadata.effective_query_mode)}
                           </span>
                         ) : null}
-                        {cardMetadata.web_search_forced === true ? (
-                          <span className="tag">联网强制开启</span>
-                        ) : null}
-                        {cardMetadata.web_search_forced === false ? (
-                          <span className="tag">联网强制关闭</span>
+                        {showWebSearchBadge ? (
+                          <span className="tag">联网</span>
                         ) : null}
                         {cardMetadata.user_id ? (
                           <span className="tag">记忆已接入</span>

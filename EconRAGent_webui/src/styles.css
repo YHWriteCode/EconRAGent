@@ -424,8 +424,7 @@ p {
 .topbar {
   position: relative;
   z-index: 10;
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  display: flex;
   align-items: center;
   justify-content: center;
   padding: 10px 24px 4px;
@@ -433,7 +432,6 @@ p {
 }
 
 .topnav {
-  grid-column: 2;
   display: inline-flex;
   align-items: center;
   gap: 0;
@@ -467,8 +465,16 @@ p {
 }
 
 .nav-icon {
-  font-size: 18px;
-  line-height: 1;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.app-icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
 }
 
 .notification-button {
@@ -1163,7 +1169,8 @@ textarea,
 }
 
 .workspace-chip-icon {
-  font-size: 13px;
+  width: 15px;
+  height: 15px;
 }
 
 .composer-meta-note {
@@ -1182,6 +1189,11 @@ textarea,
   background: #302f2a;
   border-color: #302f2a;
   color: #f7f3ee;
+}
+
+.composer-send-button .app-icon {
+  width: 18px;
+  height: 18px;
 }
 
 .upload-menu,
@@ -1251,6 +1263,8 @@ textarea,
 }
 
 .menu-item-icon {
+  width: 20px;
+  height: 20px;
   color: var(--ink);
 }
 
